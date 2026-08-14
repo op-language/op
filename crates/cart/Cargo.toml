@@ -1,0 +1,24 @@
+[package]
+name = "cart"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The Op build tool and package manager"
+
+[[bin]]
+name = "cart"
+path = "src/main.rs"
+
+[dependencies]
+op-common.workspace = true
+op-target.workspace = true
+op-diagnostics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+toml.workspace = true

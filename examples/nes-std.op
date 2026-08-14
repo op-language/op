@@ -1,0 +1,78 @@
+//! NES Standard Library
+//!
+//! Platform constants, register definitions, and struct types
+//! for the Nintendo Entertainment System.
+//!
+//! This file is normally shipped as part of the nes-std crate.
+//! It is shown here as a standalone source file for demonstration.
+
+// --- conditional constants -------------------------------------------------
+
+#[cfg(variant = "ntsc")]
+const REFRESH_HZ: u8 = 60;
+
+#[cfg(variant = "pal")]
+const REFRESH_HZ: u8 = 50;
+
+// --- PPU registers ---------------------------------------------------------
+
+enum PPU {
+    CNT0      = 0x2000,
+    CNT1      = 0x2001,
+    STATUS    = 0x2002,
+    ADDRESS   = 0x2006,
+    IO        = 0x2007,
+    BG_SCROLL = 0x2005,
+}
+
+// --- PPU sprite registers --------------------------------------------------
+
+enum SPR {
+    ADDRESS = 0x2003,
+    IO      = 0x2004,
+    DMA     = 0x4014,
+}
+
+// --- PPU control register bitmasks -----------------------------------------
+
+const CR_NMI: u8            = %10000000;
+const CR_BACKVISIBLE: u8    = %00001000;
+const CR_BACKNOCLIP: u8     = %00000010;
+const CR_SPRITESVISIBLE: u8 = %00010000;
+
+// --- PPU status flags ------------------------------------------------------
+
+const ST_VBLANK: u8 = %10000000;
+
+// --- palette and name table addresses --------------------------------------
+
+const PAL_ADDRESS: u16          = 0x3F00;
+const NAME_TABLE_0_ADDRESS: u16 = 0x2000;
+
+// --- background colors -----------------------------------------------------
+
+enum COLOUR {
+    BLUE   = 0x01,
+    RED    = 0x05,
+    YELLOW = 0x07,
+    GREEN  = 0x09,
+}
+
+// --- struct types ----------------------------------------------------------
+
+struct OAM_ENTRY {
+    y: u8,
+    tile: u8,
+    attributes: u8,
+    x: u8,
+}
+
+struct SCROLL {
+    flags: u8,
+    x: u16,
+    y: u16,
+}
+
+// --- type aliases ----------------------------------------------------------
+
+type OAM_BUFFER = [OAM_ENTRY; 64];

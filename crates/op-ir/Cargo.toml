@@ -1,0 +1,15 @@
+[package]
+name = "op-ir"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Intermediate representation types for the Op compiler and linker"
+
+[dependencies]
+op-common.workspace = true
+op-target.workspace = true
+serde.workspace = true
+serde_json.workspace = true

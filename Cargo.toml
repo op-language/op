@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/op-common",
+    "crates/op-target",
+    "crates/op-ir",
+    "crates/op-diagnostics",
+    "crates/opc",
+    "crates/cart",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Dave Huseby <dave@linuxprogrammer.org>"]
+license = "BSD-2-Clause"
+repository = "https://github.com/wookie/op"
+homepage = "https://github.com/wookie/op"
+
+[workspace.dependencies]
+op-common = { path = "crates/op-common" }
+op-target = { path = "crates/op-target" }
+op-ir = { path = "crates/op-ir" }
+op-diagnostics = { path = "crates/op-diagnostics" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+logos = "0.16"
+lalrpop = "0.23"
+lalrpop-util = "0.23"
+clap = { version = "4", features = ["derive"] }
+toml = "1.1"
+
+[profile.release]
+opt-level = 1
