@@ -6,7 +6,7 @@
 //! flag is set.
 //!
 //! The full tokenizer uses the `logos` crate and loads target-specific opcode
-//! mnemonics from the bank in `~/.carts/`. This module provides the scaffolding
+//! mnemonics from the lib in `~/.carts/`. This module provides the scaffolding
 //! for that logic.
 
 use anyhow::Result;
@@ -53,7 +53,7 @@ pub fn lex_source(file: &str, source: &str) -> TokenStream {
     stream
 }
 
-/// Classify a raw token string. The full implementation looks up the bank
+/// Classify a raw token string. The full implementation looks up the lib
 /// table; this placeholder treats every token as an identifier.
 fn classify(token: &str) -> String {
     if token.chars().all(|c| c.is_ascii_digit()) {

@@ -19,7 +19,7 @@ enum STATUS {
 
 // --- Registers -------------------------------------------------------------
 //
-// The bank defines cpu::a, cpu::x, and cpu::y as register references for
+// The lib defines cpu::a, cpu::x, and cpu::y as register references for
 // use in switch statements and operand expressions.
 
 enum CPU_REG {
@@ -30,7 +30,7 @@ enum CPU_REG {
 
 // --- Condition keywords ----------------------------------------------------
 //
-// The bank defines the following condition keywords for if, while, and
+// The lib defines the following condition keywords for if, while, and
 // do-while tests. The modifier keywords is, has, no, and not may prefix a
 // condition. The compiler treats them as no-ops.
 
@@ -56,7 +56,7 @@ enum COND {
 // --- Opcode mnemonics ------------------------------------------------------
 //
 // The 6502 opcode table lists each mnemonic and the legal addressing modes.
-// The bank defines these as the set of valid opcode tokens for the lexer.
+// The lib defines these as the set of valid opcode tokens for the lexer.
 
 enum OPCODE {
     ADC,
@@ -119,7 +119,7 @@ enum OPCODE {
 
 // --- Undocumented opcodes --------------------------------------------------
 //
-// The 6502 has undocumented opcodes that real hardware executes. The bank
+// The 6502 has undocumented opcodes that real hardware executes. The lib
 // defines them as legal mnemonics. A program may use them with
 // #[cfg(feature = "undocumented")].
 
@@ -148,7 +148,7 @@ enum UNDOC_OPCODE {
 
 // --- Addressing modes ------------------------------------------------------
 //
-// The bank defines the addressing mode prefix names.
+// The lib defines the addressing mode prefix names.
 
 enum ADDR_MODE {
     zp,
@@ -161,7 +161,7 @@ enum ADDR_MODE {
 
 // --- Interrupt vectors -----------------------------------------------------
 //
-// The 6502 supports three interrupt vectors. The bank defines the names
+// The 6502 supports three interrupt vectors. The lib defines the names
 // reset, nmi, and irq for #[interrupt(...)].
 
 enum INTERRUPT {

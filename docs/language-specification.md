@@ -53,11 +53,11 @@ family includes the 6502, 65SC02, Ricoh 2A03, and Ricoh 2A07.
 **platform**
 The machine and variant portion of a triplet. Example: `nintendo-nes-ntsc`.
 
-**bank**
-A library of Op code. A bank provides the CPU module, the register
+**lib**
+A library of Op code. A lib provides the CPU module, the register
 definitions, the memory-mapped IO addresses, the platform constants, and the
-standard inline macros for one target. Banks are installed in `~/.carts/` by
-the `cart` tool. A bank is the Op equivalent of a Rust crate.
+standard inline macros for one target. Libs are installed in `~/.carts/` by
+the `cart` tool. A lib is the Op equivalent of a Rust crate.
 
 **selector**
 A path expression that names a field, a constant, or an offset. Selectors use
@@ -326,7 +326,7 @@ enum PPU {
 
 A program references a constant as `PPU::CNT0`.
 
-The CPU and platform banks define the enum groups for registers and
+The CPU and platform libs define the enum groups for registers and
 memory-mapped IO. The compiler does not hard-code these names.
 
 ### Pointer type
@@ -555,7 +555,7 @@ fn foo() {
 ### interrupt handler declarations
 
 The `#[interrupt(name)]` attribute marks a function as an interrupt handler.
-The name depends on the CPU family. The bank defines the valid names.
+The name depends on the CPU family. The lib defines the valid names.
 
 ```
 #[interrupt(reset)]
@@ -782,7 +782,7 @@ else {
 }
 ```
 
-The condition expression uses target-specific test keywords. The bank defines
+The condition expression uses target-specific test keywords. The lib defines
 the valid keywords. See the Per-target tables section.
 
 The optional `near` or `far` keyword before the condition sets the branch
@@ -850,7 +850,7 @@ switch (cpu::x) {
 ```
 
 The switch expression uses the `cpu::` module path to name a register. The
-bank defines the register constants.
+lib defines the register constants.
 
 ### Labels
 
@@ -873,7 +873,7 @@ single-quote prefix.
 ### Opcode form
 
 An assembly statement begins with a CPU-specific opcode mnemonic. The opcode
-may take zero or more operands. The bank defines the opcode set and the
+may take zero or more operands. The lib defines the opcode set and the
 legal addressing modes for each opcode.
 
 ```
@@ -909,7 +909,7 @@ instructions, the assembler uses the relative form.
 The assembler emits a warning when the linker resolves a zero-page versus
 absolute ambiguity.
 
-A program may force an addressing mode with an explicit prefix. The bank
+A program may force an addressing mode with an explicit prefix. The lib
 defines the prefix names. If the linker finds that the explicit mode is not the
 optimal mode, the assembler emits a warning.
 
@@ -1031,25 +1031,25 @@ const FN_SIZE: u8 = sizeof!(main);
 const FILE_SIZE: u16 = sizeof!("game.bin");
 ```
 
-## Banks
+## Libs
 
-Each target ships as a set of banks. A CPU bank provides the `cpu` module with
+Each target ships as a set of libs. A CPU lib provides the `cpu` module with
 register constants, the opcode encoding table, the condition keywords, and the
-addressing mode definitions. A platform bank depends on a CPU bank and adds
+addressing mode definitions. A platform lib depends on a CPU lib and adds
 the memory-mapped IO addresses, the platform constants, and the standard
 inline macros.
 
-Example bank names: `mos6502-bank`, `nes-bank`, `z80-bank`, `lynx-bank`.
+Example lib names: `mos6502`, `nes`, `z80`, `lynx`.
 
-The `cart` tool installs banks in `~/.carts/`. The `Cart.toml` `[dependencies]`
-section lists the banks that a project uses. The `opc` compiler loads the
-banks at build time. A program may declare and use its own banks with `use`
+The `cart` tool installs libs in `~/.carts/`. The `Cart.toml` `[dependencies]`
+section lists the libs that a project uses. The `opc` compiler loads the
+libs at build time. A program may declare and use its own libs with `use`
 declarations.
 
 ## Target triplets
 
 A target triplet has the form `cpu-manufacturer-machine-variant`. The compiler
-selects the CPU bank, the platform bank, and the memory map from the triplet.
+selects the CPU lib, the platform lib, and the memory map from the triplet.
 
 The following table lists the normative triplets.
 
@@ -1099,7 +1099,7 @@ D (decimal), I (interrupt disable), Z (zero), C (carry).
 
 #### Condition keywords
 
-The bank defines the following condition keywords for `if`, `while`, and
+The lib defines the following condition keywords for `if`, `while`, and
 `do-while` tests.
 
 | Keyword | Flag tested | Branch opcode |
@@ -1126,7 +1126,7 @@ improve readability. The compiler treats them as no-ops.
 
 #### Registers
 
-The bank defines `cpu::a`, `cpu::x`, and `cpu::y` as register references for
+The lib defines `cpu::a`, `cpu::x`, and `cpu::y` as register references for
 use in `switch` statements and operand expressions.
 
 #### Opcodes
@@ -1194,7 +1194,7 @@ The 6502 opcode table lists each mnemonic and the legal addressing modes.
 
 #### Undocumented opcodes
 
-The 6502 has undocumented opcodes that real hardware executes. The bank
+The 6502 has undocumented opcodes that real hardware executes. The lib
 defines them as legal mnemonics. A program may use them with `#[cfg(feature =
 "undocumented")]`.
 
@@ -1223,7 +1223,7 @@ defines them as legal mnemonics. A program may use them with `#[cfg(feature =
 
 #### Interrupts
 
-The 6502 supports three interrupt vectors. The bank defines the names `reset`,
+The 6502 supports three interrupt vectors. The lib defines the names `reset`,
 `nmi`, and `irq` for `#[interrupt(...)]`.
 
 ### MOS 65SC02
@@ -1257,7 +1257,7 @@ The 65SC02 removes the undocumented opcodes.
 
 The Atari Lynx uses the 65SC02. The Lynx does not directly address cartridge
 ROM. All code runs from RAM. The Lynx supports the plain `interrupt` keyword
-form. The bank defines `irq` for `#[interrupt(...)]`. The programmer sets the
+form. The lib defines `irq` for `#[interrupt(...)]`. The programmer sets the
 interrupt vector registers at run time.
 
 ### Ricoh 2A03 / 2A07
@@ -1266,10 +1266,10 @@ The Ricoh 2A03 (NTSC) and 2A07 (PAL) are NMOS 6502 cores without binary-coded
 decimal mode. The opcode set and the addressing modes match the MOS 6502. The
 undocumented opcodes match the MOS 6502.
 
-The 2A03 includes on-die audio and DMA hardware. The bank defines the
+The 2A03 includes on-die audio and DMA hardware. The lib defines the
 memory-mapped IO addresses for the audio and DMA registers.
 
-The 2A07 differs from the 2A03 in the clock divider. The bank defines the
+The 2A07 differs from the 2A03 in the clock divider. The lib defines the
 `REFRESH_HZ` constant as 60 for the 2A03 and 50 for the 2A07.
 
 ### WDC 65C816
@@ -1280,7 +1280,7 @@ mode and a 16-bit index mode.
 
 #### Additional registers
 
-The bank defines `cpu::a`, `cpu::x`, `cpu::y`, `cpu::dbr` (data bank
+The lib defines `cpu::a`, `cpu::x`, `cpu::y`, `cpu::dbr` (data bank
 register), `cpu::pbr` (program bank register), and `cpu::dp` (direct page
 register).
 
@@ -1323,8 +1323,8 @@ registers and eight 32-bit address registers.
 
 #### Registers
 
-The bank defines `cpu::d0` through `cpu::d7` as data registers and `cpu::a0`
-through `cpu::a7` as address registers. The bank defines `cpu::usp` (user
+The lib defines `cpu::d0` through `cpu::d7` as data registers and `cpu::a0`
+through `cpu::a7` as address registers. The lib defines `cpu::usp` (user
 stack pointer), `cpu::ssp` (supervisor stack pointer), and `cpu::pc` (program
 counter).
 
@@ -1418,8 +1418,8 @@ counter).
 
 #### Interrupts
 
-The 68000 uses an interrupt priority level system. The bank defines
-`#[interrupt(level)]` where level is 1 to 7. The bank also defines
+The 68000 uses an interrupt priority level system. The lib defines
+`#[interrupt(level)]` where level is 1 to 7. The lib also defines
 `#[interrupt(trap)]` for trap vectors.
 
 ### Zilog Z80
@@ -1428,11 +1428,11 @@ The Zilog Z80 is an 8-bit CPU. The CPU extends the Intel 8080 instruction set.
 
 #### Registers
 
-The bank defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
-`cpu::l` as 8-bit registers. The bank defines `cpu::af`, `cpu::bc`, `cpu::de`,
-`cpu::hl` as 16-bit register pairs. The bank defines `cpu::ix`, `cpu::iy` as
-16-bit index registers. The bank defines `cpu::sp` (stack pointer) and
-`cpu::pc` (program counter). The bank defines the alternate register set
+The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
+`cpu::l` as 8-bit registers. The lib defines `cpu::af`, `cpu::bc`, `cpu::de`,
+`cpu::hl` as 16-bit register pairs. The lib defines `cpu::ix`, `cpu::iy` as
+16-bit index registers. The lib defines `cpu::sp` (stack pointer) and
+`cpu::pc` (program counter). The lib defines the alternate register set
 `cpu::af2`, `cpu::bc2`, `cpu::de2`, `cpu::hl2`.
 
 #### Condition keywords
@@ -1536,13 +1536,13 @@ several Z80 opcodes. The CPU adds the `STOP` and `LDI A, (HL)` opcodes.
 
 #### Registers
 
-The bank defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
-`cpu::l` as 8-bit registers. The bank defines `cpu::af`, `cpu::bc`, `cpu::de`,
-`cpu::hl` as 16-bit register pairs. The bank defines `cpu::sp` and `cpu::pc`.
+The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
+`cpu::l` as 8-bit registers. The lib defines `cpu::af`, `cpu::bc`, `cpu::de`,
+`cpu::hl` as 16-bit register pairs. The lib defines `cpu::sp` and `cpu::pc`.
 
 #### Opcodes
 
-The LR35902 opcode set is a subset of the Z80 set. The bank defines the legal
+The LR35902 opcode set is a subset of the Z80 set. The lib defines the legal
 opcodes. Additional opcodes: `STOP`, `LDI A`, `LDD A`, `LDH A`, `LDH (n)`.
 
 The LR35902 does **not** support the alternate register set, the `EXX`
@@ -1738,7 +1738,7 @@ A conforming implementation of the Op language must:
 3. Implement the type system as this document defines.
 4. Implement the conditional compilation system as this document defines.
 5. Implement the const expression evaluator as this document defines.
-6. Load the banks that match the target triplet from `~/.carts/`.
+6. Load the libs that match the target triplet from `~/.carts/`.
 7. Generate correct machine code for at least one target triplet in the
    normative table.
 
@@ -1747,7 +1747,7 @@ A conforming program must:
 1. Use only the grammar that this document defines.
 2. Use only the types that the target supports.
 3. Use only the opcodes, registers, and condition keywords that the target
-   bank defines.
+   lib defines.
 4. Use only the target triplets that this document lists.
 
 ## Future work
@@ -1760,4 +1760,4 @@ define them.
 3. Jump threading.
 4. Constant propagation across function calls.
 5. A foreign-function interface for linking with C or assembly object files.
-6. A package manager registry protocol for banks beyond git URLs.
+6. A package manager registry protocol for libs beyond git URLs.

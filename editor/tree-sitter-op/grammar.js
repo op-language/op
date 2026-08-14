@@ -5,7 +5,7 @@
 //
 // Op is a high-level assembler for retro game consoles. Source files use
 // the `.op` extension. The lexer classifies a statement-leading identifier
-// as an opcode if it matches the hard-coded CPU-family keyword set. Banks
+// as an opcode if it matches the hard-coded CPU-family keyword set. Libs
 // may define further opcodes; unknown statement-leading identifiers fall
 // back to a generic `identifier` node so the grammar still parses.
 

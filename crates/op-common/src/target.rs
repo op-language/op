@@ -1,7 +1,7 @@
 //! Target descriptor types.
 //!
 //! The [`TargetTriplet`] parses the `cpu-manufacturer-machine-variant` string
-//! defined in the language specification. Banks and the registry use the
+//! defined in the language specification. Libs and the registry use the
 //! triplet to select the CPU family and the platform.
 
 use serde::{Deserialize, Serialize};

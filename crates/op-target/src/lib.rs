@@ -1,11 +1,11 @@
 //! The `op-target` crate.
 //!
-//! This crate defines the [`Target`] trait that every CPU and platform bank
+//! This crate defines the [`Target`] trait that every CPU and platform lib
 //! implements. The compiler, the parser, and the linker query the target
 //! through this trait. No binary hard-codes a target.
 //!
 //! The crate also provides a [`Registry`] that maps a target triplet string
-//! to a [`Target`] constructor. The registry loads banks from `~/.carts/` at
+//! to a [`Target`] constructor. The registry loads libs from `~/.carts/` at
 //! build time as described in the technical design section "Target
 //! abstraction".
 
@@ -50,21 +50,21 @@ pub trait Target: Send + Sync {
     fn output_format(&self) -> OutputFormat;
 }
 
-/// An opcode definition from a CPU bank.
+/// An opcode definition from a CPU lib.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpcodeDef {
     pub mnemonic: &'static str,
     pub modes: &'static [&'static str],
 }
 
-/// A register definition from a CPU bank.
+/// A register definition from a CPU lib.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterDef {
     pub name: &'static str,
     pub size: u8,
 }
 
-/// A condition keyword definition from a CPU bank.
+/// A condition keyword definition from a CPU lib.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionDef {
     pub keyword: &'static str,
@@ -72,13 +72,13 @@ pub struct ConditionDef {
     pub branch_opcode: &'static str,
 }
 
-/// An addressing mode definition from a CPU bank.
+/// An addressing mode definition from a CPU lib.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressingModeDef {
     pub name: &'static str,
 }
 
-/// An interrupt vector definition from a CPU bank.
+/// An interrupt vector definition from a CPU lib.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterruptVectorDef {
     pub name: &'static str,
