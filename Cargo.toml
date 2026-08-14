@@ -5,17 +5,16 @@ members = [
     "crates/op-ir",
     "crates/op-diagnostics",
     "crates/opc",
-    "crates/cart",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Dave Huseby <dave@linuxprogrammer.org>"]
-license = "BSD-2-Clause"
-repository = "https://github.com/wookie/op"
-homepage = "https://github.com/wookie/op"
+authors = ["Dave Grantham <dwg@linuxprogrammer.org>"]
+license = "Apache 2.0"
+repository = "https://github.com/op-language/op"
+homepage = "https://github.com/op-language/op"
 
 [workspace.dependencies]
 op-common = { path = "crates/op-common" }
