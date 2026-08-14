@@ -1,0 +1,31 @@
+{
+  "name": "tree-sitter-op",
+  "version": "0.1.0",
+  "description": "Op grammar for tree-sitter",
+  "license": "Apache-2.0",
+  "author": "Dave Grantham <dwg@linuxprogrammer.org>",
+  "repository": "https://github.com/op-language/op",
+  "main": "grammar.js",
+  "keywords": [
+    "tree-sitter",
+    "op",
+    "hlacc",
+    "hla"
+  ],
+  "tree-sitter": [
+    {
+      "scope": "source.op",
+      "file-types": ["op"],
+      "injection-regex": "^op$"
+    }
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "build": "tree-sitter build",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  }
+}

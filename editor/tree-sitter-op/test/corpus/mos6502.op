@@ -1,0 +1,171 @@
+//! MOS 6502 CPU Family
+//!
+//! Status flags, registers, condition keywords, opcode mnemonics,
+//! addressing modes, and interrupt vector names for the MOS 6502 CPU
+//! family. This includes the MOS 6502, the MOS 65SC02, the Ricoh 2A03,
+//! and the Ricoh 2A07.
+
+// --- Status flags ----------------------------------------------------------
+
+enum STATUS {
+    N = 0x80,
+    V = 0x40,
+    B = 0x10,
+    D = 0x08,
+    I = 0x04,
+    Z = 0x02,
+    C = 0x01,
+}
+
+// --- Registers -------------------------------------------------------------
+//
+// The bank defines cpu::a, cpu::x, and cpu::y as register references for
+// use in switch statements and operand expressions.
+
+enum CPU_REG {
+    a = 0,
+    x = 1,
+    y = 2,
+}
+
+// --- Condition keywords ----------------------------------------------------
+//
+// The bank defines the following condition keywords for if, while, and
+// do-while tests. The modifier keywords is, has, no, and not may prefix a
+// condition. The compiler treats them as no-ops.
+
+enum COND {
+    plus       = 0,
+    positive   = 0,
+    minus      = 1,
+    negative   = 1,
+    greater    = 0,
+    less       = 1,
+    overflow   = 2,
+    carry      = 3,
+    nonzero    = 4,
+    set        = 4,
+    true       = 4,
+    zero       = 5,
+    unset      = 5,
+    false      = 5,
+    clear      = 5,
+    equal      = 5,
+}
+
+// --- Opcode mnemonics ------------------------------------------------------
+//
+// The 6502 opcode table lists each mnemonic and the legal addressing modes.
+// The bank defines these as the set of valid opcode tokens for the lexer.
+
+enum OPCODE {
+    ADC,
+    AND,
+    ASL,
+    BCC,
+    BCS,
+    BEQ,
+    BIT,
+    BMI,
+    BNE,
+    BPL,
+    BRK,
+    BVC,
+    BVS,
+    CLC,
+    CLD,
+    CLI,
+    CLV,
+    CMP,
+    CPX,
+    CPY,
+    DEC,
+    DEX,
+    DEY,
+    EOR,
+    INC,
+    INX,
+    INY,
+    JMP,
+    JSR,
+    LDA,
+    LDX,
+    LDY,
+    LSR,
+    NOP,
+    ORA,
+    PHA,
+    PHP,
+    PLA,
+    PLP,
+    ROL,
+    ROR,
+    RTI,
+    RTS,
+    SBC,
+    SEC,
+    SED,
+    SEI,
+    STA,
+    STX,
+    STY,
+    TAX,
+    TAY,
+    TSX,
+    TXA,
+    TXS,
+    TYA,
+}
+
+// --- Undocumented opcodes --------------------------------------------------
+//
+// The 6502 has undocumented opcodes that real hardware executes. The bank
+// defines them as legal mnemonics. A program may use them with
+// #[cfg(feature = "undocumented")].
+
+#[cfg(feature = "undocumented")]
+enum UNDOC_OPCODE {
+    ALR,
+    ANC,
+    ANE,
+    ARR,
+    DCP,
+    ISC,
+    LAS,
+    LAX,
+    LXA,
+    RLA,
+    RRA,
+    SAX,
+    SHA,
+    SHX,
+    SHY,
+    SLO,
+    SRE,
+    TAS,
+    USBC,
+}
+
+// --- Addressing modes ------------------------------------------------------
+//
+// The bank defines the addressing mode prefix names.
+
+enum ADDR_MODE {
+    zp,
+    abs,
+    rel,
+    ind,
+    idx,
+    ind_idx,
+}
+
+// --- Interrupt vectors -----------------------------------------------------
+//
+// The 6502 supports three interrupt vectors. The bank defines the names
+// reset, nmi, and irq for #[interrupt(...)].
+
+enum INTERRUPT {
+    reset,
+    nmi,
+    irq,
+}
