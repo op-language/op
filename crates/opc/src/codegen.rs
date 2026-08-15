@@ -6,7 +6,7 @@
 //! `--compile` stage flag is set, `opc` writes the object data as JSON
 //! (`.opl`).
 //!
-//! The full code generator uses the bank's opcode encoding table to encode
+//! The full code generator uses the lib's opcode encoding table to encode
 //! each instruction. This module provides the scaffolding for that logic.
 
 use anyhow::Result;

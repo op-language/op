@@ -1,0 +1,107 @@
+//! NES Macros
+//!
+//! System inline macros for the Nintendo Entertainment System. Ported from
+//! the HLAKit NES system headers and the nes-code.op example.
+
+use const::*;
+use types::*;
+
+// --- interrupt control -----------------------------------------------------
+
+inline fn enable_interrupts() {
+    cli
+}
+
+inline fn disable_interrupts() {
+    sei
+}
+
+// --- stack -----------------------------------------------------------------
+
+inline fn reset_stack() {
+    ldx #0xFF
+    txs
+}
+
+// --- system initialization -------------------------------------------------
+
+inline fn system_initialize() {
+    disable_interrupts()
+    reset_stack()
+    lda 0
+    sta PPU::CNT0
+    sta PPU::CNT1
+    sta PPU::BG_SCROLL
+    sta PPU::BG_SCROLL
+    vram_clear_address()
+}
+
+// --- vblank wait -----------------------------------------------------------
+
+inline fn vblank_wait() {
+    do {
+        lda PPU::STATUS
+    } while (is plus)
+}
+
+inline fn unvblank_wait() {
+    do {
+        lda PPU::STATUS
+    } while (is minus)
+}
+
+inline fn vblank_wait_full() {
+    vblank_wait()
+    unvblank_wait()
+}
+
+// --- VRAM addressing -------------------------------------------------------
+
+inline fn vram_set_address_i(addr) {
+    lda PPU::STATUS
+    lda #hi!(addr)
+    sta PPU::ADDRESS
+    lda #lo!(addr)
+    sta PPU::ADDRESS
+}
+
+inline fn vram_clear_address() {
+    lda 0
+    sta PPU::ADDRESS
+    sta PPU::ADDRESS
+}
+
+// --- VRAM data -------------------------------------------------------------
+
+inline fn vram_write(value) {
+    lda value
+    sta PPU::IO
+}
+
+inline fn vram_write_a() {
+    sta PPU::IO
+}
+
+// --- video control ---------------------------------------------------------
+
+inline fn turn_video_on() {
+    assign(PPU::CNT1, CR_BACKVISIBLE | CR_BACKNOCLIP)
+}
+
+inline fn turn_video_off() {
+    assign(PPU::CNT1, 0)
+}
+
+// --- assignment helpers ----------------------------------------------------
+
+inline fn assign(dest, value) {
+    lda value
+    sta dest
+}
+
+inline fn assign_16i(dest, value) {
+    lda #lo!(value)
+    sta dest + 0
+    lda #hi!(value)
+    sta dest + 1
+}

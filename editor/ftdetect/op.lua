@@ -1,9 +1,9 @@
--- ftdetect for HLA source files
--- Register the .hla extension so Neovim uses the hla filetype.
+-- ftdetect for Op source files
+-- Register the .op extension so Neovim uses the op filetype.
 
 vim.api.nvim_create_autocmd({ "BufNewFile", "BufRead" }, {
-  pattern = "*.hla",
+  pattern = "*.op",
   callback = function()
-    vim.bo.filetype = "hla"
+    vim.bo.filetype = "op"
   end,
 })

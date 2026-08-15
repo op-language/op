@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system, declaration forms, control-flow constructs, addressing modes, cfg
   predicates, and per-target tables.
 - `docs/technical-design.md` defining the `opc` pipeline, intermediate file
-  formats, bank management, `Cart.toml` format, and the `cart` build tool.
+  formats, lib management, `Cart.toml` format, and the `cart` build tool.
 - Editor syntax and filetype detection support under `editor/`.
 - Example Op source files under `examples/`.
 

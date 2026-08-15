@@ -1,7 +1,7 @@
 //! The target registry.
 //!
 //! The registry maps a target triplet string to a [`Target`] constructor. The
-//! compiler queries the registry to load a target at build time. Banks
+//! compiler queries the registry to load a target at build time. Libs
 //! register themselves with the registry when they are loaded from
 //! `~/.carts/`.
 

@@ -15,7 +15,7 @@ defines.
 This document defines the `opc` binary, the `cart` binary, the crate
 structure, the pipeline stages, the intermediate file formats, the error
 handling, the code generation, the optimizer, the linker, the file output, the
-bank management system, and the `Cart.toml` format.
+lib management system, and the `Cart.toml` format.
 
 This document does **not** define the Op language grammar or the per-target
 opcode tables. The document `language-specification.md` defines those.
@@ -40,12 +40,12 @@ Rust-like syntax. The `opc` compiler is the final implementation in Rust. The
 5. The `opc` compiler must use JSON for the intermediate file formats so that
    a developer can inspect and debug each stage.
 6. The `opc` compiler must load all CPU and platform definitions from external
-   banks. The compiler must not hard-code opcode tables or register names.
+   libs. The compiler must not hard-code opcode tables or register names.
 7. The `opc` compiler must select the target from the triplet on the command
    line or from the `Cart.toml`.
 8. The `cart` tool must manage Op projects the same way `cargo` manages Rust
    projects.
-9. The `cart` tool must install banks in `~/.carts/` and resolve dependencies
+9. The `cart` tool must install libs in `~/.carts/` and resolve dependencies
    from the `Cart.toml`.
 10. Both tools must run on Linux, macOS, and Windows.
 
@@ -91,9 +91,9 @@ source file (.op)
 | `op-ir` | library | Intermediate representation types for the compiler and linker. |
 | `op-diagnostics` | library | Error and warning reporting. |
 
-CPU and platform banks are external Op libraries, not Rust crates. The `cart`
+CPU and platform libs are external Op libraries, not Rust crates. The `cart`
 tool installs them in `~/.carts/`. The `opc` compiler loads them at build
-time. See the Banks section.
+time. See the Libs section.
 
 A workspace `Cargo.toml` file at the repository root defines all Rust crates.
 
@@ -249,9 +249,9 @@ The lexer uses the `logos` crate to generate the tokenizer from regular
 expressions.
 
 The lexer reads the target triplet from the command line. The lexer loads the
-target bank from `~/.carts/`. The bank provides the list of CPU-specific
+target lib from `~/.carts/`. The lib provides the list of CPU-specific
 opcode mnemonics. The lexer classifies an identifier as an opcode token if the
-bank lists it.
+lib lists it.
 
 The lexer writes the token stream as JSON (.opx).
 
@@ -265,7 +265,7 @@ The parser reads the JSON token stream (.opx). The parser builds an AST that
 the normalized LR(1) grammar defines. The parser uses the `lalrpop` crate to
 generate the parser from the grammar.
 
-The parser loads the target bank. The bank provides the list of valid opcodes,
+The parser loads the target lib. The lib provides the list of valid opcodes,
 registers, and condition keywords. The parser validates that each opcode,
 register, and condition keyword is legal for the target.
 
@@ -303,13 +303,13 @@ The code generator walks the AST. For each function, the code generator emits
 a sequence of instructions. For each variable, the code generator allocates
 space in the appropriate section.
 
-The code generator loads the target bank. The bank provides the opcode
+The code generator loads the target lib. The lib provides the opcode
 encoding table. The code generator uses the table to encode each instruction
 into bytes.
 
 For each instruction, the code generator:
 
-1. Looks up the opcode mnemonic in the bank table.
+1. Looks up the opcode mnemonic in the lib table.
 2. Determines the addressing mode from the operand form.
 3. Selects the shortest encoding if the program did not force a mode.
 4. Emits the opcode byte and the operand bytes.
@@ -427,7 +427,7 @@ final linked data (.opl post-link).
 
 #### Memory map
 
-Each target defines a memory map. The bank provides the memory map as a list
+Each target defines a memory map. The lib provides the memory map as a list
 of regions. Each region has a name, a kind (rom, ram, chr), a base address, a
 size, and a bank count.
 
@@ -461,17 +461,17 @@ bank count, block count, block size. ROM blocks concatenated.
 
 **Intel HEX:** Sections as Intel HEX records. Suits EEPROM burners.
 
-## Banks
+## Libs
 
-Banks are Op libraries that provide CPU and platform definitions. The `opc`
-compiler loads banks at build time. No banks are built into `opc`.
+Libs are Op libraries that provide CPU and platform definitions. The `opc`
+compiler loads libs at build time. No libs are built into `opc`.
 
-### Bank structure
+### Lib structure
 
-A bank is a directory in `~/.carts/` with a `Cart.toml` and a `src/bank.op`
-file. The `Cart.toml` declares the bank name and its dependencies.
+A lib is a directory in `~/.carts/` with a `Cart.toml` and a `src/lib.op`
+file. The `Cart.toml` declares the lib name and its dependencies.
 
-A CPU bank provides:
+A CPU lib provides:
 
 1. The `cpu` module with register constants.
 2. The `enum` groups for CPU status flags and condition tests.
@@ -479,31 +479,31 @@ A CPU bank provides:
 4. The addressing mode definitions.
 5. The interrupt vector definitions.
 
-A platform bank depends on a CPU bank and adds:
+A platform lib depends on a CPU lib and adds:
 
 1. The platform module with memory-mapped IO addresses.
 2. The platform constants.
 3. The standard inline macros for assignment, arithmetic, bitwise, stack, and
    memory operations.
 
-### Bank installation
+### Lib installation
 
-The `cart install <name>` command fetches a bank from a git-based registry and
+The `cart install <name>` command fetches a lib from a git-based registry and
 installs it in `~/.carts/<name>/`. The registry is a git repository for now. A
 future revision may define a proper registry protocol.
 
-The `Cart.toml` `[dependencies]` section lists the banks that a project uses.
+The `Cart.toml` `[dependencies]` section lists the libs that a project uses.
 The `cart` tool resolves dependencies from `~/.carts/` before invoking `opc`.
 
-### Bank names
+### Lib names
 
-Example bank names: `mos6502-bank`, `mos65sc02-bank`, `ricoh2a03-bank`,
-`wdc65c816-bank`, `m68000-bank`, `z80-bank`, `lr35902-bank`, `nes-bank`,
-`lynx-bank`, `gameboy-bank`, `snes-bank`, `genesis-bank`.
+Example lib names: `mos6502`, `mos65sc02`, `ricoh2a03`,
+`wdc65c816`, `m68000`, `z80`, `lr35902`, `nes`,
+`lynx`, `gameboy`, `snes`, `genesis`.
 
 ## Target abstraction
 
-The `op-target` crate defines a `Target` trait. Each bank implements the
+The `op-target` crate defines a `Target` trait. Each lib implements the
 trait.
 
 ```rust
@@ -535,7 +535,7 @@ The compiler, the parser, and the linker use the `Target` trait to query the
 target. No binary hard-codes a target.
 
 The `op-target` crate provides a registry. The registry maps a triplet string
-to a `Target` constructor. The registry loads banks from `~/.carts/` at build
+to a `Target` constructor. The registry loads libs from `~/.carts/` at build
 time.
 
 ## cart build tool
@@ -553,14 +553,14 @@ Creates a new Op project with the given name. Creates a git repository, a
 `Cart.toml`, a `.gitignore`, and a `src/` directory.
 
 By default `cart init` creates a cart (binary ROM) project with
-`src/cart.op`. When `--bank` is passed, it creates a bank (library) project
-with `src/bank.op` instead.
+`src/cart.op`. When `--lib` is passed, it creates a lib (library) project
+with `src/lib.op` instead.
 
 Options:
 
 | Flag | Description |
 |------|-------------|
-| `--bank` | Create a library (bank) project with `src/bank.op`. |
+| `--lib` | Create a library (lib) project with `src/lib.op`. |
 | `--target <triplet>` | Set the default target triplet in `Cart.toml`. |
 
 ### cart build
@@ -629,10 +629,10 @@ Removes the build output directory.
 ### cart add
 
 ```
-cart add <bank-name>
+cart add <name>
 ```
 
-Adds a bank to the `Cart.toml` `[dependencies]` section. Fetches the bank
+Adds a lib to the `Cart.toml` `[dependencies]` section. Fetches the lib
 from the registry and installs it in `~/.carts/`.
 
 ### cart doc
@@ -647,10 +647,10 @@ files.
 ### cart install
 
 ```
-cart install <bank-name>
+cart install <name>
 ```
 
-Fetches a bank from the registry and installs it in `~/.carts/<bank-name>/`.
+Fetches a lib from the registry and installs it in `~/.carts/<name>/`.
 Does not modify the `Cart.toml`.
 
 ### cart update
@@ -677,9 +677,9 @@ edition = "1"
 authors = ["Dave Huseby <dave@linuxprogrammer.org>"]
 license = "BSD-2-Clause"
 
-[bank]
+[lib]
 name = "nes-demo-lib"
-path = "src/bank.op"
+path = "src/lib.op"
 
 [[rom]]
 name = "nes-demo"
@@ -687,8 +687,8 @@ path = "src/cart.op"
 target = "mos6502-nintendo-nes-ntsc"
 
 [dependencies]
-mos6502-bank = "1.0"
-nes-bank = "1.0"
+mos6502 = "1.0"
+nes = "1.0"
 
 [target]
 default = "mos6502-nintendo-nes-ntsc"
@@ -714,15 +714,15 @@ args = ["--rom"]
 | `authors` | list of strings | no | Author names. |
 | `license` | string | no | License identifier. |
 
-#### [bank]
+#### [lib]
 
-Defines a library (bank) target. A project may have at most one `[bank]`
+Defines a library (lib) target. A project may have at most one `[lib]`
 section.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Bank name. |
-| `path` | string | no | Root source file. Default: `src/bank.op`. |
+| `name` | string | yes | Lib name. |
+| `path` | string | no | Root source file. Default: `src/lib.op`. |
 
 #### [[rom]]
 
@@ -737,14 +737,14 @@ sections for different targets.
 
 #### [dependencies]
 
-Lists the banks that the project depends on. Each entry is a bank name and a
+Lists the libs that the project depends on. Each entry is a lib name and a
 version specifier.
 
 ```toml
 [dependencies]
-mos6502-bank = "1.0"
-nes-bank = "1.0"
-lynx-bank = { version = "1.0", git = "https://github.com/wookie/lynx-bank" }
+mos6502 = "1.0"
+nes = "1.0"
+lynx = { version = "1.0", git = "https://github.com/wookie/lynx" }
 ```
 
 #### [target]
@@ -781,7 +781,7 @@ configuration.
 
 ```toml
 [registry]
-default = "https://github.com/wookie/op-bank-registry"
+default = "https://github.com/wookie/op-lib-registry"
 
 [build]
 target = "mos6502-nintendo-nes-ntsc"
@@ -852,7 +852,7 @@ image matches a known-good byte array.
 ### cart tests
 
 Test `cart init`, `cart build`, `cart check`, and `cart clean` on sample
-projects. Test dependency resolution and bank installation.
+projects. Test dependency resolution and lib installation.
 
 ## Build and distribution
 
@@ -892,11 +892,11 @@ cart build
 cart run
 ```
 
-### Install a bank
+### Install a lib
 
 ```
-cart install mos6502-bank
-cart install nes-bank
+cart install mos6502
+cart install nes
 ```
 
 ### Atari Lynx two-stage build
@@ -919,7 +919,7 @@ A conforming `opc` implementation must:
 
 1. Implement all four stage flags as this document defines.
 2. Use JSON for all intermediate file formats (.opx, .opa, .opl).
-3. Load all CPU and platform definitions from external banks in `~/.carts/`.
+3. Load all CPU and platform definitions from external libs in `~/.carts/`.
 4. Implement the code generator for at least one CPU family.
 5. Implement the keyhole peephole optimizer as this document defines.
 6. Implement the linker for at least one output format.
@@ -931,7 +931,7 @@ A conforming `cart` implementation must:
 1. Implement `cart init`, `cart build`, `cart run`, `cart test`, `cart check`,
    `cart clean`, `cart add`, `cart doc`, `cart install`, and `cart update`.
 2. Read and write the `Cart.toml` format as this document defines.
-3. Install banks in `~/.carts/`.
+3. Install libs in `~/.carts/`.
 4. Resolve dependencies from `~/.carts/` before invoking `opc`.
 5. Support the `~/.cart/config.toml` metadata file.
 
@@ -941,9 +941,9 @@ A conforming `cart` implementation must:
 2. Cross-function dead-code elimination.
 3. Jump threading.
 4. Constant propagation.
-5. A proper bank registry protocol beyond git URLs.
+5. A proper lib registry protocol beyond git URLs.
 6. A foreign-function interface for C and assembly object files.
-7. Dynamic loading of banks as shared libraries.
+7. Dynamic loading of libs as shared libraries.
 8. Language server protocol support for editor integration.
 9. Debug information generation for emulators.
-10. `cart publish` for publishing banks to the registry.
+10. `cart publish` for publishing libs to the registry.
