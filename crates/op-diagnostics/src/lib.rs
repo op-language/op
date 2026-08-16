@@ -59,10 +59,7 @@ impl Diagnostic {
             Severity::Warning => "warning",
             Severity::Note => "note",
         };
-        eprintln!(
-            "{}[E{:03}]: {}",
-            level, self.code, self.message
-        );
+        eprintln!("{}[E{:03}]: {}", level, self.code, self.message);
         eprintln!("  --> {}:{}:{}", self.file, self.line, self.col);
         eprintln!("   |");
         if let Some(line) = source {

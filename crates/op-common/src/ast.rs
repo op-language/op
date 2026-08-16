@@ -84,10 +84,7 @@ pub enum UseTree {
         tail: UseTail,
     },
     /// A path import with an `as alias`.
-    Alias {
-        inner: Box<UseTree>,
-        alias: String,
-    },
+    Alias { inner: Box<UseTree>, alias: String },
 }
 
 /// The root of a use path.

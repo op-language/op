@@ -13,11 +13,11 @@
 #![allow(dead_code)]
 
 mod cli;
-mod lexer;
-mod parser;
 mod codegen;
+mod lexer;
 mod linker;
 mod output;
+mod parser;
 
 fn main() -> anyhow::Result<()> {
     cli::run()
