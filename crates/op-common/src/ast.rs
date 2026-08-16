@@ -65,10 +65,53 @@ pub enum Item {
     },
     ModDecl {
         name: String,
+        is_pub: bool,
+        body: Option<Vec<Item>>,
     },
     UseDecl {
-        paths: Vec<String>,
+        is_pub: bool,
+        trees: Vec<UseTree>,
     },
+}
+
+/// A single import tree in a `use` declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UseTree {
+    /// A path import, glob, or group.
+    Path {
+        root: UseRoot,
+        segments: Vec<String>,
+        tail: UseTail,
+    },
+    /// A path import with an `as alias`.
+    Alias {
+        inner: Box<UseTree>,
+        alias: String,
+    },
+}
+
+/// The root of a use path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UseRoot {
+    /// `lib::` — the current lib root.
+    Lib,
+    /// `self::` — the current module.
+    SelfMod,
+    /// `super::` — the parent module.
+    Super,
+    /// A dependency lib name or a relative module name.
+    Name(String),
+}
+
+/// The tail of a use path after the root and intermediate segments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UseTail {
+    /// The last segment is an item name.
+    Item,
+    /// `::*` — glob import.
+    Glob,
+    /// `::{a, b, c}` — group import.
+    Group(Vec<UseTree>),
 }
 
 /// An attribute attached to an item or block.
