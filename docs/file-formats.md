@@ -12,15 +12,19 @@ This document uses the keywords **must**, **shall**, and **may** as RFC
 
 ## Scope
 
-This document defines the binary layout of the `.opb` file and the JSON
-layout of the `.opx` file. For the `.opb` file, the document defines the
-header, the section table, the symbol table, the relocation table, and the
-data blocks. For the `.opx` file, the document defines the envelope fields,
-the token fields, and the token type reference table.
+This document defines the binary layout of the `.opb` file, the JSON
+layout of the `.opx` file, and the JSON layout of the `.opa` file. For
+the `.opb` file, the document defines the header, the section table, the
+symbol table, the relocation table, and the data blocks. For the `.opx`
+file, the document defines the envelope fields, the token fields, and the
+token type reference table. For the `.opa` file, the document defines the
+envelope fields, the module fields, the item node types, the function
+body statement node types, the expression node types, and the operand
+node types.
 
-This document does not define the `.opa` or `.opl` intermediate file
-formats. The document `technical-design.md` in the `op` repository defines
-those formats. This document does not define the Op language grammar. The
+This document does not define the `.opl` intermediate file format. The
+document `technical-design.md` in the `op` repository defines that
+format. This document does not define the Op language grammar. The
 document `language-specification.md` defines the grammar.
 
 ## Purpose
@@ -475,6 +479,325 @@ lists every token type and its meaning.
 | `Mode_idx` | `idx` | Indexed addressing mode |
 | `Mode_ind_l` | `ind_l` | Indirect long addressing mode |
 | `Mode_ind_idx` | `ind_idx` | Indirect indexed addressing mode |
+
+## Op AST (.opa) File Format
+
+Version 1.0
+
+### Purpose
+
+The `.opa` file is the JSON output of the `opc --parse` stage. The file
+holds the abstract syntax tree (AST) that the codegen stage reads. A
+developer can inspect the `.opa` file to debug the parser output.
+
+### Format
+
+The `.opa` file is a JSON document. The file uses UTF-8 encoding. The
+`opc` binary writes the file with pretty-printed JSON (two-space
+indentation).
+
+### Envelope fields
+
+The top-level JSON object has three fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | integer | The format version. Current value: `1`. |
+| `target` | string | The target triplet string. |
+| `root` | object | The root Module object. |
+
+### Module fields
+
+The `root` object represents the root module of the program.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | string | Always `"Module"`. |
+| `name` | string | The module name. |
+| `items` | array | The list of Item objects in this module. |
+
+### Item node types
+
+Each element of the `items` array is a JSON object with a `kind` field
+that identifies the item type. The table below lists every item type and
+its fields.
+
+| Item kind | Fields | Description |
+|-----------|--------|-------------|
+| `ConstDecl` | `name`, `ty`, `value`, `evaluated_value`, `attributes` | A compile-time constant. `evaluated_value` is `null` if the evaluator could not compute the value. |
+| `VarDecl` | `name`, `is_volatile`, `ty`, `array_dim`, `addr_binding`, `init`, `attributes` | A variable declaration. `array_dim`, `addr_binding`, and `init` are `null` when absent. |
+| `FnDecl` | `name`, `is_noreturn`, `attributes`, `body` | A function declaration. `body` is an array of FnStmt objects. |
+| `InlineFnDecl` | `name`, `params`, `attributes`, `body` | An inline macro function. `params` is an array of strings. |
+| `StructDecl` | `name`, `fields`, `attributes` | A struct type. `fields` is an array of Field objects. |
+| `TypeDecl` | `name`, `ty`, `attributes` | A type alias. |
+| `EnumDecl` | `name`, `variants`, `attributes` | An enum declaration. `variants` is an array of EnumVariant objects. |
+| `ModDecl` | `name`, `is_pub`, `body`, `resolved`, `attributes` | A module declaration. `body` is `null` for a file module. `resolved` is `null` if the sub-module file was not found. |
+| `UseDecl` | `is_pub`, `trees` | A use declaration. `trees` is an array of UseTree objects. |
+| `BlockAttribute` | `attr`, `items` | A block attribute such as `#[rom(...)] { ... }`. |
+| `Placement` | `macro_name`, `argument`, `attributes` | A placement macro call such as `locate_fn!(path::name)`. |
+
+### Attribute object
+
+An `Attribute` object has two fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string | The attribute path (e.g. `"cfg"`, `"rom"`, `"interrupt"`). |
+| `args` | array | The list of AttrArg objects. |
+
+An `AttrArg` object has two fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The argument name. Empty for positional arguments. |
+| `value` | string | The argument value as a string. |
+
+### Field object
+
+A `Field` object represents a struct field.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_volatile` | boolean | True if the field is volatile. |
+| `name` | string | The field name. |
+| `ty` | object | The field type (a Type object). |
+| `array_dim` | object or null | The array dimension expression, or `null`. |
+
+### EnumVariant object
+
+An `EnumVariant` object represents an enum variant.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The variant name. |
+| `value` | object or null | The variant value expression, or `null`. |
+
+### Type object
+
+A `Type` object has a `kind` field that identifies the type form.
+
+| Type kind | Fields | Description |
+|-----------|--------|-------------|
+| `Named` | `name` | A named type (identifier or primitive). |
+| `Array` | `element`, `size` | An array type. `element` is a Type object. `size` is an Expr object or `null`. |
+
+### UseTree object
+
+A `UseTree` object has a `kind` field that identifies the form.
+
+| UseTree kind | Fields | Description |
+|--------------|--------|-------------|
+| `Path` | `root`, `segments`, `tail` | A path import. `root` is a UseRoot object. `segments` is an array of strings. `tail` is a UseTail object. |
+| `Alias` | `inner`, `alias` | A path import with an alias. `inner` is a UseTree object. `alias` is a string. |
+
+### UseRoot object
+
+A `UseRoot` object has a `kind` field.
+
+| UseRoot kind | Fields | Description |
+|--------------|--------|-------------|
+| `Lib` | none | The `lib::` path root. |
+| `SelfMod` | none | The `self::` path root. |
+| `Super` | none | The `super::` path root. |
+| `Name` | `name` | A named path root. |
+
+### UseTail object
+
+A `UseTail` object has a `kind` field.
+
+| UseTail kind | Fields | Description |
+|--------------|--------|-------------|
+| `Item` | none | The last segment is an item name. |
+| `Glob` | none | A glob import `::*`. |
+| `Group` | `group` | A group import `::{a, b, c}`. `group` is an array of UseTree objects. |
+
+### Function body statement node types
+
+Each element of a `body` array is a FnStmt object with a `kind` field.
+
+| FnStmt kind | Fields | Description |
+|-------------|--------|-------------|
+| `Label` | `name`, `stmt` | A label definition. `stmt` is the FnStmt that follows the label. |
+| `AsmStmt` | `opcode`, `operands` | An assembly statement. `opcode` is the mnemonic string. `operands` is an array of Operand objects. |
+| `IfStmt` | `branch_hint`, `condition`, `then_block`, `else_block` | An if statement. `branch_hint` is `"Near"` or `"Far"` or `null`. `condition` is a Condition object. `then_block` is an array of FnStmt objects. `else_block` is an array or `null`. |
+| `WhileStmt` | `branch_hint`, `condition`, `body` | A while loop. |
+| `DoWhileStmt` | `body`, `branch_hint`, `condition` | A do-while loop. |
+| `LoopStmt` | `body` | An endless loop. |
+| `SwitchStmt` | `register`, `cases` | A switch statement. `register` is the register name string. `cases` is an array of SwitchCase objects. |
+| `FnCall` | `name`, `args` | A function or macro call. `args` is an array of Expr objects. |
+| `ReturnStmt` | none | A return statement. |
+| `VarDeclStmt` | `decl` | A variable declaration inside a function body. `decl` is a VarDecl Item object. |
+
+### Condition object
+
+A `Condition` object has two fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `modifiers` | array of strings | The modifier keywords (e.g. `["is"]`). |
+| `keyword` | string | The condition keyword (e.g. `"plus"`, `"carry"`). |
+
+### SwitchCase object
+
+A `SwitchCase` object has a `kind` field.
+
+| SwitchCase kind | Fields | Description |
+|-----------------|--------|-------------|
+| `Case` | `expr`, `body` | A case block. `expr` is an Expr object. `body` is an array of FnStmt objects. |
+| `Default` | `body` | The default block. |
+
+### Operand node types
+
+Each element of an `operands` array is an Operand object with a `kind`
+field.
+
+| Operand kind | Fields | Description |
+|--------------|--------|-------------|
+| `Immediate` | `value` | An immediate operand `#expr`. `value` is an Expr object. |
+| `MemoryOperand` | `mode_prefix`, `expr`, `index_reg` | A memory operand. `mode_prefix` is a string or `null`. `expr` is an Expr object. `index_reg` is a string or `null`. |
+| `RegisterRef` | `name` | A register reference `cpu::ident`. |
+| `LabelRef` | `name` | A label reference `'ident`. |
+| `Selector` | `path`, `accesses` | A selector expression. `path` is an array of strings. `accesses` is an array of Access objects. |
+
+### Expression node types
+
+An `Expr` object has a `kind` field that identifies the expression form.
+
+| Expr kind | Fields | Description |
+|-----------|--------|-------------|
+| `Number` | `value` | An integer literal. `value` is a 64-bit integer. |
+| `String_` | `value` | A string literal. `value` is the string content. |
+| `Boolean` | `value` | A boolean literal. `value` is `true` or `false`. |
+| `Ident` | `name` | A bare identifier. |
+| `BinOp` | `op`, `left`, `right` | A binary operation. `op` is a BinaryOp string. `left` and `right` are Expr objects. |
+| `UnaryOp` | `op`, `operand` | A unary operation. `op` is a UnaryOp string. `operand` is an Expr object. |
+| `MacroCall` | `name`, `arg` | A compile-time macro call. `name` is the macro name. `arg` is an Expr object. |
+| `Selector` | `path`, `accesses` | A selector expression. `path` is an array of strings. `accesses` is an array of Access objects. |
+| `FnCall` | `name`, `args` | A function call expression. `args` is an array of Expr objects. |
+| `ParenExpr` | `inner` | A parenthesized expression. `inner` is an Expr object. |
+
+### BinaryOp values
+
+| Value | Operator |
+|-------|----------|
+| `Or` | `\|` |
+| `Xor` | `^` |
+| `And` | `&` |
+| `Eq` | `==` |
+| `Ne` | `!=` |
+| `Lt` | `<` |
+| `Gt` | `>` |
+| `Le` | `<=` |
+| `Ge` | `>=` |
+| `Shl` | `<<` |
+| `Shr` | `>>` |
+| `Add` | `+` |
+| `Sub` | `-` |
+| `Mul` | `*` |
+| `Div` | `/` |
+| `Mod` | `%` |
+
+### UnaryOp values
+
+| Value | Operator |
+|-------|----------|
+| `Not` | `!` |
+| `Inv` | `~` |
+| `Neg` | `-` (unary) |
+| `Pos` | `+` (unary) |
+
+### Access object
+
+An `Access` object has a `kind` field.
+
+| Access kind | Fields | Description |
+|-------------|--------|-------------|
+| `ModuleAccess` | `name` | A `::ident` access. |
+| `FieldAccess` | `name` | A `.ident` access. |
+| `Offset` | `op`, `value` | A `+expr` or `-expr` offset. `op` is `"Add"` or `"Sub"`. `value` is an Expr object. |
+
+### InitValue object
+
+An `InitValue` object has a `kind` field.
+
+| InitValue kind | Fields | Description |
+|----------------|--------|-------------|
+| `Expr` | `value` | A single expression initializer. |
+| `InitList` | `items` | A brace-enclosed list. `items` is an array of InitValue objects. |
+| `String_` | `value` | A string literal initializer. |
+
+### PlacementArg object
+
+A `PlacementArg` object has a `kind` field.
+
+| PlacementArg kind | Fields | Description |
+|-------------------|--------|-------------|
+| `String_` | `value` | A string literal argument. |
+| `Path` | `segments` | A module path argument. `segments` is an array of strings. |
+
+### Example
+
+Source file `main.op`:
+
+```
+const SCREEN_WIDTH: u8 = 256;
+
+fn main() {
+    lda 0
+    sta PPU::CNT0
+}
+```
+
+`.opa` output:
+
+```json
+{
+  "version": 1,
+  "target": "mos6502-nintendo-nes-ntsc",
+  "root": {
+    "kind": "Module",
+    "name": "main",
+    "items": [
+      {
+        "kind": "ConstDecl",
+        "name": "SCREEN_WIDTH",
+        "ty": { "kind": "Named", "name": "u8" },
+        "value": { "kind": "Number", "value": 256 },
+        "evaluated_value": 256,
+        "attributes": []
+      },
+      {
+        "kind": "FnDecl",
+        "name": "main",
+        "is_noreturn": false,
+        "attributes": [],
+        "body": [
+          {
+            "kind": "AsmStmt",
+            "opcode": "lda",
+            "operands": [
+              { "kind": "Selector", "path": [], "accesses": [] }
+            ]
+          },
+          {
+            "kind": "AsmStmt",
+            "opcode": "sta",
+            "operands": [
+              {
+                "kind": "Selector",
+                "path": ["PPU"],
+                "accesses": [
+                  { "kind": "ModuleAccess", "name": "CNT0" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ## Future work
 

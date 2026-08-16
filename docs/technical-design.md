@@ -201,6 +201,8 @@ complete token type reference table.
 }
 ```
 
+See `file-formats.md` for the full `.opa` format specification.
+
 #### .opl (post-compile or post-link object data)
 
 Post-compile (.opl):
