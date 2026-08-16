@@ -16,6 +16,12 @@ mod nes_code;
 use nes_std::*;
 use nes_code::*;
 
+// With the std lib, this file would begin:
+//   use std::*;
+//   use std::cpu::*;
+//   use std::machine::*;
+// and `cpu::a`, `machine::PPU::CNT0` would be available directly.
+
 // --- iNES header -----------------------------------------------------------
 
 #[ines(
