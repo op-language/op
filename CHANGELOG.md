@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### Added
+- Complete lexer implementation for the `opc` binary. The lexer tokenizes
+  all Op source constructs: keywords, primitive types, operators,
+  punctuation, number literals (decimal, binary, hex), string literals
+  with escape sequences, labels (definition and reference), attributes,
+  opcodes (all CPU families), condition keywords, condition modifiers,
+  addressing-mode prefixes, compile-time macros, and include macros.
+- `TokenType` enum in `op-common` with a variant for every token type
+  and an `as_str()` method that returns the token type name string.
+- `.opx` file format specification in `docs/file-formats.md` with the
+  complete token type reference table.
+- Comprehensive lexer unit tests in `crates/opc/tests/lexer.rs`.
+- `opc` library crate (`src/lib.rs`) so integration tests can import
+  the lexer module directly.
+
+### Changed
+- The `opc` lexer no longer uses the placeholder `split_whitespace()`
+  tokenizer. The new implementation is a character-by-character scanner
+  with correct line and column tracking.
+- The `docs/file-formats.md` scope statement now includes the `.opx`
+  format.
+
 ## [0.2.0]
 
 ### Added
