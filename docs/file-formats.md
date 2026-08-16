@@ -54,7 +54,7 @@ the counts and offsets for the tables.
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 4 | magic | The ASCII bytes `4F 50 42 21` (`OPB!`). |
-| 4 | 4 | format_version | The format version. Current value: `1`. |
+| 4 | 4 | format_version | The format version. Current value: `2`. |
 | 8 | 4 | target_len | The length in bytes of the target triplet string. |
 | 12 | 4 | lib_name_len | The length in bytes of the lib name string. |
 | 16 | 4 | section_count | The number of entries in the section table. |
@@ -102,7 +102,7 @@ null-terminated. The `name_len` field gives the string length.
 ## Symbol table
 
 The symbol table starts at the offset that the header
-`symbol_table_offset` field gives. Each entry is 20 bytes.
+`symbol_table_offset` field gives. Each entry is 24 bytes.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
@@ -111,9 +111,10 @@ The symbol table starts at the offset that the header
 | 8 | 4 | offset | The offset of the symbol from the section origin. |
 | 12 | 4 | size | The size of the symbol in bytes. |
 | 16 | 4 | kind | The symbol kind. See the table below. |
+| 20 | 4 | flags | Bit flags. Bit 0: `pub` (1 = the symbol is public and visible across lib boundaries; 0 = private). Bits 1-31: reserved, set to `0`. |
 
 The symbol name string follows the entry. The string starts at
-`symbol_table_offset + (index * 20) + 20`. The string is not
+`symbol_table_offset + (index * 24) + 24`. The string is not
 null-terminated. The `name_len` field gives the string length.
 
 ### Symbol kind values
@@ -174,16 +175,20 @@ must do these steps:
 4. Read the section table. For each section, read the name, kind, org,
    bank, maxsize, and data offset.
 5. Read the symbol table. For each symbol, read the name, section index,
-   offset, size, and kind.
-6. Read the relocation table. For each relocation, read the section
+   offset, size, kind, and flags.
+6. For each symbol, read the `flags` field. A symbol with the `pub` bit
+   clear is private to the lib. The linker must not resolve a private
+   symbol against references from other libs or ROMs. The linker skips
+   private symbols when it resolves cross-lib references.
+7. Read the relocation table. For each relocation, read the section
    index, offset, kind, and symbol index.
-7. Read each data block.
-8. Merge the lib sections with the ROM sections. The linker concatenates
+8. Read each data block.
+9. Merge the lib sections with the ROM sections. The linker concatenates
    the data of sections that have the same name and bank. The linker
    adjusts the symbol offsets.
-9. Resolve the lib relocations. The linker computes the final address of
-   each lib symbol from the section origin and the symbol offset.
-10. Patch the lib relocations in the merged data.
+10. Resolve the lib relocations. The linker computes the final address of
+    each lib symbol from the section origin and the symbol offset.
+11. Patch the lib relocations in the merged data.
 
 ## File layout diagram
 
@@ -197,7 +202,7 @@ must do these steps:
 +------------------+
 | Section table    |  section_count * 32 bytes
 +------------------+
-| Symbol table     |  symbol_count * 20 bytes
+| Symbol table     |  symbol_count * 24 bytes
 +------------------+
 | Relocation table |  reloc_count * 16 bytes
 +------------------+
@@ -211,13 +216,15 @@ A conforming `opc` implementation must:
 
 1. Write the `.opb` file when `cart build` builds a lib project.
 2. Set the magic bytes to `4F 50 42 21`.
-3. Set the format version to `1`.
+3. Set the format version to `2`.
 4. Write all multi-byte integer fields in little-endian byte order.
 5. Write the target triplet string and the lib name string after the
    header.
 6. Write the section table, the symbol table, the relocation table, and
    the data blocks at the offsets that the header gives.
-7. Set all reserved fields to `0`.
+7. Set the `pub` bit in the `flags` field of each symbol table entry to 1
+   if the symbol is public. Set the bit to 0 if the symbol is private.
+8. Set all reserved fields to `0`.
 
 A conforming linker implementation must:
 
@@ -226,8 +233,10 @@ A conforming linker implementation must:
 3. Check that the target triplet matches the ROM target triplet.
 4. Read the section table, the symbol table, the relocation table, and
    the data blocks.
-5. Merge the lib sections with the ROM sections.
-6. Resolve and patch the lib relocations.
+5. Read the `flags` field of each symbol table entry. Resolve only public
+   symbols across lib boundaries.
+6. Merge the lib sections with the ROM sections.
+7. Resolve and patch the lib relocations.
 
 ## Future work
 
