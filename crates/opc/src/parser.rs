@@ -349,54 +349,14 @@ impl Parser {
         module
     }
 
-    /// Skip an item (used when cfg drops it).
+    /// Skip an item (used when cfg drops it). Parses the item and
+    /// discards the result. This ensures the parser consumes exactly
+    /// one item, including any nested blocks.
     fn skip_item(&mut self) {
-        // Skip until we reach a token that could start a new item or EOF.
-        // This is a simple heuristic: skip tokens until we see a keyword
-        // that starts a new declaration, or a `#[` attribute.
-        let mut depth = 0u32;
-        while !self.at_eof() {
-            let kind = self.peek_kind().to_string();
-            if depth == 0 {
-                if kind.starts_with("Kw_")
-                    || kind == "Op_hash"
-                    || kind == "Include_locate_bytes"
-                    || kind == "Include_locate_str"
-                    || kind == "Include_locate_fn"
-                {
-                    // Could be the start of a new item. But if it's a
-                    // keyword like `else` or `while` that is part of a
-                    // control-flow construct inside a function body, we
-                    // need to keep skipping. For module-level skipping,
-                    // we stop at any top-level keyword.
-                    let kw = &kind[3..];
-                    if matches!(
-                        kw,
-                        "fn" | "inline"
-                            | "noreturn"
-                            | "const"
-                            | "struct"
-                            | "type"
-                            | "enum"
-                            | "mod"
-                            | "use"
-                            | "pub"
-                            | "volatile"
-                    ) {
-                        break;
-                    }
-                }
-            }
-            if kind == "Op_lbrace" || kind == "Op_lparen" || kind == "Op_lbracket" {
-                depth += 1;
-            }
-            if kind == "Op_rbrace" || kind == "Op_rparen" || kind == "Op_rbracket" {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            self.advance();
-        }
+        // Collect any additional attributes on the item.
+        let attrs = self.parse_attributes();
+        // Parse and discard the item.
+        let _ = self.parse_item_with_attrs(attrs);
     }
 
     fn parse_item_with_attrs(&mut self, attrs: Vec<Attribute>) -> Option<Item> {
