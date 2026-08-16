@@ -10,15 +10,6 @@
 //! See `docs/technical-design.md` and `docs/language-specification.md` for the
 //! full specification.
 
-#![allow(dead_code)]
-
-mod cli;
-mod codegen;
-mod lexer;
-mod linker;
-mod output;
-mod parser;
-
 fn main() -> anyhow::Result<()> {
-    cli::run()
+    opc::cli::run()
 }

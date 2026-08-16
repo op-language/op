@@ -170,6 +170,9 @@ by writing the intermediate file and reading it.
 }
 ```
 
+See `file-formats.md` for the full `.opx` format specification and the
+complete token type reference table.
+
 #### .opa (post-parser AST)
 
 ```json

@@ -12,6 +12,10 @@ description = "The Op compiler"
 name = "opc"
 path = "src/main.rs"
 
+[lib]
+name = "opc"
+path = "src/lib.rs"
+
 [dependencies]
 op-common.workspace = true
 op-target.workspace = true
