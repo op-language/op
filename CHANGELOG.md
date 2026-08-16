@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+- Complete parser implementation for the `opc` binary. The parser builds
+  a full AST from the lexer token stream using a hand-written recursive-
+  descent parser. It handles all module-level items, function body
+  statements, expressions, operands, control-flow constructs, attributes,
+  and labels.
+- `#[cfg(...)]` attribute evaluation in the parser. The parser evaluates
+  cfg predicates against the target triplet and feature flags and drops
+  items that do not match.
+- Const expression evaluation in the parser. The evaluator supports the
+  full operator set and the `lo!`, `hi!`, `nylo!`, `nyhi!`, and `sizeof!`
+  macros.
+- `mod` file resolution in the parser. The parser finds `name.op` or
+  `name/mod.op` in the same directory, lexes and parses the sub-module,
+  and builds a module tree.
+- Expanded AST types in `op-common` to represent all grammar nodes:
+  function body statements, expressions, operands, conditions, types,
+  fields, enum variants, and block attributes.
+- `.opa` file format specification in `docs/file-formats.md` with the
+  complete AST node type reference.
+- Parser unit tests in `crates/opc/tests/parser.rs`.
+- Lexer+parser integration tests in `crates/opc/tests/integration.rs`.
+
+### Changed
+- The `opc` parser no longer returns an empty `Module`. The new
+  implementation builds a full AST.
+- The `docs/file-formats.md` scope statement now includes the `.opa`
+  format.
+
+### Breaking
+- The AST node types in `op-common` changed shape. Existing `.opa`
+  files from older `opc` versions are not compatible.
+
 ## [0.3.0]
 
 ### Added
