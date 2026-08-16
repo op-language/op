@@ -80,8 +80,8 @@ const CONDITION_MODIFIERS = ['is', 'has', 'no', 'not'];
 
 const KEYWORDS = [
   'fn', 'inline', 'noreturn', 'return', 'volatile', 'struct', 'type', 'enum',
-  'const', 'mod', 'use', 'pub', 'if', 'else', 'while', 'do', 'loop', 'switch',
-  'case', 'default', 'near', 'far', 'as',
+  'const', 'mod', 'use', 'pub', 'lib', 'self', 'super', 'if', 'else', 'while',
+  'do', 'loop', 'switch', 'case', 'default', 'near', 'far', 'as',
 ];
 
 const PRIMITIVE_TYPES = [
@@ -290,6 +290,7 @@ module.exports = grammar({
     ),
 
     mod_decl: $ => seq(
+      optional('pub'),
       'mod',
       field('name', $.identifier),
       choice(
@@ -299,32 +300,53 @@ module.exports = grammar({
     ),
 
     use_decl: $ => seq(
+      optional('pub'),
       'use',
-      sep1($.use_path, ','),
+      sep1($.use_tree, ','),
       optional(';'),
     ),
 
-    use_path: $ => choice(
+    use_tree: $ => choice(
+      $.use_alias,
       $.use_glob,
       $.use_group,
       $.use_simple,
     ),
 
     use_simple: $ => prec.left(seq(
-      $.identifier,
+      $.use_path_root,
       repeat(seq('::', $.identifier)),
     )),
 
-    use_glob: $ => seq($.use_simple, '::', '*'),
+    use_path_root: $ => choice(
+      'lib',
+      'self',
+      'super',
+      $.identifier,
+    ),
 
-    use_group: $ => seq(
-      $.use_simple,
+    use_glob: $ => prec.left(1, seq(
+      $.use_path_root,
+      repeat(seq('::', $.identifier)),
+      '::',
+      '*',
+    )),
+
+    use_group: $ => prec.left(1, seq(
+      $.use_path_root,
+      repeat(seq('::', $.identifier)),
       '::',
       '{',
-      sep1($.identifier, ','),
+      sep1($.use_tree, ','),
       optional(','),
       '}',
-    ),
+    )),
+
+    use_alias: $ => prec.left(seq(
+      choice($.use_simple, $.use_glob, $.use_group),
+      'as',
+      field('alias', $.identifier),
+    )),
 
     // --- Types --------------------------------------------------------------
 

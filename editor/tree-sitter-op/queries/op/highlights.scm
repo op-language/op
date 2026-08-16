@@ -15,9 +15,10 @@
 
 [
   "fn" "inline" "noreturn" "volatile"
-  "struct" "type" "enum" "const" "mod" "use"
+  "struct" "type" "enum" "const" "mod" "use" "pub"
+  "lib" "self" "super"
   "if" "else" "while" "do" "loop" "switch" "case" "default"
-  "near" "far"
+  "near" "far" "as"
 ] @keyword
 
 (return_stmt) @keyword
@@ -107,7 +108,9 @@
 (type_decl name: (identifier) @type)
 (enum_decl name: (identifier) @type)
 (mod_decl name: (identifier) @namespace)
-(use_decl (use_path) @namespace)
+(use_decl (use_tree) @namespace)
+(use_alias alias: (identifier) @namespace)
+(use_path_root) @namespace
 
 ; --- Enum variants ---------------------------------------------------------
 

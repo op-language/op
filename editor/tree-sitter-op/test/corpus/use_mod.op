@@ -1,0 +1,40 @@
+//! Test: Rust-style mod and use declarations
+//!
+//! Exercises the new pub mod, pub use, as aliases, nested groups,
+//! and lib/self/super path roots.
+
+// --- pub mod --------------------------------------------------------------
+
+pub mod graphics;
+
+mod audio {
+    fn play_sound() { }
+}
+
+// --- use with alias -------------------------------------------------------
+
+use std::cpu as cpu;
+use std::machine as machine;
+
+// --- use with glob --------------------------------------------------------
+
+use std::cpu::*;
+use std::machine::*;
+
+// --- use with group -------------------------------------------------------
+
+use std::{cpu, machine};
+
+// --- use with nested group ------------------------------------------------
+
+use std::{cpu, machine::{PPU, CR_NMI}};
+
+// --- pub use re-export ----------------------------------------------------
+
+pub use mos6502 as cpu;
+
+// --- path roots: lib, self, super ------------------------------------------
+
+use lib::cpu::a;
+use self::macros::*;
+use super::constants::*;
