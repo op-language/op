@@ -269,9 +269,15 @@ The parser loads the target lib. The lib provides the list of valid opcodes,
 registers, and condition keywords. The parser validates that each opcode,
 register, and condition keyword is legal for the target.
 
-The parser resolves `mod` declarations by finding the named `.op` file on the
-include search path. The parser reads the file and runs the lexer on it
-internally. The parser builds a module tree.
+The parser resolves a `mod name;` declaration by finding the named file in the
+same directory as the current module. It looks for `name.op` first. If
+`name.op` does not exist, it looks for `name/mod.op`. The parser does not
+search sibling directories. The parser does not search an include path for
+module files. The parser resolves a `use` declaration by walking the path. A
+dependency lib name resolves to the lib root in `~/.carts/`. The `lib::` root
+resolves to the current lib root. The `self::` root resolves to the current
+module. The `super::` root resolves to the parent module. A relative name
+resolves to a child module or item in the current module.
 
 The parser evaluates `#[cfg(...)]` attributes. If the predicate is false, the
 parser drops the item from the AST. The parser evaluates the cfg predicate
@@ -494,6 +500,13 @@ future revision may define a proper registry protocol.
 
 The `Cart.toml` `[dependencies]` section lists the libs that a project uses.
 The `cart` tool resolves dependencies from `~/.carts/` before invoking `opc`.
+
+A lib exports only its `pub` items. Private items are not visible to libs or
+ROMs that depend on this lib. The `pub use` re-export form makes an imported
+item visible to downstream consumers. The compiler records the `pub` flag on
+each symbol in the `.opb` symbol table. The linker reads the flag to decide
+whether a symbol is visible across a lib boundary. See `file-formats.md` for
+the symbol table entry layout.
 
 ### Lib names
 

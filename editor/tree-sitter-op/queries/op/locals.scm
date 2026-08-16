@@ -29,7 +29,8 @@
 (selector) @local.reference
 (register_ref) @local.reference
 (label_ref) @local.reference
-(use_path) @local.reference
+(use_simple) @local.reference
+(use_path_root) @local.reference
 
 ; --- Scopes ----------------------------------------------------------------
 

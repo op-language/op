@@ -14,7 +14,7 @@ pub mod registry;
 
 use op_common::TargetTriplet;
 
-pub use memory::{MemoryRegion, MemoryKind};
+pub use memory::{MemoryKind, MemoryRegion};
 pub use registry::Registry;
 
 /// An output format for the final ROM image.

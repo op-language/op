@@ -22,6 +22,17 @@ make all
 This copies `op.so` to `~/.local/share/nvim/site/parser/op.so` and the
 query files to `~/.local/share/nvim/site/queries/op/`.
 
+To install all editor support (tree-sitter parser, query files, ftdetect,
+and the regex syntax fallback) in one command, run the editor install
+script from the repo root:
+
+```sh
+./editor/install.sh
+```
+
+This wraps `make install` and also copies `ftdetect/op.lua` and
+`syntax/op.vim` into `~/.config/nvim/`.
+
 ## Targets
 
 | Target | Description |

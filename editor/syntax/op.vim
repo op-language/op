@@ -12,7 +12,7 @@ endif
 " --- Keywords ---------------------------------------------------------------
 
 syntax keyword opKeyword fn inline return noreturn volatile
-syntax keyword opKeyword struct type enum const mod use pub
+syntax keyword opKeyword struct type enum const mod use pub lib self super
 syntax keyword opKeyword if else while do loop switch case default
 syntax keyword opKeyword near far as
 syntax keyword opBoolean true false

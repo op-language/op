@@ -63,6 +63,8 @@ pub struct Symbol {
     pub offset: u32,
     pub size: u32,
     pub kind: SymbolKind,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 /// The kind of a symbol.
