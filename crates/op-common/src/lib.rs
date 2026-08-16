@@ -13,4 +13,4 @@ pub mod tokens;
 pub use ast::AstFile;
 pub use envelope::{from_json, to_json, Envelope};
 pub use target::{TargetTriplet, TripletError};
-pub use tokens::{Token, TokenStream};
+pub use tokens::{Token, TokenStream, TokenType};
