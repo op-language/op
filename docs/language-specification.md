@@ -140,6 +140,9 @@ as an identifier.
 | `near` | Force a short branch |
 | `far` | Force a long branch |
 | `as` | Cast or alias in certain contexts |
+| `lib` | Path root: the current lib root |
+| `self` | Path root: the current module |
+| `super` | Path root: the parent module |
 | `true` | Boolean true literal |
 | `false` | Boolean false literal |
 
@@ -591,22 +594,63 @@ system section.
 
 ### mod and use declarations
 
-A `mod` declaration declares a module. A module groups declarations. A module
-may reference another file or may contain a body block.
+A `mod` declaration declares a module. A module groups declarations. The
+`mod` declaration has two forms. The first form is the file module. Write
+`mod name;`. The compiler resolves `name` to a file. It looks for `name.op`
+in the same directory. If `name.op` does not exist, it looks for
+`name/mod.op`. This matches the Rust 2018 edition rules. The compiler does
+not search sibling directories. The second form is the inline module. Write
+`mod name { ... }`. The body holds the module items. Write `pub mod name;` to
+declare a public module. The items of a public module are visible to other
+modules and libs. A `mod` declaration may carry attributes. The valid
+attributes are `#[cfg(...)]`, `#[ines(...)]`, `#[lnx(...)]`, and
+`#[setpad(...)]`.
 
 ```
 mod graphics;
 mod audio {
     fn play_sound() { }
 }
+pub mod video;
 ```
 
-A `use` declaration imports a path into the current scope.
+A `use` declaration imports paths into the current scope. Write
+`use path::to::item;` to import a single item. Write `use path::to::*;` to
+glob import all public items. Write `use path::to::{a, b, c};` to group
+import. Write `use path::to::{a, b::{c, d}};` to nest group import. Write
+`use path::to::item as alias;` to import with a local alias. The form
+`use path::to::* as alias;` is not valid. Rust does not support this form.
+Write `pub use path::to::item;` to re-export an item. A re-exported item is
+visible to modules that `use` the current module. A `use` declaration may
+import multiple paths. Write `use a, b, c;`.
 
 ```
 use nes::ppu;
 use cpu::{a, x, y};
+use cpu::{a, x, {z, w}};
+use std::cpu as cpu;
+use std::machine::*;
+pub use mos6502 as cpu;
 ```
+
+A path root is the first segment of a path. A dependency lib name is a valid
+root. For example, `use std::*;` uses the Rust 2018 style. Write `lib::` to
+refer to the current lib root. Write `self::` to refer to the current
+module. Write `super::` to refer to the parent module. A plain relative path
+resolves against the current module. For example, `use cpu::a;` resolves
+relative to the current module.
+
+Items are private by default. The `pub` keyword makes an item visible to all
+modules and libs. The language does not have `pub(crate)`, `pub(super)`, or
+`pub(in path)`. A lib exports only its `pub` items to downstream libs and
+ROMs. Private items are not visible across lib boundaries.
+
+A module identifier obeys the identifier rules. An identifier starts with a
+letter or underscore. The remaining characters are letters, digits, or
+underscores. A module identifier must not be a keyword. The `cfg` value for
+`cpu` or `machine` is the triplet string. The triplet string may contain
+hyphens. The module identifier is the underscore form. For example, write
+`#[cfg(machine = "apple-ii")] mod apple_ii;`.
 
 ## Conditional compilation
 
@@ -646,6 +690,10 @@ const IS_NES: bool = true;
 A program passes feature flags on the `opc` command line or in the
 `Cart.toml` `[features]` section. The compiler defines the `target`, `cpu`,
 `manufacturer`, `machine`, and `variant` keys from the target triplet.
+
+The `cpu` and `machine` cfg values are the triplet components. These values
+may contain hyphens. The module identifier is the underscore form. For
+example, write `#[cfg(machine = "apple-ii")] mod apple_ii;`.
 
 ## Memory model
 
@@ -1602,10 +1650,19 @@ type_decl      ::= 'type' IDENTIFIER '=' type ';'
 enum_decl      ::= 'enum' IDENTIFIER '{' enum_variant (',' enum_variant)* '}'
 enum_variant   ::= IDENTIFIER '=' expr
 
-mod_decl       ::= 'mod' IDENTIFIER (';' | '{' module_item* '}')
+mod_decl       ::= 'pub'? 'mod' IDENTIFIER (';' | '{' module_item* '}')
 
-use_decl       ::= 'use' use_path (',' use_path)* ';'
-use_path       ::= IDENTIFIER ('::' IDENTIFIER)*
+use_decl       ::= 'pub'? 'use' use_tree (',' use_tree)* ';'
+
+use_tree       ::= use_path ('as' IDENTIFIER)?
+                 | use_path '::' '{' use_tree (',' use_tree)* ','? '}'
+                 | use_path '::' '*'
+
+use_path       ::= path_root ('::' IDENTIFIER)*
+path_root      ::= IDENTIFIER
+                 | 'lib'
+                 | 'self'
+                 | 'super'
 
 block_attribute ::= '#[' block_attr_name '(' attr_args ')' ']' '{' module_item* '}'
 
