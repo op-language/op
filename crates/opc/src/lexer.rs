@@ -317,6 +317,60 @@ pub fn lex_source(file: &str, source: &str) -> (TokenStream, Vec<Diagnostic>) {
             continue;
         }
 
+        // Numbers: decimal, binary (%), hex (0x).
+        // Check this before single-char operators so % is not consumed
+        // as Op_percent when it starts a binary number.
+        if c == '%' || c.is_ascii_digit() {
+            // % is a binary number prefix only if followed by 0 or 1.
+            // Otherwise it is the modulo operator.
+            if c == '%' {
+                let next = chars.get(pos + 1).copied();
+                if next != Some('0') && next != Some('1') {
+                    // Not a binary number — fall through to operator handling.
+                } else {
+                    let start = pos;
+                    advance(&mut pos, &mut col);
+                    while pos < chars.len() && chars[pos].is_ascii_digit() {
+                        if chars[pos] != '0' && chars[pos] != '1' {
+                            break;
+                        }
+                        advance(&mut pos, &mut col);
+                    }
+                    let value: String = chars[start..pos].iter().collect();
+                    push_token(
+                        &mut stream,
+                        TokenType::Number,
+                        &value,
+                        token_line,
+                        token_col,
+                    );
+                    continue;
+                }
+            } else {
+                let start = pos;
+                if c == '0' && pos + 1 < chars.len() && chars[pos + 1] == 'x' {
+                    advance(&mut pos, &mut col);
+                    advance(&mut pos, &mut col);
+                    while pos < chars.len() && chars[pos].is_ascii_hexdigit() {
+                        advance(&mut pos, &mut col);
+                    }
+                } else {
+                    while pos < chars.len() && chars[pos].is_ascii_digit() {
+                        advance(&mut pos, &mut col);
+                    }
+                }
+                let value: String = chars[start..pos].iter().collect();
+                push_token(
+                    &mut stream,
+                    TokenType::Number,
+                    &value,
+                    token_line,
+                    token_col,
+                );
+                continue;
+            }
+        }
+
         // Single-character operators and punctuation.
         for (op_char, op_type) in SINGLE_CHAR_OPS {
             if c == *op_char {
@@ -327,41 +381,6 @@ pub fn lex_source(file: &str, source: &str) -> (TokenStream, Vec<Diagnostic>) {
             }
         }
         if matched {
-            continue;
-        }
-
-        // Numbers: decimal, binary (%), hex (0x).
-        if c == '%' || c.is_ascii_digit() {
-            let start = pos;
-            if c == '%' {
-                advance(&mut pos, &mut col);
-                while pos < chars.len() && chars[pos].is_ascii_digit() {
-                    // binary digits are 0 and 1
-                    if chars[pos] != '0' && chars[pos] != '1' {
-                        break;
-                    }
-                    advance(&mut pos, &mut col);
-                }
-            } else if c == '0' && pos + 1 < chars.len() && chars[pos + 1] == 'x' {
-                advance(&mut pos, &mut col); // 0
-                advance(&mut pos, &mut col); // x
-                while pos < chars.len() && chars[pos].is_ascii_hexdigit() {
-                    advance(&mut pos, &mut col);
-                }
-            } else {
-                // decimal
-                while pos < chars.len() && chars[pos].is_ascii_digit() {
-                    advance(&mut pos, &mut col);
-                }
-            }
-            let value: String = chars[start..pos].iter().collect();
-            push_token(
-                &mut stream,
-                TokenType::Number,
-                &value,
-                token_line,
-                token_col,
-            );
             continue;
         }
 
