@@ -233,6 +233,8 @@ Post-compile (.opl):
 Post-link (.opl after `--link`): all relocations are resolved, sections are
 laid out in the final memory map, and the data array contains the final bytes.
 
+See `file-formats.md` for the full `.opl` format specification.
+
 ### Output formats
 
 | Format | Target | Description |

@@ -13,19 +13,19 @@ This document uses the keywords **must**, **shall**, and **may** as RFC
 ## Scope
 
 This document defines the binary layout of the `.opb` file, the JSON
-layout of the `.opx` file, and the JSON layout of the `.opa` file. For
-the `.opb` file, the document defines the header, the section table, the
-symbol table, the relocation table, and the data blocks. For the `.opx`
-file, the document defines the envelope fields, the token fields, and the
-token type reference table. For the `.opa` file, the document defines the
-envelope fields, the module fields, the item node types, the function
-body statement node types, the expression node types, and the operand
-node types.
+layout of the `.opx` file, the JSON layout of the `.opa` file, and the
+JSON layout of the `.opl` file. For the `.opb` file, the document defines
+the header, the section table, the symbol table, the relocation table,
+and the data blocks. For the `.opx` file, the document defines the
+envelope fields, the token fields, and the token type reference table.
+For the `.opa` file, the document defines the envelope fields, the module
+fields, the item node types, the function body statement node types, the
+expression node types, and the operand node types. For the `.opl` file,
+the document defines the envelope fields, the section fields, the symbol
+fields, the relocation fields, and the relocation kind values.
 
-This document does not define the `.opl` intermediate file format. The
-document `technical-design.md` in the `op` repository defines that
-format. This document does not define the Op language grammar. The
-document `language-specification.md` defines the grammar.
+This document does not define the Op language grammar. The document
+`language-specification.md` defines the grammar.
 
 ## Purpose
 
@@ -796,6 +796,137 @@ fn main() {
       }
     ]
   }
+}
+```
+
+## Op Object Data (.opl) File Format
+
+Version 1.0
+
+### Purpose
+
+The `.opl` file is the JSON output of the `opc --compile` stage and the
+`opc --link` stage. The post-compile file holds the object data before
+the linker resolves relocations. The post-link file holds the final
+object data after the linker resolves relocations and lays out the
+sections. A developer can inspect the `.opl` file to debug the codegen
+and linker output.
+
+### Format
+
+The `.opl` file is a JSON document. The file uses UTF-8 encoding. The
+`opc` binary writes the file with pretty-printed JSON (two-space
+indentation).
+
+### Envelope fields
+
+The top-level JSON object has three fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | integer | The format version. Current value: `1`. |
+| `target` | string | The target triplet string. |
+| `sections` | array | The list of Section objects. |
+
+### Section fields
+
+Each element of the `sections` array is a JSON object with these fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The section name. |
+| `kind` | string | The section kind. Valid values: `rom`, `ram`, `chr`. |
+| `org` | integer | The origin address of the section. |
+| `bank` | integer | The bank number of the section. |
+| `maxsize` | integer | The maximum byte count of the section. |
+| `symbols` | array | The list of Symbol objects in this section. |
+| `relocations` | array | The list of Relocation objects in this section. |
+| `data` | array of integers | The raw byte data. Each integer is a byte value from 0 to 255. |
+
+### Symbol fields
+
+Each element of the `symbols` array is a JSON object with these fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The symbol name. |
+| `offset` | integer | The offset of the symbol from the section origin. |
+| `size` | integer | The byte size of the symbol. |
+| `kind` | string | The symbol kind. Valid values: `function`, `variable`, `label`. |
+| `is_pub` | boolean | True if the symbol is public and visible across lib boundaries. |
+
+### Relocation fields
+
+Each element of the `relocations` array is a JSON object with these
+fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `offset` | integer | The byte offset within the section data where the linker must patch the value. |
+| `kind` | string | The relocation kind. See the table below. |
+| `symbol` | string | The name of the symbol that the relocation references. |
+
+### Relocation kind values
+
+| Value | Size | Description |
+|-------|------|-------------|
+| `abs8` | 1 byte | Absolute 8-bit address. |
+| `abs16` | 2 bytes | Absolute 16-bit address. |
+| `abs24` | 3 bytes | Absolute 24-bit address (65C816). |
+| `abs32` | 4 bytes | Absolute 32-bit address (68000). |
+| `branch8` | 1 byte | Relative branch offset, 8-bit signed. |
+| `branch16` | 2 bytes | Relative branch offset, 16-bit signed. |
+| `lo8` | 1 byte | Low byte of a 16-bit symbol address. |
+| `hi8` | 1 byte | High byte of a 16-bit symbol address. |
+| `bank` | 1 byte | Bank number of a symbol (Lynx). |
+
+### Post-compile and post-link differences
+
+The post-compile `.opl` file has unresolved relocations. The `data`
+array holds the encoded bytes with placeholder values where the linker
+must patch relocations. The `relocations` array lists every relocation
+that the linker must resolve.
+
+The post-link `.opl` file has all relocations resolved. The `data` array
+holds the final bytes with all relocation sites patched. The
+`relocations` array is empty or absent. The sections are laid out in the
+final memory map.
+
+### Example
+
+Source file `main.op`:
+
+```
+#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+    fn main() {
+        lda 0
+        sta 0x2000
+    }
+}
+```
+
+Post-compile `.opl` output:
+
+```json
+{
+  "version": 1,
+  "target": "mos6502-nintendo-nes-ntsc",
+  "sections": [
+    {
+      "name": "rom_bank0",
+      "kind": "rom",
+      "org": 49152,
+      "bank": 0,
+      "maxsize": 16384,
+      "symbols": [
+        { "name": "main", "offset": 0, "size": 6, "kind": "function", "is_pub": false }
+      ],
+      "relocations": [
+        { "offset": 3, "kind": "abs16", "symbol": "0x2000" }
+      ],
+      "data": [ 169, 0, 141, 0, 0, 96 ]
+    }
+  ]
 }
 ```
 
