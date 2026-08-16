@@ -1,26 +1,22 @@
 //! NES Demo Game
 //!
-//! This file demonstrates the HLA language as specified in
+//! This file demonstrates the Op language as specified in
 //! docs/language-specification.md. It targets the NTSC NES
 //! (mos6502-nintendo-nes-ntsc).
 //!
 //! Build with:
-//!   hlalex --target mos6502-nintendo-nes-ntsc nes-game.hla | \
-//!   hlaparse --target mos6502-nintendo-nes-ntsc | \
-//!   hlacc --target mos6502-nintendo-nes-ntsc -O1 | \
-//!   hlalink --target mos6502-nintendo-nes-ntsc --format ines -o nes.nes
+//!   opc --target mos6502-nintendo-nes-ntsc --format ines -o nes.nes nes-game.op
+//!
+//! This example uses the `std` lib. The `std::cpu` module provides
+//! CPU register references, opcodes, and condition keywords. The
+//! `std::machine` module provides the NES platform constants, types,
+//! and inline macros.
 
-mod nes_std;
 mod nes_code;
 
-use nes_std::*;
+use std::cpu::*;
+use std::machine::*;
 use nes_code::*;
-
-// With the std lib, this file would begin:
-//   use std::*;
-//   use std::cpu::*;
-//   use std::machine::*;
-// and `cpu::a`, `machine::PPU::CNT0` would be available directly.
 
 // --- iNES header -----------------------------------------------------------
 
@@ -49,19 +45,19 @@ use nes_code::*;
 #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
 
     #[interrupt(reset)]
-    include_fn!(nes_code::main);
+    locate_fn!(nes_code::main);
 
     #[interrupt(nmi)]
-    include_fn!(nes_code::nmi_handler);
+    locate_fn!(nes_code::nmi_handler);
 
     #[interrupt(irq)]
-    include_fn!(nes_code::irq_handler);
+    locate_fn!(nes_code::irq_handler);
 }
 
 // --- CHR data (pattern tables) ---------------------------------------------
 
 #[chr(bank = 0)] {
-    include_bytes!("font.chr")
+    locate_bytes!("font.chr")
 }
 
 // --- filler/padding --------------------------------------------------------

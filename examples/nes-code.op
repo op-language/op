@@ -1,8 +1,10 @@
 //! NES Game Code
 //!
-//! Inline macros and functions for the NES demo game.
+//! Inline macros and functions for the NES demo game. Uses the `std`
+//! lib for CPU and machine definitions.
 
-use nes_std::*;
+use std::cpu::*;
+use std::machine::*;
 
 // --- inline macros ---------------------------------------------------------
 
