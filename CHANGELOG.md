@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0]
+
+### Added
+- Rust-style `mod`/`use` rules (pragmatic subset): `pub mod`, `pub use`,
+  `as` aliases, glob imports, nested group imports, and `lib`/`self`/`super`
+  path roots.
+- Reserved `lib`, `self`, `super` as keywords.
+- `is_pub` field on the `op-ir` `Symbol` type for export visibility.
+- `editor/install.sh` to install all editor artifacts (tree-sitter parser,
+  query files, ftdetect, regex syntax) in one command.
+
+### Changed
+- `mod name;` now resolves Rust-style: `name.op` or `name/mod.op` in the
+  same directory. No include-path search for module files.
+- The `.opb` format version bumped from `1` to `2`. The symbol table
+  entry `reserved` field (offset 16) is now `flags` (bit 0 = `pub`).
+- The tree-sitter grammar, the query files, and the regex syntax file
+  now parse and highlight the new `use`/`mod` forms and the new keywords.
+- The language specification, the technical design docs, and the
+  `.opb` file-format spec document the new resolution, visibility, and
+  format rules.
+
+### Breaking
+- `lib`, `self`, `super` are now reserved keywords. Code that uses these
+  words as identifiers must rename them.
+- The `Item::ModDecl` and `Item::UseDecl` AST node shapes changed.
+  `.opa` files from older `opc` versions are not compatible.
+- The `.opb` format version is `2`. A linker that expects version `1`
+  must read the new `flags` field.
+
 ## [0.1.0]
 
 ### Added
