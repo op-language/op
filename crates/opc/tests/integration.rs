@@ -314,3 +314,122 @@ fn parse_with_feature_flag() {
     );
     assert_eq!(ast.root.items.len(), 2);
 }
+
+// === Lexer + Parser + Codegen integration tests ============================
+
+use opc::codegen::compile_source;
+
+#[test]
+fn lex_parse_compile_nes_code() {
+    let source = include_str!("../../../examples/nes-code.op");
+    let (ast, parse_diags) = parse_source(
+        "examples/nes-code.op",
+        source,
+        "mos6502-nintendo-nes-ntsc",
+        &[],
+    );
+
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let errors: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors: {:?}", errors);
+
+    // nes-code.op has no block attributes, so no sections are produced.
+    // But the codegen should not crash.
+    assert_eq!(obj.target, "mos6502-nintendo-nes-ntsc");
+}
+
+#[test]
+fn lex_parse_compile_nes_game() {
+    let source = include_str!("../../../examples/nes-game.op");
+    let (ast, parse_diags) = parse_source(
+        "examples/nes-game.op",
+        source,
+        "mos6502-nintendo-nes-ntsc",
+        &[],
+    );
+
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    let has_sections = !obj.sections.is_empty();
+
+    // nes-game.op has #[rom], #[ram], #[chr] blocks — should produce sections.
+    assert!(has_sections, "expected at least 1 section");
+
+    // Check that we have ROM and RAM sections.
+    let has_rom = obj
+        .sections
+        .iter()
+        .any(|s| s.kind == op_ir::SectionKind::Rom);
+    let has_ram = obj
+        .sections
+        .iter()
+        .any(|s| s.kind == op_ir::SectionKind::Ram);
+    assert!(has_rom, "expected a ROM section");
+    assert!(has_ram, "expected a RAM section");
+}
+
+#[test]
+fn full_pipeline_lex_parse_compile() {
+    let src = r#"
+        #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+            fn main() {
+                lda 0
+                sta 0x2000
+                inx
+                loop {
+                    inx
+                }
+                return
+            }
+        }
+
+        #[ram(org = 0x0000, maxsize = 0x100)] {
+            counter: u8;
+            flag: u8 = 0;
+        }
+    "#;
+
+    let (ast, parse_diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let errors: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors: {:?}", errors);
+
+    assert_eq!(obj.sections.len(), 2);
+
+    // ROM section should have data (encoded instructions).
+    let rom = &obj.sections[0];
+    assert_eq!(rom.kind, op_ir::SectionKind::Rom);
+    assert!(!rom.data.is_empty(), "ROM section should have encoded data");
+
+    // ROM section should have a 'main' function symbol.
+    assert!(rom.symbols.iter().any(|s| s.name == "main"));
+
+    // RAM section should have variable symbols.
+    let ram = &obj.sections[1];
+    assert_eq!(ram.kind, op_ir::SectionKind::Ram);
+    assert!(ram.symbols.iter().any(|s| s.name == "counter"));
+    assert!(ram.symbols.iter().any(|s| s.name == "flag"));
+}

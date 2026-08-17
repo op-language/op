@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use op_common::ast::{
-    Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand,
-    PlacementArg, SwitchCase, Type,
+    Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand, PlacementArg, SwitchCase,
+    Type,
 };
 use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
