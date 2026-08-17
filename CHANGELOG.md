@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Added
+- Complete codegen implementation for the `opc` binary. The codegen walks
+  the AST and emits an `ObjectFile` with sections, symbols, relocations,
+  and data bytes. It handles all 6 CPU families (6502, 65SC02, 65C816,
+  68000, Z80, LR35902) with hard-coded encoding tables.
+- Keyhole peephole optimizer with all 9 transforms: redundant load,
+  redundant store, load-store-load, dead store, branch-to-next,
+  branch-to-branch, constant fold, strength reduce, stack push-pop. The
+  optimizer respects volatile variables and runs when opt_level >= 1.
+- `.opl` file format specification in `docs/file-formats.md` with the
+  complete section, symbol, and relocation field reference.
+- Codegen unit tests in `crates/opc/tests/codegen.rs`.
+- Extended integration tests in `crates/opc/tests/integration.rs` with
+  lexer+parser+codegen tests.
+
+### Changed
+- The `opc` codegen no longer returns an empty `ObjectFile`. The new
+  implementation walks the AST and encodes all instructions.
+- The `docs/file-formats.md` scope statement now includes the `.opl`
+  format.
+
 ## [0.4.0]
 
 ### Added
