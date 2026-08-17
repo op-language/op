@@ -474,6 +474,10 @@ bank count, block count, block size. ROM blocks concatenated.
 
 **Intel HEX:** Sections as Intel HEX records. Suits EEPROM burners.
 
+See `docs/supported-emulators.md` for the complete list of supported
+emulators, ROM formats, and debug-target configuration for each target
+system.
+
 ## Libs
 
 Libs are Op libraries that provide CPU and platform definitions. The `opc`
