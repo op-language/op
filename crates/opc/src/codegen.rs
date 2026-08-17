@@ -154,8 +154,26 @@ impl Codegen {
                 name,
                 body,
                 is_noreturn,
-                ..
+                attributes,
             } => {
+                // Check for #[interrupt(name)] attribute.
+                for attr in attributes {
+                    if attr.path == "interrupt" {
+                        if let Some(int_name) = attr.args.first().map(|a| a.name.as_str()) {
+                            if !int_name.is_empty() {
+                                if let Some(vec_addr) =
+                                    interrupt_vector_address(&self.target.cpu, int_name)
+                                {
+                                    self.interrupt_vectors.push(op_ir::InterruptVector {
+                                        name: int_name.to_string(),
+                                        address: vec_addr,
+                                        target: name.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 self.compile_fn(name, body, *is_noreturn);
             }
             Item::InlineFnDecl { name, body, .. } => {
@@ -182,14 +200,83 @@ impl Codegen {
             Item::Placement {
                 macro_name,
                 argument,
-                ..
+                attributes,
             } => {
+                // Check for #[interrupt(name)] attribute on placements.
+                for attr in attributes {
+                    if attr.path == "interrupt" {
+                        if let Some(int_name) = attr.args.first().map(|a| a.name.as_str()) {
+                            if !int_name.is_empty() {
+                                // Get the target function name from the placement argument.
+                                let target_name = if let PlacementArg::Path { segments } = argument
+                                {
+                                    segments.last().cloned().unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                if !target_name.is_empty() {
+                                    if let Some(vec_addr) =
+                                        interrupt_vector_address(&self.target.cpu, int_name)
+                                    {
+                                        self.interrupt_vectors.push(op_ir::InterruptVector {
+                                            name: int_name.to_string(),
+                                            address: vec_addr,
+                                            target: target_name,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.handle_placement(macro_name, argument);
             }
         }
     }
 
     fn handle_block_attribute(&mut self, attr: &Attribute, items: &[Item]) {
+        // Handle standalone attributes (empty items) that are not section blocks.
+        if items.is_empty() {
+            match attr.path.as_str() {
+                "ines" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "ines".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "lnx" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "lnx".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "setpad" => {
+                    if let Some(arg) = attr.args.first() {
+                        let val = arg.value.trim_matches('"');
+                        if let Some(hex) = val.strip_prefix("0x") {
+                            self.pad_byte = u8::from_str_radix(hex, 16).unwrap_or(0x00);
+                        } else {
+                            self.pad_byte = val.parse::<u8>().unwrap_or(0x00);
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let kind = match attr.path.as_str() {
             "rom" => SectionKind::Rom,
             "ram" => SectionKind::Ram,
@@ -877,6 +964,31 @@ impl Codegen {
 }
 
 // --- Helper functions -------------------------------------------------------
+
+/// Look up the vector table address for an interrupt name on a given CPU family.
+/// Returns the address where the linker should write the 2-byte target function
+/// address.
+fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
+    match cpu {
+        "mos6502" | "mos65sc02" | "ricoh2a03" | "ricoh2a07" => match interrupt_name {
+            "reset" => Some(0xFFFC),
+            "nmi" => Some(0xFFFA),
+            "irq" => Some(0xFFFE),
+            _ => None,
+        },
+        "wdc65c816" => match interrupt_name {
+            "reset" => Some(0xFFFC),
+            "nmi" => Some(0xFFEA),
+            "irq" => Some(0xFFEE),
+            "abort" => Some(0xFFE8),
+            "cop" => Some(0xFFE4),
+            "brk" => Some(0xFFE6),
+            _ => None,
+        },
+        // Other CPU families: no vector table support yet.
+        _ => None,
+    }
+}
 
 /// Get a u32 value from an attribute argument by name.
 fn get_attr_u32(attr: &Attribute, key: &str) -> Option<u32> {
