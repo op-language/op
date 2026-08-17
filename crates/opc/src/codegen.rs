@@ -80,6 +80,9 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
         label_counter: 0,
+        interrupt_vectors: Vec::new(),
+        header: None,
+        pad_byte: 0x00,
         diags: Vec::new(),
     };
 
@@ -93,6 +96,9 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         version: 1,
         target: ast.target.clone(),
         sections,
+        interrupt_vectors: codegen.interrupt_vectors,
+        header: codegen.header,
+        pad_byte: codegen.pad_byte,
     };
 
     (obj, codegen.diags)
@@ -109,6 +115,9 @@ struct Codegen {
     inline_fns: HashMap<String, Vec<FnStmt>>,
     const_values: HashMap<String, i64>,
     label_counter: u32,
+    interrupt_vectors: Vec<op_ir::InterruptVector>,
+    header: Option<op_ir::HeaderFields>,
+    pad_byte: u8,
     diags: Vec<Diagnostic>,
 }
 
