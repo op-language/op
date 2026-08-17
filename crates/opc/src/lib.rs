@@ -9,6 +9,7 @@
 
 pub mod cli;
 pub mod codegen;
+pub mod encoding;
 pub mod lexer;
 pub mod linker;
 pub mod output;
