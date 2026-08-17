@@ -5,12 +5,6 @@
 
 use opc::parser::parse_source;
 
-/// Helper: parse a source string and return the item count.
-fn count_items(src: &str, target: &str) -> usize {
-    let (ast, _diags) = parse_source("test.op", src, target, &[]);
-    ast.root.items.len()
-}
-
 #[test]
 fn lex_then_parse_nes_code() {
     let source = include_str!("../../../examples/nes-code.op");

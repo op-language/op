@@ -8,10 +8,10 @@
 
 use anyhow::Result;
 use op_common::ast::{
-    Access, Attribute, BranchHint, Condition, Expr, FnStmt, InitValue, Item, Module, Operand,
+    Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand,
     PlacementArg, SwitchCase, Type,
 };
-use op_common::{ast::Attribute as AstAttribute, AstFile, TargetTriplet};
+use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
 use op_ir::{ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol, SymbolKind};
 use std::collections::HashMap;
@@ -85,10 +85,14 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
 
     codegen.walk_module(&ast.root);
 
+    // Run the peephole optimizer on the sections.
+    let mut sections = codegen.sections;
+    crate::optimizer::optimize(&mut sections, opt_level);
+
     let obj = ObjectFile {
         version: 1,
         target: ast.target.clone(),
-        sections: codegen.sections,
+        sections,
     };
 
     (obj, codegen.diags)
@@ -491,7 +495,7 @@ impl Codegen {
                     index_reg.as_deref(),
                 );
             }
-            Operand::RegisterRef { name } => {
+            Operand::RegisterRef { name: _ } => {
                 // cpu::a, cpu::x, cpu::y — for switch statements.
                 // No direct encoding; these are handled by switch.
             }
@@ -511,7 +515,7 @@ impl Codegen {
                     }
                 }
             }
-            Operand::Selector { path, accesses } => {
+            Operand::Selector { path, accesses: _ } => {
                 // Selector like PPU::CNT0 — resolve to a constant or symbol.
                 let sym = if !path.is_empty() {
                     Some(path.join("::"))
@@ -731,13 +735,13 @@ impl Codegen {
         self.emit_byte(((loop_start >> 8) & 0xFF) as u8);
     }
 
-    fn compile_switch(&mut self, register: &str, cases: &[SwitchCase]) {
+    fn compile_switch(&mut self, _register: &str, cases: &[SwitchCase]) {
         // For each case, emit CMP #value then BEQ to the case body.
         let mut case_patches: Vec<(usize, u32)> = Vec::new();
 
         for case in cases {
             match case {
-                SwitchCase::Case { expr, body } => {
+                SwitchCase::Case { expr, body: _ } => {
                     // CMP #value
                     let val = eval_expr(expr, &self.const_values).unwrap_or(0);
                     self.emit_byte(0xC9); // CMP immediate
