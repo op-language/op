@@ -1175,3 +1175,70 @@ fn val_to_bytes(val: i64, size: usize) -> Vec<u8> {
     }
     bytes
 }
+
+/// Find the std crate root directory.
+///
+/// Searches, in order:
+/// 1. The CLI include paths (`-I` / `--include`), in the order given.
+/// 2. The `OP_STD_PATH` environment variable.
+/// 3. The default install path `$HOME/.carts/std/src`.
+///
+/// Returns the first candidate directory that contains a `lib.op` file.
+#[allow(dead_code)]
+fn find_std_root(include_paths: &[String]) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    for path in include_paths {
+        candidates.push(std::path::Path::new(path).to_path_buf());
+    }
+
+    if let Ok(env) = std::env::var("OP_STD_PATH") {
+        if !env.is_empty() {
+            candidates.push(std::path::Path::new(&env).to_path_buf());
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::Path::new(&home).join(".carts/std/src"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("lib.op").is_file())
+}
+
+// --- Tests ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::find_std_root;
+
+    /// Run `f` with `OP_STD_PATH` and `HOME` pointed at locations that do
+    /// not contain a std root, then restore the previous environment.
+    fn with_isolated_env(tmp: &std::path::Path, f: impl FnOnce()) {
+        let old_op_std = std::env::var("OP_STD_PATH").ok();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("OP_STD_PATH", tmp.join("no-such-std"));
+        std::env::set_var("HOME", tmp);
+        f();
+        match old_op_std {
+            Some(value) => std::env::set_var("OP_STD_PATH", value),
+            None => std::env::remove_var("OP_STD_PATH"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn find_std_root_returns_none_when_missing() {
+        let tmp = std::env::temp_dir().join(format!("opc-find-std-root-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        with_isolated_env(&tmp, || {
+            let include = vec![tmp.join("no-such-include").to_string_lossy().to_string()];
+            assert_eq!(find_std_root(&include), None);
+            assert_eq!(find_std_root(&[]), None);
+        });
+    }
+}
