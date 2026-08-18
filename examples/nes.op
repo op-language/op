@@ -1,59 +1,32 @@
-//! NES Game Code
+//! NES Demo Game
 //!
-//! Inline macros and functions for the NES demo game. Uses the `std`
-//! lib for CPU and machine definitions.
+//! This file demonstrates the Op language as specified in
+//! docs/language-specification.md. It targets the NTSC NES
+//! (mos6502-nintendo-nes-ntsc).
+//!
+//! Build with:
+//!   opc --target mos6502-nintendo-nes-ntsc --format ines -o nes.nes nes-game.op
+//!
+//! This example uses the `std` lib. The `std::cpu` module provides
+//! CPU register references, opcodes, and condition keywords. The
+//! `std::machine` module provides the NES platform constants, types,
+//! and inline macros.
 
 use std::cpu::*;
 use std::machine::*;
 
 // --- inline macros ---------------------------------------------------------
 
-inline fn assign(dest, value) {
-    lda value
-    sta dest
-}
-
-inline fn assign_16i(dest, value) {
-    lda #lo!(value)
-    sta dest + 0
-    lda #hi!(value)
-    sta dest + 1
-}
-
-inline fn vram_set_address_i(addr) {
-    lda PPU::STATUS
-    lda #hi!(addr)
-    sta PPU::ADDRESS
-    lda #lo!(addr)
-    sta PPU::ADDRESS
-}
-
-inline fn vram_clear_address() {
-    lda 0
-    sta PPU::ADDRESS
-    sta PPU::ADDRESS
-}
-
-inline fn vram_write(value) {
-    lda value
-    sta PPU::IO
-}
-
-inline fn vram_write_a() {
-    sta PPU::IO
-}
-
-inline fn turn_video_on() {
-    assign(PPU::CNT1, CR_BACKVISIBLE | CR_BACKNOCLIP)
-}
-
-inline fn turn_video_off() {
-    assign(PPU::CNT1, 0)
-}
-
 inline fn wait_for(amount) {
     ldx amount
     wait_for_func()
+}
+
+inline fn wait_for_func() {
+    do {
+        vblank_wait_full()
+        dex
+    } while (not zero)
 }
 
 inline fn vram_write_string(addr, str) {
@@ -63,26 +36,6 @@ inline fn vram_write_string(addr, str) {
 }
 
 // --- functions -------------------------------------------------------------
-
-fn disable_interrupts() {
-    sei
-}
-
-fn reset_stack() {
-    ldx 0xFF
-    txs
-}
-
-fn system_initialize() {
-    disable_interrupts()
-    reset_stack()
-    lda 0
-    sta PPU::CNT0
-    sta PPU::CNT1
-    sta PPU::BG_SCROLL
-    sta PPU::BG_SCROLL
-    vram_clear_address()
-}
 
 fn vram_init() {
     vram_set_address_i(PAL_ADDRESS)
@@ -135,30 +88,6 @@ fn pal_animate() {
     vram_clear_address()
 }
 
-fn wait_for_func() {
-    do {
-        vblank_wait_full()
-        dex
-    } while (not zero)
-}
-
-fn vblank_wait_full() {
-    vblank_wait()
-    unvblank_wait()
-}
-
-fn vblank_wait() {
-    do {
-        lda PPU::STATUS
-    } while (is plus)
-}
-
-fn unvblank_wait() {
-    do {
-        lda PPU::STATUS
-    } while (is minus)
-}
-
 // --- the main entry point --------------------------------------------------
 
 noreturn fn main() {
@@ -185,3 +114,49 @@ fn irq_handler() {
 // --- string data -----------------------------------------------------------
 
 str_hello: [u8] = "Hello, NES!";
+
+// --- iNES header -----------------------------------------------------------
+
+#[ines(
+    mapper = 0,
+    mirroring = "vertical",
+    battery = false,
+    trainer = false,
+    fourscreen = false,
+)]
+
+// --- RAM variables ---------------------------------------------------------
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+    counter: u8;
+    palcol: u8;
+    paddr: pointer;
+    pstr: pointer;
+    msgbuf: [u8; 64];
+    scroll: SCROLL;
+    oam: OAM_BUFFER;
+}
+
+// --- ROM: main code bank ---------------------------------------------------
+
+#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+
+    #[interrupt(reset)]
+    locate_fn!(nes_code::main);
+
+    #[interrupt(nmi)]
+    locate_fn!(nes_code::nmi_handler);
+
+    #[interrupt(irq)]
+    locate_fn!(nes_code::irq_handler);
+}
+
+// --- CHR data (pattern tables) ---------------------------------------------
+
+#[chr(bank = 0)] {
+    locate_bytes!("font.chr")
+}
+
+// --- filler/padding --------------------------------------------------------
+
+#[setpad(0xFF)]

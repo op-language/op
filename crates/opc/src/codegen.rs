@@ -607,7 +607,7 @@ impl Codegen {
                         self.emit_byte(op_byte);
                         self.emit_byte(0);
                         self.emit_byte(0);
-                        self.add_relocation(1, RelocKind::Abs16, name);
+                        self.add_relocation(2, RelocKind::Abs16, name);
                     }
                 }
             }
@@ -622,7 +622,7 @@ impl Codegen {
                     self.emit_byte(op_byte);
                     self.emit_byte(0);
                     self.emit_byte(0);
-                    self.add_relocation(1, RelocKind::Abs16, &sym);
+                    self.add_relocation(2, RelocKind::Abs16, &sym);
                 }
             }
         }
@@ -713,7 +713,7 @@ impl Codegen {
                         self.emit_byte(0);
                         self.emit_byte(0);
                         if let Some(sym) = expr_to_symbol(expr) {
-                            self.add_relocation(1, RelocKind::Abs16, &sym);
+                            self.add_relocation(2, RelocKind::Abs16, &sym);
                         }
                     }
                 }
@@ -889,7 +889,7 @@ impl Codegen {
             self.emit_byte(0x20); // JSR absolute
             self.emit_byte(0);
             self.emit_byte(0);
-            self.add_relocation(1, RelocKind::Abs16, name);
+            self.add_relocation(2, RelocKind::Abs16, name);
         }
     }
 
@@ -927,10 +927,11 @@ impl Codegen {
         }
     }
 
-    fn add_relocation(&mut self, offset: u32, kind: RelocKind, symbol: &str) {
+    fn add_relocation(&mut self, offset_from_end: u32, kind: RelocKind, symbol: &str) {
         if let Some(idx) = self.current_section {
+            let abs_offset = self.sections[idx].data.len() as u32 - offset_from_end;
             self.sections[idx].relocations.push(Relocation {
-                offset,
+                offset: abs_offset,
                 kind,
                 symbol: symbol.to_string(),
             });
