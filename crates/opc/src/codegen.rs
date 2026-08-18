@@ -9,12 +9,12 @@
 use anyhow::Result;
 use op_common::ast::{
     Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand, PlacementArg, SwitchCase,
-    Type, UseRoot,
+    Type, UseRoot, UseTail, UseTree,
 };
 use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
 use op_ir::{ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol, SymbolKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cli::OpcArgs;
 use crate::encoding::{get_full_encoding_table, AddrMode};
@@ -81,6 +81,8 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         const_values: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
+        enum_variants: HashMap::new(),
+        use_aliases: HashMap::new(),
         label_counter: 0,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -126,10 +128,7 @@ impl ModuleCache {
     /// Load the module at `path`, parsing the file on a cache miss.
     ///
     /// cfg evaluation happens during parsing: the parser drops items
-    /// whose `#[cfg]` predicate does not match `target`. The
-    /// `allow` attribute stays until Phase 5 wires this into use
-    /// resolution.
-    #[allow(dead_code)]
+    /// whose `#[cfg]` predicate does not match `target`.
     fn load_module(
         &mut self,
         path: &std::path::Path,
@@ -167,14 +166,16 @@ struct Codegen {
     current_section: Option<usize>,
     inline_fns: HashMap<String, Vec<FnStmt>>,
     const_values: HashMap<String, i64>,
-    /// Parsed std modules keyed by absolute file path. The `allow`
-    /// attribute stays until Phase 5 reads this field.
-    #[allow(dead_code)]
+    /// Parsed std modules keyed by absolute file path.
     module_cache: ModuleCache,
     /// Current module path stack. Empty at the crate root. A name is
     /// pushed when the codegen enters a module and popped when it
     /// leaves.
     module_path: Vec<String>,
+    /// Enum variant values keyed by `EnumName::VariantName`.
+    enum_variants: HashMap<String, i64>,
+    /// Module paths bound by `use ... as alias` imports.
+    use_aliases: HashMap<String, Vec<String>>,
     label_counter: u32,
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
@@ -195,9 +196,7 @@ impl Codegen {
     }
 
     /// Return a clone of the current module path stack. The stack is
-    /// empty at the crate root. The `allow` attribute stays until
-    /// Phase 5 reads the module path.
-    #[allow(dead_code)]
+    /// empty at the crate root.
     fn current_module_path(&self) -> Vec<String> {
         self.module_path.clone()
     }
@@ -205,9 +204,7 @@ impl Codegen {
     /// Convert a use-tree root into a module path. `Lib` is the crate
     /// root (an empty path). `SelfMod` is the current stack. `Super`
     /// is the current stack without its last element. `Name` is a bare
-    /// name. The `allow` attribute stays until Phase 5 uses this in
-    /// use resolution.
-    #[allow(dead_code)]
+    /// name.
     fn resolve_root(&self, root: &UseRoot) -> Vec<String> {
         match root {
             UseRoot::Lib => Vec::new(),
@@ -219,6 +216,290 @@ impl Codegen {
             }
             UseRoot::Name(name) => vec![name.clone()],
         }
+    }
+
+    // --- Use resolution -----------------------------------------------------
+
+    /// Resolve every import tree in a `use` declaration. Imported
+    /// names are inserted into the flat namespaces: `inline_fns` for
+    /// inline functions, `const_values` for constants and enum
+    /// variants, `enum_variants` for qualified variant names, and
+    /// `use_aliases` for `as` bindings.
+    fn resolve_use_decl(&mut self, trees: &[UseTree]) {
+        let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+        for tree in trees {
+            self.resolve_use_tree(tree, &mut visited);
+        }
+    }
+
+    /// Resolve a single import tree against the current module path
+    /// and import its names.
+    fn resolve_use_tree(&mut self, tree: &UseTree, visited: &mut HashSet<std::path::PathBuf>) {
+        match tree {
+            UseTree::Alias { inner, alias } => {
+                self.use_aliases
+                    .insert(alias.clone(), self.use_tree_module_path(inner));
+            }
+            UseTree::Path {
+                root,
+                segments,
+                tail,
+            } => {
+                let mut path = self.use_tree_base_path(root);
+                path.extend(segments.iter().cloned());
+
+                match tail {
+                    UseTail::Group(subtrees) => {
+                        // Group members carry their own roots, so the
+                        // group parent becomes their resolution
+                        // context.
+                        let saved = self.module_path.clone();
+                        self.module_path = path.clone();
+                        for subtree in subtrees {
+                            self.resolve_use_tree(subtree, visited);
+                        }
+                        self.module_path = saved;
+                    }
+                    _ => self.import_path(&path, tail, visited),
+                }
+            }
+        }
+    }
+
+    /// Compute the full path a use tree points at, treating every
+    /// segment (including the last) as a module segment. Used for
+    /// `as` aliases, which bind the alias to the target path.
+    fn use_tree_module_path(&self, tree: &UseTree) -> Vec<String> {
+        match tree {
+            UseTree::Alias { inner, .. } => self.use_tree_module_path(inner),
+            UseTree::Path { root, segments, .. } => {
+                let mut path = self.use_tree_base_path(root);
+                path.extend(segments.iter().cloned());
+                path
+            }
+        }
+    }
+
+    /// Resolve a use-tree root to the module path it starts from.
+    /// `std` always names the std crate root; any other bare name is
+    /// relative to the current module path.
+    fn use_tree_base_path(&self, root: &UseRoot) -> Vec<String> {
+        match root {
+            UseRoot::Name(name) if name == "std" => vec!["std".to_string()],
+            UseRoot::Name(name) => {
+                let mut path = self.current_module_path();
+                path.push(name.clone());
+                path
+            }
+            _ => self.resolve_root(root),
+        }
+    }
+
+    /// Import the names at `path`. If `path` names a module file, the
+    /// module's exported items are imported and nested public `use`
+    /// trees are resolved in the module's own path context. Otherwise
+    /// the last segment names an item inside the parent module: a
+    /// glob of an enum also binds the variant names bare, a single
+    /// import binds only the qualified names.
+    fn import_path(
+        &mut self,
+        path: &[String],
+        tail: &UseTail,
+        visited: &mut HashSet<std::path::PathBuf>,
+    ) {
+        if path.first().is_some_and(|name| name == "std") && find_std_root(&[]).is_none() {
+            self.error(
+                302,
+                "std library not found: set OP_STD_PATH or use --include",
+            );
+            return;
+        }
+
+        if let Some((module, file)) = self.lookup_module(path) {
+            let key = file.canonicalize().unwrap_or(file);
+            if !visited.insert(key) {
+                return;
+            }
+            let saved = self.module_path.clone();
+            self.module_path = path.to_vec();
+            self.import_module_items(&module.items, visited);
+            self.module_path = saved;
+            return;
+        }
+
+        // The path names an item, not a module file. Look the item up
+        // in the parent module.
+        if path.is_empty() {
+            self.error(303, format!("module not found: {}", path.join("::")));
+            return;
+        }
+        let parent = &path[..path.len() - 1];
+        let name = &path[path.len() - 1];
+        let Some((parent_module, _file)) = self.lookup_module(parent) else {
+            self.error(303, format!("module not found: {}", path.join("::")));
+            return;
+        };
+        let bare = matches!(tail, UseTail::Glob);
+        let saved = self.module_path.clone();
+        self.module_path = parent.to_vec();
+        let mut found = false;
+        for item in &parent_module.items {
+            if decl_name(item) == Some(name.as_str()) {
+                found = true;
+                self.import_named_item(item, name, bare);
+                break;
+            }
+        }
+        self.module_path = saved;
+        if !found && matches!(tail, UseTail::Glob) {
+            // A glob must name a module or an importable item. A
+            // single import of a missing name may be an item that is
+            // cfg-gated out for this target, so it is not an error.
+            self.error(303, format!("module not found: {}", path.join("::")));
+        }
+    }
+
+    /// Import the exported items of a module into the flat namespaces.
+    /// The module path is already on the stack, so nested `use`
+    /// trees resolve relative to this module.
+    fn import_module_items(&mut self, items: &[Item], visited: &mut HashSet<std::path::PathBuf>) {
+        for item in items {
+            match item {
+                Item::InlineFnDecl { name, body, .. } => {
+                    self.import_inline_fn(name, body);
+                }
+                Item::ConstDecl {
+                    name,
+                    value,
+                    evaluated_value,
+                    ..
+                } => {
+                    let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                    if let Some(val) = val {
+                        self.import_const(name, val);
+                    }
+                }
+                Item::EnumDecl { name, variants, .. } => {
+                    self.import_enum_variants(name, variants, false);
+                }
+                Item::UseDecl {
+                    is_pub: true,
+                    trees,
+                } => {
+                    for tree in trees {
+                        self.resolve_use_tree(tree, visited);
+                    }
+                }
+                // Private uses name `self::`/`super::` parents that
+                // are only resolved in Phase 11. Other item kinds
+                // produce no flat-namespace bindings.
+                _ => {}
+            }
+        }
+    }
+
+    /// Import a single named item found in a parent module.
+    fn import_named_item(&mut self, item: &Item, name: &str, bare: bool) {
+        match item {
+            Item::InlineFnDecl { body, .. } => {
+                self.import_inline_fn(name, body);
+            }
+            Item::ConstDecl {
+                value,
+                evaluated_value,
+                ..
+            } => {
+                let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                if let Some(val) = val {
+                    self.import_const(name, val);
+                }
+            }
+            Item::EnumDecl { variants, .. } => {
+                self.import_enum_variants(name, variants, bare);
+            }
+            _ => {}
+        }
+    }
+
+    /// Insert an inline function into the flat namespace, warning on
+    /// collision.
+    fn import_inline_fn(&mut self, name: &str, body: &[FnStmt]) {
+        if self.inline_fns.contains_key(name) {
+            self.warning(
+                304,
+                format!("name `{name}` imported more than once; last import wins"),
+            );
+        }
+        self.inline_fns.insert(name.to_string(), body.to_owned());
+    }
+
+    /// Insert a constant into the flat namespace, warning when an
+    /// existing binding has a different value.
+    fn import_const(&mut self, name: &str, val: i64) {
+        match self.const_values.insert(name.to_string(), val) {
+            Some(prev) if prev != val => {
+                self.warning(
+                    304,
+                    format!("constant `{name}` imported with conflicting values; last import wins"),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Import an enum's variants into the flat namespace. Qualified
+    /// keys (`EnumName::VariantName`) are always inserted; bare
+    /// variant names are inserted only when the enum is glob-imported.
+    fn import_enum_variants(
+        &mut self,
+        name: &str,
+        variants: &[op_common::ast::EnumVariant],
+        bare: bool,
+    ) {
+        for variant in variants {
+            let Some(val) = variant
+                .value
+                .as_ref()
+                .and_then(|v| eval_expr(v, &self.const_values))
+            else {
+                // Variants without an explicit value get implicit
+                // values in Phase 6.
+                continue;
+            };
+            let qualified = format!("{name}::{}", variant.name);
+            self.enum_variants.insert(qualified.clone(), val);
+            let msg = "enum variant imported with conflicting values; last import wins";
+            match self.const_values.insert(qualified, val) {
+                Some(prev) if prev != val => self.warning(304, msg),
+                _ => {}
+            }
+            if bare {
+                match self.const_values.insert(variant.name.clone(), val) {
+                    Some(prev) if prev != val => self.warning(304, msg),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Look up and load the module file for `path`, if it exists. No
+    /// diagnostic is emitted; the caller decides what a miss means.
+    /// Paths that start with `std` resolve against the std crate
+    /// root; other paths resolve against the directory of the root
+    /// source file.
+    fn lookup_module(&mut self, path: &[String]) -> Option<(Module, std::path::PathBuf)> {
+        let (base, rest) = match path.first() {
+            Some(name) if name == "std" => {
+                let root = find_std_root(&[])?;
+                (root, &path[1..])
+            }
+            _ => (self.source_dir.clone(), path),
+        };
+        let file = module_file_path(&base, rest)?;
+        self.module_cache
+            .load_module(&file, &self.target, &[])
+            .ok()
+            .map(|module| (module, file))
     }
 
     fn walk_item(&mut self, item: &Item) {
@@ -295,8 +576,8 @@ impl Codegen {
                 }
                 self.module_path.pop();
             }
-            Item::UseDecl { .. } => {
-                // No codegen output for use declarations.
+            Item::UseDecl { trees, .. } => {
+                self.resolve_use_decl(trees);
             }
             Item::BlockAttribute { attr, items } => {
                 self.handle_block_attribute(attr, items);
@@ -1071,6 +1352,10 @@ impl Codegen {
         self.diags.push(Diagnostic::error(code, "", 0, 0, msg));
     }
 
+    fn warning(&mut self, code: u32, msg: impl Into<String>) {
+        self.diags.push(Diagnostic::warning(code, "", 0, 0, msg));
+    }
+
     /// Map a condition keyword to a branch opcode byte.
     /// If `invert` is true, return the branch-if-condition opcode.
     /// If `invert` is false, return the branch-if-not-condition opcode.
@@ -1275,7 +1560,6 @@ fn val_to_bytes(val: i64, size: usize) -> Vec<u8> {
 /// 3. The default install path `$HOME/.carts/std/src`.
 ///
 /// Returns the first candidate directory that contains a `lib.op` file.
-#[allow(dead_code)]
 fn find_std_root(include_paths: &[String]) -> Option<std::path::PathBuf> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
@@ -1298,6 +1582,51 @@ fn find_std_root(include_paths: &[String]) -> Option<std::path::PathBuf> {
         .find(|candidate| candidate.join("lib.op").is_file())
 }
 
+/// Map a module path to its source file. A module with segments
+/// `a/b/c` lives in `dir/a/b/c.op` or `dir/a/b/c/mod.op`; a module
+/// with no segments lives in `dir/lib.op` or `dir/mod.op`.
+fn module_file_path(dir: &std::path::Path, segments: &[String]) -> Option<std::path::PathBuf> {
+    if segments.is_empty() {
+        for name in ["lib.op", "mod.op"] {
+            let file = dir.join(name);
+            if file.is_file() {
+                return Some(file);
+            }
+        }
+        return None;
+    }
+    let mut base = dir.to_path_buf();
+    for segment in &segments[..segments.len() - 1] {
+        base.push(segment);
+    }
+    base.push(&segments[segments.len() - 1]);
+    let name = base.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let file = base.with_file_name(format!("{name}.op"));
+    if file.is_file() {
+        return Some(file);
+    }
+    let mod_file = base.join("mod.op");
+    if mod_file.is_file() {
+        return Some(mod_file);
+    }
+    None
+}
+
+/// Return the name a declaration binds, if any.
+fn decl_name(item: &Item) -> Option<&str> {
+    match item {
+        Item::ConstDecl { name, .. }
+        | Item::VarDecl { name, .. }
+        | Item::FnDecl { name, .. }
+        | Item::InlineFnDecl { name, .. }
+        | Item::StructDecl { name, .. }
+        | Item::TypeDecl { name, .. }
+        | Item::EnumDecl { name, .. } => Some(name),
+        Item::ModDecl { name, .. } => Some(name),
+        Item::UseDecl { .. } | Item::BlockAttribute { .. } | Item::Placement { .. } => None,
+    }
+}
+
 // --- Tests ------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1306,13 +1635,18 @@ mod tests {
     use super::Codegen;
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
-    use op_common::ast::UseRoot;
+    use op_common::ast::{UseRoot, UseTail, UseTree};
     use op_common::TargetTriplet;
+    use op_diagnostics::Severity;
     use std::collections::HashMap;
+
+    /// Serializes tests that mutate the process environment.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Run `f` with `OP_STD_PATH` and `HOME` pointed at locations that do
     /// not contain a std root, then restore the previous environment.
     fn with_isolated_env(tmp: &std::path::Path, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_op_std = std::env::var("OP_STD_PATH").ok();
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("OP_STD_PATH", tmp.join("no-such-std"));
@@ -1326,6 +1660,42 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    /// Run `f` with `OP_STD_PATH` set to `root` and `HOME` pointed at an
+    /// empty directory, then restore the previous environment. Holds
+    /// the environment lock for the duration.
+    fn with_std_env(root: &std::path::Path, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_op_std = std::env::var("OP_STD_PATH").ok();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("OP_STD_PATH", root);
+        std::env::set_var("HOME", std::env::temp_dir());
+        f();
+        match old_op_std {
+            Some(value) => std::env::set_var("OP_STD_PATH", value),
+            None => std::env::remove_var("OP_STD_PATH"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// Write a minimal fake std crate under `std_root`.
+    fn write_fake_std(std_root: &std::path::Path) {
+        std::fs::create_dir_all(std_root.join("cpu")).unwrap();
+        std::fs::write(std_root.join("lib.op"), "pub mod cpu;\n").unwrap();
+        std::fs::write(
+            std_root.join("cpu.op"),
+            "const CYCLES: u8 = 1;\nmod mos6502;\npub use mos6502::*;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std_root.join("cpu/mos6502.op"),
+            "enum REGS { A = 0x2000, B = 0x2001 }\ninline fn nop() {\n    nop\n}\npub use REGS::*;\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1379,6 +1749,8 @@ mod tests {
             const_values: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),
+            enum_variants: HashMap::new(),
+            use_aliases: HashMap::new(),
             label_counter: 0,
             interrupt_vectors: Vec::new(),
             header: None,
@@ -1421,5 +1793,93 @@ mod tests {
             codegen.resolve_root(&UseRoot::Super),
             vec!["std".to_string()]
         );
+    }
+
+    #[test]
+    fn use_tree_resolves_std_items() {
+        let tmp = std::env::temp_dir().join(format!("opc-use-tree-{}", std::process::id()));
+        let std_root = tmp.join("std/src");
+        write_fake_std(&std_root);
+
+        with_std_env(&std_root, || {
+            let mut codegen = test_codegen();
+            let tree = UseTree::Path {
+                root: UseRoot::Name("std".into()),
+                segments: vec!["cpu".to_string()],
+                tail: UseTail::Glob,
+            };
+            codegen.resolve_use_decl(&[tree]);
+
+            assert_eq!(codegen.const_values.get("CYCLES"), Some(&1));
+            assert_eq!(codegen.enum_variants.get("REGS::A"), Some(&0x2000));
+            assert_eq!(codegen.const_values.get("REGS::A"), Some(&0x2000));
+            // A glob of an enum also binds the variant names bare.
+            assert_eq!(codegen.const_values.get("A"), Some(&0x2000));
+            assert!(codegen.inline_fns.contains_key("nop"));
+            assert!(codegen.diags.is_empty());
+        });
+    }
+
+    #[test]
+    fn use_tree_item_import_binds_single_item() {
+        let tmp = std::env::temp_dir().join(format!("opc-use-tree-item-{}", std::process::id()));
+        let std_root = tmp.join("std/src");
+        write_fake_std(&std_root);
+
+        with_std_env(&std_root, || {
+            let mut codegen = test_codegen();
+            let tree = UseTree::Path {
+                root: UseRoot::Name("std".into()),
+                segments: vec!["cpu".to_string(), "CYCLES".to_string()],
+                tail: UseTail::Item,
+            };
+            codegen.resolve_use_decl(&[tree]);
+
+            assert_eq!(codegen.const_values.get("CYCLES"), Some(&1));
+            // An item import does not pull in the module's other items.
+            assert!(!codegen.const_values.contains_key("A"));
+            assert!(!codegen.inline_fns.contains_key("nop"));
+            assert!(codegen.diags.is_empty());
+        });
+    }
+
+    #[test]
+    fn use_tree_records_module_aliases() {
+        let mut codegen = test_codegen();
+        let inner = UseTree::Path {
+            root: UseRoot::Name("std".into()),
+            segments: vec!["cpu".to_string()],
+            tail: UseTail::Item,
+        };
+        let tree = UseTree::Alias {
+            inner: Box::new(inner),
+            alias: "c".to_string(),
+        };
+        codegen.resolve_use_decl(&[tree]);
+
+        let expected = vec!["std".to_string(), "cpu".to_string()];
+        assert_eq!(codegen.use_aliases.get("c"), Some(&expected));
+    }
+
+    #[test]
+    fn use_tree_errors_when_std_missing() {
+        let tmp = std::env::temp_dir().join(format!("opc-use-tree-nostd-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        with_isolated_env(&tmp, || {
+            let mut codegen = test_codegen();
+            let tree = UseTree::Path {
+                root: UseRoot::Name("std".into()),
+                segments: vec!["cpu".to_string()],
+                tail: UseTail::Glob,
+            };
+            codegen.resolve_use_decl(&[tree]);
+
+            assert!(codegen
+                .diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.code == 302));
+            assert!(codegen.const_values.is_empty());
+        });
     }
 }
