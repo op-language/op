@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use op_common::ast::{
-    Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand, PlacementArg, SwitchCase,
-    Type, UseRoot, UseTail, UseTree,
+    Access, Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, OffsetOp, Operand,
+    PlacementArg, SwitchCase, Type, UseRoot, UseTail, UseTree,
 };
 use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
@@ -1019,18 +1019,30 @@ impl Codegen {
                     }
                 }
             }
-            Operand::Selector { path, accesses: _ } => {
-                // Selector like PPU::CNT0 — resolve to a constant or symbol.
-                let sym = if !path.is_empty() {
-                    Some(path.join("::"))
-                } else {
-                    None
-                };
-                if let (Some(sym), Some(op_byte)) = (sym, self.lookup(opcode, AddrMode::Absolute)) {
-                    self.emit_byte(op_byte);
-                    self.emit_byte(0);
-                    self.emit_byte(0);
-                    self.add_relocation(2, RelocKind::Abs16, &sym);
+            Operand::Selector { path, accesses } => {
+                // Selector like PPU::CNT0 — resolve to a constant, or
+                // fall back to a symbol relocation.
+                let path_name = path.join("::");
+                match resolve_selector(path, accesses, &self.const_values) {
+                    Some(val) => {
+                        // Known constant: emit the (offset-adjusted)
+                        // value directly as an absolute operand.
+                        if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
+                            self.emit_byte(op_byte);
+                            self.emit_bytes(&val_to_bytes(val, 2));
+                        }
+                    }
+                    None if !path_name.is_empty() => {
+                        // Not a known constant: keep the old behaviour
+                        // and emit a relocation against the joined path.
+                        if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
+                            self.emit_byte(op_byte);
+                            self.emit_byte(0);
+                            self.emit_byte(0);
+                            self.add_relocation(2, RelocKind::Abs16, &path_name);
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -1443,6 +1455,45 @@ fn type_size(ty: &Type) -> usize {
     }
 }
 
+/// Resolve a selector (`path::access + offset`) to a constant value.
+///
+/// The fully qualified name (e.g. `PPU::CNT0`) is tried first, then the
+/// bare path (`PPU`). Any trailing offset access is folded into the
+/// result. Returns `None` when the selector does not name a constant.
+fn resolve_selector(
+    path: &[String],
+    accesses: &[Access],
+    const_values: &HashMap<String, i64>,
+) -> Option<i64> {
+    let path_name = path.join("::");
+    let mut full_name = path_name.clone();
+    let mut offset: i64 = 0;
+    for access in accesses {
+        match access {
+            Access::ModuleAccess { name } | Access::FieldAccess { name } => {
+                full_name.push_str("::");
+                full_name.push_str(name);
+            }
+            Access::Offset { op, value } => {
+                if let Some(v) = eval_expr(value, const_values) {
+                    offset = match op {
+                        OffsetOp::Add => offset + v,
+                        OffsetOp::Sub => offset - v,
+                    };
+                }
+            }
+        }
+    }
+    let value = const_values.get(&full_name).or_else(|| {
+        if full_name != path_name {
+            const_values.get(&path_name)
+        } else {
+            None
+        }
+    })?;
+    Some(value + offset)
+}
+
 /// Evaluate an expression to a constant value, using the const value table.
 fn eval_expr(expr: &Expr, const_values: &HashMap<String, i64>) -> Option<i64> {
     match expr {
@@ -1502,6 +1553,9 @@ fn eval_expr(expr: &Expr, const_values: &HashMap<String, i64>) -> Option<i64> {
             })
         }
         Expr::ParenExpr { inner } => eval_expr(inner, const_values),
+        // Selector like PPU::CNT0 — resolve against the const table so
+        // that memory and immediate operands can use the value directly.
+        Expr::Selector { path, accesses } => resolve_selector(path, accesses, const_values),
         _ => None,
     }
 }
@@ -1632,9 +1686,10 @@ mod tests {
     use super::Codegen;
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
-    use op_common::ast::{EnumVariant, Expr, UseRoot, UseTail, UseTree};
+    use op_common::ast::{Access, EnumVariant, Expr, OffsetOp, Operand, UseRoot, UseTail, UseTree};
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
+    use op_ir::{Section, SectionKind};
     use std::collections::HashMap;
 
     /// Serializes tests that mutate the process environment.
@@ -1958,5 +2013,130 @@ mod tests {
         assert_eq!(codegen.const_values.get("a"), Some(&99));
         assert_eq!(codegen.const_values.get("x"), Some(&1));
         assert!(codegen.diags.is_empty());
+    }
+
+    /// Build a minimal Codegen with an active ROM section, so emitted
+    /// instruction bytes and relocations can be inspected.
+    fn test_codegen_with_rom_section() -> Codegen {
+        let mut codegen = test_codegen();
+        codegen.sections.push(Section {
+            name: "rom_bank0".to_string(),
+            kind: SectionKind::Rom,
+            org: 0x8000,
+            bank: 0,
+            maxsize: 0x8000,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: Vec::new(),
+        });
+        codegen.current_section = Some(0);
+        codegen
+    }
+
+    /// Build a selector operand from a `::`-separated name like
+    /// `PPU::CNT0`.
+    fn selector_operand(name: &str) -> Operand {
+        let mut parts = name.split("::");
+        let head = parts.next().unwrap_or_default().to_string();
+        let accesses = parts
+            .map(|part| Access::ModuleAccess {
+                name: part.to_string(),
+            })
+            .collect();
+        Operand::Selector {
+            path: vec![head],
+            accesses,
+        }
+    }
+
+    #[test]
+    fn selector_resolves_to_const_value() {
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.const_values.insert("PPU::CNT0".to_string(), 0x2000);
+
+        codegen.compile_asm("sta", &[selector_operand("PPU::CNT0")]);
+
+        // `sta $2000` -> 8D 00 20, with no relocation.
+        assert_eq!(codegen.sections[0].data, vec![0x8D, 0x00, 0x20]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    #[test]
+    fn selector_falls_back_to_path_name() {
+        let mut codegen = test_codegen_with_rom_section();
+        // Only the bare path is a known constant.
+        codegen.const_values.insert("PPU".to_string(), 0x2000);
+
+        codegen.compile_asm("sta", &[selector_operand("PPU::CNT0")]);
+
+        assert_eq!(codegen.sections[0].data, vec![0x8D, 0x00, 0x20]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    #[test]
+    fn selector_emits_relocation_when_unknown() {
+        let mut codegen = test_codegen_with_rom_section();
+
+        codegen.compile_asm("sta", &[selector_operand("PPU::CNT0")]);
+
+        // Placeholder bytes plus an Abs16 relocation against `PPU`.
+        assert_eq!(codegen.sections[0].data, vec![0x8D, 0x00, 0x00]);
+        assert_eq!(codegen.sections[0].relocations.len(), 1);
+        assert_eq!(codegen.sections[0].relocations[0].symbol, "PPU");
+    }
+
+    /// The parser delivers selectors as `Expr::Selector` inside a
+    /// memory operand, so verify that path resolves constants too.
+    #[test]
+    fn selector_in_memory_operand_resolves_to_const() {
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.const_values.insert("PPU::CNT0".to_string(), 0x2000);
+
+        let expr = Expr::Selector {
+            path: vec!["PPU".to_string()],
+            accesses: vec![Access::ModuleAccess {
+                name: "CNT0".to_string(),
+            }],
+        };
+        let operand = Operand::MemoryOperand {
+            mode_prefix: None,
+            expr,
+            index_reg: None,
+        };
+        codegen.compile_asm("sta", &[operand]);
+
+        // `sta $2000` -> 8D 00 20, with no relocation.
+        assert_eq!(codegen.sections[0].data, vec![0x8D, 0x00, 0x20]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// A trailing offset access folds into the resolved constant.
+    #[test]
+    fn selector_with_offset_folds_into_value() {
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.const_values.insert("PPU::CNT0".to_string(), 0x2000);
+
+        let expr = Expr::Selector {
+            path: vec!["PPU".to_string()],
+            accesses: vec![
+                Access::ModuleAccess {
+                    name: "CNT0".to_string(),
+                },
+                Access::Offset {
+                    op: OffsetOp::Add,
+                    value: Expr::Number { value: 1 },
+                },
+            ],
+        };
+        let operand = Operand::MemoryOperand {
+            mode_prefix: None,
+            expr,
+            index_reg: None,
+        };
+        codegen.compile_asm("sta", &[operand]);
+
+        // `sta $2001` -> 8D 01 20.
+        assert_eq!(codegen.sections[0].data, vec![0x8D, 0x01, 0x20]);
+        assert!(codegen.sections[0].relocations.is_empty());
     }
 }
