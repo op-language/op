@@ -83,6 +83,10 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         interrupt_vectors: Vec::new(),
         header: None,
         pad_byte: 0x00,
+        source_dir: std::path::Path::new(&ast.file)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf(),
         diags: Vec::new(),
     };
 
@@ -118,6 +122,9 @@ struct Codegen {
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
     pad_byte: u8,
+    /// Directory of the root source file. Used to resolve
+    /// `locate_bytes!` and `locate_str!` paths.
+    source_dir: std::path::PathBuf,
     diags: Vec<Diagnostic>,
 }
 
@@ -174,7 +181,13 @@ impl Codegen {
                         }
                     }
                 }
-                self.compile_fn(name, body, *is_noreturn);
+                // Store the body so `locate_fn!` can place it later.
+                self.inline_fns.insert(name.clone(), body.clone());
+                // When declared inside a section, compile in place.
+                // When declared outside a section, defer to `locate_fn!`.
+                if self.current_section.is_some() {
+                    self.compile_fn(name, body, *is_noreturn);
+                }
             }
             Item::InlineFnDecl { name, body, .. } => {
                 self.inline_fns.insert(name.clone(), body.clone());
@@ -323,7 +336,8 @@ impl Codegen {
             "locate_bytes" => {
                 if let PlacementArg::String_ { value } = argument {
                     let filename = value.trim_matches('"');
-                    if let Ok(data) = std::fs::read(filename) {
+                    let path = self.source_dir.join(filename);
+                    if let Ok(data) = std::fs::read(&path) {
                         self.emit_bytes(&data);
                     } else {
                         self.error(
@@ -339,8 +353,28 @@ impl Codegen {
                     if !segments.is_empty() {
                         let fn_name = segments.last().unwrap();
                         if let Some(body) = self.inline_fns.get(fn_name).cloned() {
-                            // Compile the function body inline.
+                            // Record the function symbol at the current
+                            // offset, then compile the body inline.
+                            let start_offset = if let Some(idx) = self.current_section {
+                                self.sections[idx].data.len() as u32
+                            } else {
+                                0
+                            };
                             self.compile_fn_body(&body);
+                            let end_offset = if let Some(idx) = self.current_section {
+                                self.sections[idx].data.len() as u32
+                            } else {
+                                0
+                            };
+                            if let Some(idx) = self.current_section {
+                                self.sections[idx].symbols.push(Symbol {
+                                    name: fn_name.clone(),
+                                    offset: start_offset,
+                                    size: end_offset - start_offset,
+                                    kind: SymbolKind::Function,
+                                    is_pub: false,
+                                });
+                            }
                         }
                     }
                 }
@@ -348,9 +382,14 @@ impl Codegen {
             "locate_str" => {
                 if let PlacementArg::String_ { value } = argument {
                     let filename = value.trim_matches('"');
-                    if let Ok(source) = std::fs::read_to_string(filename) {
-                        let (ast, _diags) =
-                            parser::parse_source(filename, &source, &self.target.as_str(), &[]);
+                    let path = self.source_dir.join(filename);
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        let (ast, _diags) = parser::parse_source(
+                            &path.to_string_lossy(),
+                            &source,
+                            &self.target.as_str(),
+                            &[],
+                        );
                         self.walk_module(&ast.root);
                     }
                 }

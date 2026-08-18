@@ -86,6 +86,7 @@ pub fn parse_source(
         AstFile {
             version: 1,
             target: target.to_string(),
+            file: file.to_string(),
             root: module,
         },
         parser.diags,

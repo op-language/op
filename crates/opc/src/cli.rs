@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use clap::{ArgAction, Args, Parser};
+use op_diagnostics::Severity;
 
 /// The Op compiler.
 #[derive(Debug, Parser)]
@@ -72,10 +73,82 @@ pub struct Input {
 /// Entry point for the `opc` CLI.
 pub fn run() -> Result<()> {
     let args = OpcArgs::parse();
-    crate::lexer::run(&args)?;
-    crate::parser::run(&args)?;
-    crate::codegen::run(&args)?;
-    crate::linker::run(&args)?;
-    crate::output::run(&args)?;
+
+    // When a stage flag is set, run only that stage. Each stage reads its
+    // own input and writes its own output.
+    if args.lex {
+        return crate::lexer::run(&args);
+    }
+    if args.parse {
+        return crate::parser::run(&args);
+    }
+    if args.compile {
+        return crate::codegen::run(&args);
+    }
+    if args.link {
+        return crate::linker::run(&args);
+    }
+
+    // No stage flag: run the full pipeline in memory.
+    run_pipeline(&args)
+}
+
+/// Run the full in-memory pipeline: lex, parse, codegen, optimize, link,
+/// and emit. Each stage passes its output to the next stage in memory.
+fn run_pipeline(args: &OpcArgs) -> Result<()> {
+    let target = args.target.as_deref().unwrap_or("");
+    let input_path = &args.input.input;
+
+    // 1. Read the source file.
+    let source = std::fs::read_to_string(input_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {input_path}: {e}"))?;
+
+    // 2. Parse (parse_source calls lex_source internally).
+    let (ast, parse_diags) =
+        crate::parser::parse_source(input_path, &source, target, &args.features);
+    print_diags(&parse_diags, input_path, &source);
+    if has_errors(&parse_diags) {
+        anyhow::bail!("parser errors in {input_path}");
+    }
+
+    // 3. Compile (codegen + optimizer).
+    let (obj, codegen_diags) = crate::codegen::compile_source(&ast, args.opt_level);
+    print_diags(&codegen_diags, input_path, &source);
+    if has_errors(&codegen_diags) {
+        anyhow::bail!("codegen errors in {input_path}");
+    }
+
+    // 4. Link.
+    let (linked, linker_diags) = crate::linker::link_source(&obj);
+    print_diags(&linker_diags, input_path, &source);
+    if has_errors(&linker_diags) {
+        anyhow::bail!("linker errors in {input_path}");
+    }
+
+    // 5. Determine the output format and emit the final binary.
+    let format = crate::output::resolve_format(args, &linked.target);
+    let bytes = crate::output::emit_linked(&linked, &format)?;
+
+    // 6. Write the bytes to the output file or to stdout.
+    match &args.output {
+        Some(path) => std::fs::write(path, bytes)?,
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(&bytes)?;
+        }
+    }
     Ok(())
+}
+
+/// Return true when the diagnostics list contains any error-severity entry.
+fn has_errors(diags: &[op_diagnostics::Diagnostic]) -> bool {
+    diags.iter().any(|d| d.severity == Severity::Error)
+}
+
+/// Print each diagnostic with the source text as context.
+fn print_diags(diags: &[op_diagnostics::Diagnostic], file: &str, source: &str) {
+    for d in diags {
+        d.print(Some(source));
+    }
+    let _ = file;
 }
