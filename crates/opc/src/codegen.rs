@@ -380,7 +380,7 @@ impl Codegen {
                     }
                 }
                 Item::EnumDecl { name, variants, .. } => {
-                    self.import_enum_variants(name, variants, false);
+                    self.collect_enum(name, variants, false);
                 }
                 Item::UseDecl {
                     is_pub: true,
@@ -415,7 +415,7 @@ impl Codegen {
                 }
             }
             Item::EnumDecl { variants, .. } => {
-                self.import_enum_variants(name, variants, bare);
+                self.collect_enum(name, variants, bare);
             }
             _ => {}
         }
@@ -447,38 +447,35 @@ impl Codegen {
         }
     }
 
-    /// Import an enum's variants into the flat namespace. Qualified
-    /// keys (`EnumName::VariantName`) are always inserted; bare
-    /// variant names are inserted only when the enum is glob-imported.
-    fn import_enum_variants(
-        &mut self,
-        name: &str,
-        variants: &[op_common::ast::EnumVariant],
-        bare: bool,
-    ) {
+    /// Collect an enum's variant values into the flat namespace.
+    /// Qualified keys (`EnumName::VariantName`) are always inserted.
+    /// A variant without an explicit value takes the previous
+    /// variant's value plus one; the first variant takes zero. Bare
+    /// variant names are inserted only when the enum is glob-imported
+    /// and only when the name is not already bound.
+    fn collect_enum(&mut self, name: &str, variants: &[op_common::ast::EnumVariant], bare: bool) {
+        let mut prev: Option<i64> = None;
         for variant in variants {
-            let Some(val) = variant
+            // An explicit value that cannot be evaluated falls back to
+            // the implicit value so one bad variant cannot drop the
+            // rest of the enum.
+            let val = variant
                 .value
                 .as_ref()
                 .and_then(|v| eval_expr(v, &self.const_values))
-            else {
-                // Variants without an explicit value get implicit
-                // values in Phase 6.
-                continue;
-            };
+                .or_else(|| prev.map(|p| p + 1))
+                .unwrap_or(0);
             let qualified = format!("{name}::{}", variant.name);
             self.enum_variants.insert(qualified.clone(), val);
             let msg = "enum variant imported with conflicting values; last import wins";
             match self.const_values.insert(qualified, val) {
-                Some(prev) if prev != val => self.warning(304, msg),
+                Some(existing) if existing != val => self.warning(304, msg),
                 _ => {}
             }
             if bare {
-                match self.const_values.insert(variant.name.clone(), val) {
-                    Some(prev) if prev != val => self.warning(304, msg),
-                    _ => {}
-                }
+                self.const_values.entry(variant.name.clone()).or_insert(val);
             }
+            prev = Some(val);
         }
     }
 
@@ -1635,7 +1632,7 @@ mod tests {
     use super::Codegen;
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
-    use op_common::ast::{UseRoot, UseTail, UseTree};
+    use op_common::ast::{EnumVariant, Expr, UseRoot, UseTail, UseTree};
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
     use std::collections::HashMap;
@@ -1881,5 +1878,85 @@ mod tests {
                 .any(|d| d.severity == Severity::Error && d.code == 302));
             assert!(codegen.const_values.is_empty());
         });
+    }
+
+    /// Build a variant with an explicit numeric value.
+    fn num_variant(name: &str, value: i64) -> EnumVariant {
+        EnumVariant {
+            name: name.to_string(),
+            value: Some(Expr::Number { value }),
+        }
+    }
+
+    /// Build a variant with no explicit value.
+    fn implicit_variant(name: &str) -> EnumVariant {
+        EnumVariant {
+            name: name.to_string(),
+            value: None,
+        }
+    }
+
+    #[test]
+    fn collect_enum_evaluates_explicit_and_implicit_values() {
+        let mut codegen = test_codegen();
+
+        // Explicit values are evaluated as written.
+        codegen.collect_enum(
+            "STATUS",
+            &[
+                num_variant("N", 0x80),
+                num_variant("V", 0x40),
+                num_variant("C", 0x01),
+            ],
+            false,
+        );
+        assert_eq!(codegen.const_values.get("STATUS::N"), Some(&0x80));
+        assert_eq!(codegen.const_values.get("STATUS::V"), Some(&0x40));
+        assert_eq!(codegen.const_values.get("STATUS::C"), Some(&0x01));
+        assert_eq!(codegen.enum_variants.get("STATUS::N"), Some(&0x80));
+
+        // Variants without a value count up from the previous variant,
+        // starting at zero for the first variant.
+        codegen.collect_enum(
+            "OPCODE",
+            &[
+                implicit_variant("BRK"),
+                implicit_variant("ORA"),
+                implicit_variant("JMP"),
+            ],
+            false,
+        );
+        assert_eq!(codegen.const_values.get("OPCODE::BRK"), Some(&0));
+        assert_eq!(codegen.const_values.get("OPCODE::ORA"), Some(&1));
+        assert_eq!(codegen.const_values.get("OPCODE::JMP"), Some(&2));
+
+        // An explicit value resets the implicit count.
+        codegen.collect_enum(
+            "COND",
+            &[
+                num_variant("plus", 0),
+                implicit_variant("minus"),
+                num_variant("equal", 5),
+                implicit_variant("carry"),
+            ],
+            false,
+        );
+        assert_eq!(codegen.const_values.get("COND::plus"), Some(&0));
+        assert_eq!(codegen.const_values.get("COND::minus"), Some(&1));
+        assert_eq!(codegen.const_values.get("COND::equal"), Some(&5));
+        assert_eq!(codegen.const_values.get("COND::carry"), Some(&6));
+
+        // Glob import binds bare names, but never overwrites a name
+        // that is already bound.
+        codegen.const_values.insert("a".to_string(), 99);
+        codegen.collect_enum(
+            "REGS",
+            &[implicit_variant("a"), implicit_variant("x")],
+            true,
+        );
+        assert_eq!(codegen.const_values.get("REGS::a"), Some(&0));
+        assert_eq!(codegen.const_values.get("a"), Some(&99));
+        assert_eq!(codegen.const_values.get("x"), Some(&1));
+        assert!(codegen.diags.is_empty());
     }
 }
