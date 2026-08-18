@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0]
+
+### Added
+- Complete linker implementation for the `opc` binary. The linker
+  resolves all relocations, merges sections, writes interrupt vector
+  tables, records header fields, and pads sections to their maxsize.
+- Complete file output stage (Stage 5) for the `opc` binary. The output
+  stage writes the final binary image in the format the target requires:
+  iNES (NES), .lnx (Lynx), raw (all targets), Intel HEX (EEPROM), SEGA
+  (Genesis), SNES, Game Boy, SMS, and Atari 7800.
+- Full in-memory pipeline in `cli::run()`. When no stage flag is set,
+  `opc` runs lex, parse, codegen, optimize, link, and emit in sequence
+  and writes the final binary.
+- Interrupt vector recording in the codegen. The codegen tracks
+  #[interrupt(name)] attributes and records vector entries for the linker.
+- Header field recording in the codegen. The codegen records #[ines(...)]
+  and #[lnx(...)] attribute fields for the file output stage.
+- `InterruptVector` and `HeaderFields` types in `op-ir`.
+- `docs/supported-emulators.md` documenting the best Linux emulator for
+  each supported system, ROM formats, install instructions, and
+  debug-target configuration.
+- Linker unit tests in `crates/opc/tests/linker.rs`.
+- Extended integration tests with full lexer+parser+codegen+optimizer+
+  linker+output pipeline tests.
+- `examples/font.chr` copied so `nes-game.op` compiles end-to-end.
+
+### Changed
+- The `opc` linker no longer returns an empty `ObjectFile`. The new
+  implementation resolves relocations and produces the final linked data.
+- The `opc` file output stage no longer returns empty bytes. The new
+  implementation writes the final binary image.
+- The `opc` codegen now records interrupt vectors and header fields from
+  attributes.
+- The `docs/file-formats.md` post-link section now describes the resolved
+  relocations, vector table, and padding.
+
 ## [0.5.0]
 
 ### Added
