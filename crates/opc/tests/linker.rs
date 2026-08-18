@@ -97,6 +97,17 @@ fn reloc(offset: u32, kind: RelocKind, symbol: &str) -> Relocation {
         offset,
         kind,
         symbol: symbol.to_string(),
+        addend: 0,
+    }
+}
+
+/// Build a relocation entry with a non-zero addend.
+fn reloc_with_addend(offset: u32, kind: RelocKind, symbol: &str, addend: i64) -> Relocation {
+    Relocation {
+        offset,
+        kind,
+        symbol: symbol.to_string(),
+        addend,
     }
 }
 
@@ -131,6 +142,24 @@ fn link_abs16_relocation() {
     assert!(s.relocations.is_empty(), "relocations should be cleared");
     assert_eq!(s.data[2], 0x06); // low byte of 0xC006
     assert_eq!(s.data[3], 0xC0); // high byte of 0xC006
+}
+
+#[test]
+fn link_abs16_relocation_with_addend() {
+    // ROM at 0xC000. fn `helper` is at offset 6 (address 0xC006).
+    // An abs16 reloc with addend 2 patches 0xC008 in little-endian
+    // order.
+    let data = vec![0x8D, 0x00, 0x00, 0xEA]; // STA placeholder + NOP
+    let symbols = vec![fn_sym("helper", 6, 0)];
+    let relocations = vec![reloc_with_addend(1, RelocKind::Abs16, "helper", 2)];
+    let section = rom_section("rom0", 0xC000, 0, 0x4000, data, symbols, relocations);
+    let obj = obj_with(vec![section]);
+
+    let linked = link_clean(&obj);
+    let s = &linked.sections[0];
+    assert!(s.relocations.is_empty(), "relocations should be cleared");
+    assert_eq!(s.data[1], 0x08); // low byte of 0xC008
+    assert_eq!(s.data[2], 0xC0); // high byte of 0xC008
 }
 
 #[test]

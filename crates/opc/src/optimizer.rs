@@ -641,6 +641,7 @@ fn reencode(
                 offset: adjusted_offset as u32,
                 kind: reloc.kind,
                 symbol: reloc.symbol.clone(),
+                addend: reloc.addend,
             });
         } else {
             // Keep the relocation as-is if we can't remap it.

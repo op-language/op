@@ -174,6 +174,8 @@ impl Linker {
                     }
                 };
 
+                let target_addr = target_addr.wrapping_add(reloc.addend as u32);
+
                 let offset = reloc.offset as usize;
                 let data = &mut section.data;
 

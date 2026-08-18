@@ -98,6 +98,9 @@ pub struct Relocation {
     pub offset: u32,
     pub kind: RelocKind,
     pub symbol: String,
+    /// A constant added to the symbol's address when patching.
+    #[serde(default)]
+    pub addend: i64,
 }
 
 /// The relocation kinds defined in the technical design.

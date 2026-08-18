@@ -156,6 +156,16 @@ impl ModuleCache {
     }
 }
 
+// --- Inline functions -------------------------------------------------------
+
+/// An inline function: the parameter names and the body that is
+/// expanded, with arguments substituted, at each call site.
+#[derive(Clone)]
+struct InlineFn {
+    params: Vec<String>,
+    body: Vec<FnStmt>,
+}
+
 // --- Codegen struct ---------------------------------------------------------
 
 struct Codegen {
@@ -164,7 +174,7 @@ struct Codegen {
     encoding_table: Vec<&'static crate::encoding::EncodingEntry>,
     sections: Vec<Section>,
     current_section: Option<usize>,
-    inline_fns: HashMap<String, Vec<FnStmt>>,
+    inline_fns: HashMap<String, InlineFn>,
     const_values: HashMap<String, i64>,
     /// Parsed std modules keyed by absolute file path.
     module_cache: ModuleCache,
@@ -365,8 +375,10 @@ impl Codegen {
     fn import_module_items(&mut self, items: &[Item], visited: &mut HashSet<std::path::PathBuf>) {
         for item in items {
             match item {
-                Item::InlineFnDecl { name, body, .. } => {
-                    self.import_inline_fn(name, body);
+                Item::InlineFnDecl {
+                    name, params, body, ..
+                } => {
+                    self.import_inline_fn(name, params, body);
                 }
                 Item::ConstDecl {
                     name,
@@ -401,8 +413,8 @@ impl Codegen {
     /// Import a single named item found in a parent module.
     fn import_named_item(&mut self, item: &Item, name: &str, bare: bool) {
         match item {
-            Item::InlineFnDecl { body, .. } => {
-                self.import_inline_fn(name, body);
+            Item::InlineFnDecl { params, body, .. } => {
+                self.import_inline_fn(name, params, body);
             }
             Item::ConstDecl {
                 value,
@@ -423,14 +435,20 @@ impl Codegen {
 
     /// Insert an inline function into the flat namespace, warning on
     /// collision.
-    fn import_inline_fn(&mut self, name: &str, body: &[FnStmt]) {
+    fn import_inline_fn(&mut self, name: &str, params: &[String], body: &[FnStmt]) {
         if self.inline_fns.contains_key(name) {
             self.warning(
                 304,
                 format!("name `{name}` imported more than once; last import wins"),
             );
         }
-        self.inline_fns.insert(name.to_string(), body.to_owned());
+        self.inline_fns.insert(
+            name.to_string(),
+            InlineFn {
+                params: params.to_vec(),
+                body: body.to_vec(),
+            },
+        );
     }
 
     /// Insert a constant into the flat namespace, warning when an
@@ -544,15 +562,29 @@ impl Codegen {
                     }
                 }
                 // Store the body so `locate_fn!` can place it later.
-                self.inline_fns.insert(name.clone(), body.clone());
+                self.inline_fns.insert(
+                    name.clone(),
+                    InlineFn {
+                        params: Vec::new(),
+                        body: body.clone(),
+                    },
+                );
                 // When declared inside a section, compile in place.
                 // When declared outside a section, defer to `locate_fn!`.
                 if self.current_section.is_some() {
                     self.compile_fn(name, body, *is_noreturn);
                 }
             }
-            Item::InlineFnDecl { name, body, .. } => {
-                self.inline_fns.insert(name.clone(), body.clone());
+            Item::InlineFnDecl {
+                name, params, body, ..
+            } => {
+                self.inline_fns.insert(
+                    name.clone(),
+                    InlineFn {
+                        params: params.clone(),
+                        body: body.clone(),
+                    },
+                );
             }
             Item::StructDecl { .. } | Item::TypeDecl { .. } | Item::EnumDecl { .. } => {
                 // No codegen output for type declarations.
@@ -721,7 +753,7 @@ impl Codegen {
                     // Look up the function in the inline_fns map.
                     if !segments.is_empty() {
                         let fn_name = segments.last().unwrap();
-                        if let Some(body) = self.inline_fns.get(fn_name).cloned() {
+                        if let Some(inline_fn) = self.inline_fns.get(fn_name).cloned() {
                             // Record the function symbol at the current
                             // offset, then compile the body inline.
                             let start_offset = if let Some(idx) = self.current_section {
@@ -729,7 +761,7 @@ impl Codegen {
                             } else {
                                 0
                             };
-                            self.compile_fn_body(&body);
+                            self.compile_fn_body(&inline_fn.body);
                             let end_offset = if let Some(idx) = self.current_section {
                                 self.sections[idx].data.len() as u32
                             } else {
@@ -976,7 +1008,12 @@ impl Codegen {
                             // Symbol reference — emit placeholder and relocation.
                             self.emit_byte(0);
                             if let Some(sym) = expr_to_symbol(value) {
-                                self.add_relocation(1, RelocKind::Abs8, &sym);
+                                self.add_relocation(
+                                    1,
+                                    RelocKind::Abs8,
+                                    &sym,
+                                    selector_addend(value, &self.const_values),
+                                );
                             }
                         }
                     }
@@ -1008,14 +1045,14 @@ impl Codegen {
                 if let Some(op_byte) = self.lookup(opcode, AddrMode::Relative) {
                     self.emit_byte(op_byte);
                     self.emit_byte(0); // placeholder offset
-                    self.add_relocation(1, RelocKind::Branch8, name);
+                    self.add_relocation(1, RelocKind::Branch8, name, 0);
                 } else {
                     // Non-branch instruction with label ref — treat as absolute.
                     if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
                         self.emit_byte(op_byte);
                         self.emit_byte(0);
                         self.emit_byte(0);
-                        self.add_relocation(2, RelocKind::Abs16, name);
+                        self.add_relocation(2, RelocKind::Abs16, name, 0);
                     }
                 }
             }
@@ -1034,12 +1071,19 @@ impl Codegen {
                     }
                     None if !path_name.is_empty() => {
                         // Not a known constant: keep the old behaviour
-                        // and emit a relocation against the joined path.
+                        // and emit a relocation against the joined
+                        // path, carrying the folded offset as the
+                        // relocation addend.
                         if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
                             self.emit_byte(op_byte);
                             self.emit_byte(0);
                             self.emit_byte(0);
-                            self.add_relocation(2, RelocKind::Abs16, &path_name);
+                            self.add_relocation(
+                                2,
+                                RelocKind::Abs16,
+                                &path_name,
+                                selector_offset(accesses, &self.const_values),
+                            );
                         }
                     }
                     None => {}
@@ -1120,19 +1164,20 @@ impl Codegen {
                 }
                 None => {
                     // Symbol reference.
+                    let addend = selector_addend(expr, &self.const_values);
                     if mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
                     {
                         self.emit_byte(0);
                         if let Some(sym) = expr_to_symbol(expr) {
-                            self.add_relocation(1, RelocKind::Abs8, &sym);
+                            self.add_relocation(1, RelocKind::Abs8, &sym, addend);
                         }
                     } else {
                         self.emit_byte(0);
                         self.emit_byte(0);
                         if let Some(sym) = expr_to_symbol(expr) {
-                            self.add_relocation(2, RelocKind::Abs16, &sym);
+                            self.add_relocation(2, RelocKind::Abs16, &sym, addend);
                         }
                     }
                 }
@@ -1296,10 +1341,14 @@ impl Codegen {
         }
     }
 
-    fn compile_fn_call(&mut self, name: &str, _args: &[Expr]) {
+    fn compile_fn_call(&mut self, name: &str, args: &[Expr]) {
         // Check if it's an inline fn.
-        if let Some(body) = self.inline_fns.get(name).cloned() {
-            // Expand the inline fn body at the call site.
+        if let Some(inline_fn) = self.inline_fns.get(name).cloned() {
+            // Substitute the call arguments for the parameters, then
+            // expand the body at the call site. Nested inline calls
+            // in the substituted body resolve during this compile
+            // pass.
+            let body = self.substitute_params(&inline_fn.body, &inline_fn.params, args);
             for stmt in &body {
                 self.compile_stmt(stmt);
             }
@@ -1308,7 +1357,273 @@ impl Codegen {
             self.emit_byte(0x20); // JSR absolute
             self.emit_byte(0);
             self.emit_byte(0);
-            self.add_relocation(2, RelocKind::Abs16, name);
+            self.add_relocation(2, RelocKind::Abs16, name, 0);
+        }
+    }
+
+    // --- Parameter substitution ---------------------------------------------
+
+    /// Clone an inline fn body, replacing parameter idents with the
+    /// call-site argument expressions. Parameters without a matching
+    /// argument are left as-is so the compiler falls back to the
+    /// existing symbol handling for them.
+    fn substitute_params(&self, body: &[FnStmt], params: &[String], args: &[Expr]) -> Vec<FnStmt> {
+        body.iter()
+            .map(|stmt| self.substitute_stmt(stmt, params, args))
+            .collect()
+    }
+
+    fn substitute_stmt(&self, stmt: &FnStmt, params: &[String], args: &[Expr]) -> FnStmt {
+        match stmt {
+            FnStmt::AsmStmt { opcode, operands } => FnStmt::AsmStmt {
+                opcode: opcode.clone(),
+                operands: operands
+                    .iter()
+                    .map(|operand| self.substitute_operand(operand, params, args))
+                    .collect(),
+            },
+            FnStmt::FnCall {
+                name,
+                args: call_args,
+            } => FnStmt::FnCall {
+                name: name.clone(),
+                args: call_args
+                    .iter()
+                    .map(|arg| self.substitute_expr(arg, params, args))
+                    .collect(),
+            },
+            FnStmt::Label { name, stmt } => FnStmt::Label {
+                name: name.clone(),
+                stmt: Box::new(self.substitute_stmt(stmt, params, args)),
+            },
+            FnStmt::IfStmt {
+                branch_hint,
+                condition,
+                then_block,
+                else_block,
+            } => FnStmt::IfStmt {
+                branch_hint: *branch_hint,
+                condition: condition.clone(),
+                then_block: self.substitute_block(then_block, params, args),
+                else_block: else_block
+                    .as_ref()
+                    .map(|block| self.substitute_block(block, params, args)),
+            },
+            FnStmt::WhileStmt {
+                branch_hint,
+                condition,
+                body,
+            } => FnStmt::WhileStmt {
+                branch_hint: *branch_hint,
+                condition: condition.clone(),
+                body: self.substitute_block(body, params, args),
+            },
+            FnStmt::DoWhileStmt {
+                body,
+                branch_hint,
+                condition,
+            } => FnStmt::DoWhileStmt {
+                body: self.substitute_block(body, params, args),
+                branch_hint: *branch_hint,
+                condition: condition.clone(),
+            },
+            FnStmt::LoopStmt { body } => FnStmt::LoopStmt {
+                body: self.substitute_block(body, params, args),
+            },
+            FnStmt::SwitchStmt { register, cases } => FnStmt::SwitchStmt {
+                register: register.clone(),
+                cases: cases
+                    .iter()
+                    .map(|case| self.substitute_case(case, params, args))
+                    .collect(),
+            },
+            FnStmt::VarDeclStmt { decl } => FnStmt::VarDeclStmt {
+                decl: Box::new(self.substitute_item(decl, params, args)),
+            },
+            FnStmt::ReturnStmt => FnStmt::ReturnStmt,
+        }
+    }
+
+    fn substitute_block(&self, block: &[FnStmt], params: &[String], args: &[Expr]) -> Vec<FnStmt> {
+        block
+            .iter()
+            .map(|stmt| self.substitute_stmt(stmt, params, args))
+            .collect()
+    }
+
+    fn substitute_case(&self, case: &SwitchCase, params: &[String], args: &[Expr]) -> SwitchCase {
+        match case {
+            SwitchCase::Case { expr, body } => SwitchCase::Case {
+                expr: self.substitute_expr(expr, params, args),
+                body: self.substitute_block(body, params, args),
+            },
+            SwitchCase::Default { body } => SwitchCase::Default {
+                body: self.substitute_block(body, params, args),
+            },
+        }
+    }
+
+    fn substitute_item(&self, item: &Item, params: &[String], args: &[Expr]) -> Item {
+        match item {
+            Item::ConstDecl {
+                name,
+                ty,
+                value,
+                evaluated_value,
+                attributes,
+            } => Item::ConstDecl {
+                name: name.clone(),
+                ty: ty.clone(),
+                value: self.substitute_expr(value, params, args),
+                evaluated_value: *evaluated_value,
+                attributes: attributes.clone(),
+            },
+            Item::VarDecl {
+                name,
+                is_volatile,
+                ty,
+                array_dim,
+                addr_binding,
+                init,
+                attributes,
+            } => Item::VarDecl {
+                name: name.clone(),
+                is_volatile: *is_volatile,
+                ty: ty.clone(),
+                array_dim: array_dim
+                    .as_ref()
+                    .map(|dim| self.substitute_expr(dim, params, args)),
+                addr_binding: addr_binding
+                    .as_ref()
+                    .map(|binding| self.substitute_expr(binding, params, args)),
+                init: init
+                    .as_ref()
+                    .map(|init| self.substitute_init(init, params, args)),
+                attributes: attributes.clone(),
+            },
+            _ => item.clone(),
+        }
+    }
+
+    fn substitute_init(&self, init: &InitValue, params: &[String], args: &[Expr]) -> InitValue {
+        match init {
+            InitValue::Expr { value } => InitValue::Expr {
+                value: self.substitute_expr(value, params, args),
+            },
+            InitValue::InitList { items } => InitValue::InitList {
+                items: items
+                    .iter()
+                    .map(|item| self.substitute_init(item, params, args))
+                    .collect(),
+            },
+            InitValue::String_ { value } => InitValue::String_ {
+                value: value.clone(),
+            },
+        }
+    }
+
+    fn substitute_operand(&self, operand: &Operand, params: &[String], args: &[Expr]) -> Operand {
+        match operand {
+            Operand::Immediate { value } => Operand::Immediate {
+                value: self.substitute_expr(value, params, args),
+            },
+            Operand::MemoryOperand {
+                mode_prefix,
+                expr,
+                index_reg,
+            } => Operand::MemoryOperand {
+                mode_prefix: mode_prefix.clone(),
+                expr: self.substitute_expr(expr, params, args),
+                index_reg: index_reg.clone(),
+            },
+            Operand::RegisterRef { name } => Operand::RegisterRef { name: name.clone() },
+            Operand::LabelRef { name } => Operand::LabelRef { name: name.clone() },
+            Operand::Selector { path, accesses } => Operand::Selector {
+                path: path.clone(),
+                accesses: accesses
+                    .iter()
+                    .map(|access| self.substitute_access(access, params, args))
+                    .collect(),
+            },
+        }
+    }
+
+    fn substitute_access(&self, access: &Access, params: &[String], args: &[Expr]) -> Access {
+        match access {
+            Access::ModuleAccess { name } => Access::ModuleAccess { name: name.clone() },
+            Access::FieldAccess { name } => Access::FieldAccess { name: name.clone() },
+            Access::Offset { op, value } => Access::Offset {
+                op: *op,
+                value: self.substitute_expr(value, params, args),
+            },
+        }
+    }
+
+    /// Replace `Expr::Ident` names that match a parameter with the
+    /// matching argument expression, recursing into composite
+    /// expressions.
+    fn substitute_expr(&self, expr: &Expr, params: &[String], args: &[Expr]) -> Expr {
+        match expr {
+            Expr::Ident { name } => params
+                .iter()
+                .position(|param| param == name)
+                .and_then(|index| args.get(index))
+                .cloned()
+                .unwrap_or_else(|| expr.clone()),
+            Expr::BinOp { op, left, right } => Expr::BinOp {
+                op: *op,
+                left: Box::new(self.substitute_expr(left, params, args)),
+                right: Box::new(self.substitute_expr(right, params, args)),
+            },
+            Expr::UnaryOp { op, operand } => Expr::UnaryOp {
+                op: *op,
+                operand: Box::new(self.substitute_expr(operand, params, args)),
+            },
+            Expr::MacroCall { name, arg } => Expr::MacroCall {
+                name: name.clone(),
+                arg: Box::new(self.substitute_expr(arg, params, args)),
+            },
+            Expr::Selector { path, accesses } => {
+                // A path element can be a parameter: `dest + 1`
+                // parses as a selector on `dest`. An identifier
+                // argument replaces the name in place; other argument
+                // shapes leave the selector unchanged.
+                let path = path
+                    .iter()
+                    .map(|segment| {
+                        params
+                            .iter()
+                            .position(|param| param == segment)
+                            .and_then(|index| args.get(index))
+                            .and_then(|arg| match arg {
+                                Expr::Ident { name } => Some(name.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| segment.clone())
+                    })
+                    .collect();
+                Expr::Selector {
+                    path,
+                    accesses: accesses
+                        .iter()
+                        .map(|access| self.substitute_access(access, params, args))
+                        .collect(),
+                }
+            }
+            Expr::FnCall {
+                name,
+                args: call_args,
+            } => Expr::FnCall {
+                name: name.clone(),
+                args: call_args
+                    .iter()
+                    .map(|arg| self.substitute_expr(arg, params, args))
+                    .collect(),
+            },
+            Expr::ParenExpr { inner } => Expr::ParenExpr {
+                inner: Box::new(self.substitute_expr(inner, params, args)),
+            },
+            Expr::Number { .. } | Expr::String_ { .. } | Expr::Boolean { .. } => expr.clone(),
         }
     }
 
@@ -1346,13 +1661,14 @@ impl Codegen {
         }
     }
 
-    fn add_relocation(&mut self, offset_from_end: u32, kind: RelocKind, symbol: &str) {
+    fn add_relocation(&mut self, offset_from_end: u32, kind: RelocKind, symbol: &str, addend: i64) {
         if let Some(idx) = self.current_section {
             let abs_offset = self.sections[idx].data.len() as u32 - offset_from_end;
             self.sections[idx].relocations.push(Relocation {
                 offset: abs_offset,
                 kind,
                 symbol: symbol.to_string(),
+                addend,
             });
         }
     }
@@ -1460,6 +1776,32 @@ fn type_size(ty: &Type) -> usize {
 /// The fully qualified name (e.g. `PPU::CNT0`) is tried first, then the
 /// bare path (`PPU`). Any trailing offset access is folded into the
 /// result. Returns `None` when the selector does not name a constant.
+/// Fold the evaluable `Offset` accesses of a selector into a signed
+/// addend. Offsets that cannot be evaluated are ignored.
+fn selector_offset(accesses: &[Access], const_values: &HashMap<String, i64>) -> i64 {
+    let mut offset: i64 = 0;
+    for access in accesses {
+        if let Access::Offset { op, value } = access {
+            if let Some(v) = eval_expr(value, const_values) {
+                offset = match op {
+                    OffsetOp::Add => offset + v,
+                    OffsetOp::Sub => offset - v,
+                };
+            }
+        }
+    }
+    offset
+}
+
+/// The offset addend of an expression, if it is a selector with
+/// offset accesses; otherwise zero.
+fn selector_addend(expr: &Expr, const_values: &HashMap<String, i64>) -> i64 {
+    match expr {
+        Expr::Selector { accesses, .. } => selector_offset(accesses, const_values),
+        _ => 0,
+    }
+}
+
 fn resolve_selector(
     path: &[String],
     accesses: &[Access],
@@ -1467,23 +1809,13 @@ fn resolve_selector(
 ) -> Option<i64> {
     let path_name = path.join("::");
     let mut full_name = path_name.clone();
-    let mut offset: i64 = 0;
     for access in accesses {
-        match access {
-            Access::ModuleAccess { name } | Access::FieldAccess { name } => {
-                full_name.push_str("::");
-                full_name.push_str(name);
-            }
-            Access::Offset { op, value } => {
-                if let Some(v) = eval_expr(value, const_values) {
-                    offset = match op {
-                        OffsetOp::Add => offset + v,
-                        OffsetOp::Sub => offset - v,
-                    };
-                }
-            }
+        if let Access::ModuleAccess { name } | Access::FieldAccess { name } = access {
+            full_name.push_str("::");
+            full_name.push_str(name);
         }
     }
+    let offset = selector_offset(accesses, const_values);
     let value = const_values.get(&full_name).or_else(|| {
         if full_name != path_name {
             const_values.get(&path_name)
@@ -1684,9 +2016,12 @@ fn decl_name(item: &Item) -> Option<&str> {
 mod tests {
     use super::find_std_root;
     use super::Codegen;
+    use super::InlineFn;
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
-    use op_common::ast::{Access, EnumVariant, Expr, OffsetOp, Operand, UseRoot, UseTail, UseTree};
+    use op_common::ast::{
+        Access, EnumVariant, Expr, FnStmt, OffsetOp, Operand, UseRoot, UseTail, UseTree,
+    };
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
     use op_ir::{Section, SectionKind};
@@ -2137,6 +2472,146 @@ mod tests {
 
         // `sta $2001` -> 8D 01 20.
         assert_eq!(codegen.sections[0].data, vec![0x8D, 0x01, 0x20]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// Expand an inline fn with two parameters and check the emitted
+    /// bytes against a hand-assembled equivalent.
+    #[test]
+    fn inline_fn_substitutes_two_params() {
+        let mut codegen = test_codegen_with_rom_section();
+        // inline fn copy(src, dst) { lda src; sta dst }
+        codegen.inline_fns.insert(
+            "copy".to_string(),
+            InlineFn {
+                params: vec!["src".to_string(), "dst".to_string()],
+                body: vec![
+                    FnStmt::AsmStmt {
+                        opcode: "lda".to_string(),
+                        operands: vec![Operand::MemoryOperand {
+                            mode_prefix: None,
+                            expr: Expr::Ident {
+                                name: "src".to_string(),
+                            },
+                            index_reg: None,
+                        }],
+                    },
+                    FnStmt::AsmStmt {
+                        opcode: "sta".to_string(),
+                        operands: vec![Operand::MemoryOperand {
+                            mode_prefix: None,
+                            expr: Expr::Ident {
+                                name: "dst".to_string(),
+                            },
+                            index_reg: None,
+                        }],
+                    },
+                ],
+            },
+        );
+
+        codegen.compile_fn_call(
+            "copy",
+            &[
+                Expr::Number { value: 0x2000 },
+                Expr::Number { value: 0x4000 },
+            ],
+        );
+
+        // Hand-assembled equivalent: lda $2000 / sta $4000.
+        assert_eq!(
+            codegen.sections[0].data,
+            vec![0xAD, 0x00, 0x20, 0x8D, 0x00, 0x40]
+        );
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// A nested inline call in the substituted body resolves during
+    /// the compile pass.
+    #[test]
+    fn inline_fn_expands_nested_calls() {
+        let mut codegen = test_codegen_with_rom_section();
+        // inline fn pause() { nop }
+        codegen.inline_fns.insert(
+            "pause".to_string(),
+            InlineFn {
+                params: Vec::new(),
+                body: vec![FnStmt::AsmStmt {
+                    opcode: "nop".to_string(),
+                    operands: Vec::new(),
+                }],
+            },
+        );
+        // inline fn step(value) { pause(); lda value }
+        codegen.inline_fns.insert(
+            "step".to_string(),
+            InlineFn {
+                params: vec!["value".to_string()],
+                body: vec![
+                    FnStmt::FnCall {
+                        name: "pause".to_string(),
+                        args: Vec::new(),
+                    },
+                    FnStmt::AsmStmt {
+                        opcode: "lda".to_string(),
+                        operands: vec![Operand::MemoryOperand {
+                            mode_prefix: None,
+                            expr: Expr::Ident {
+                                name: "value".to_string(),
+                            },
+                            index_reg: None,
+                        }],
+                    },
+                ],
+            },
+        );
+
+        codegen.compile_fn_call("step", &[Expr::Number { value: 0x42 }]);
+
+        // Hand-assembled equivalent: nop / lda $42.
+        assert_eq!(codegen.sections[0].data, vec![0xEA, 0xA5, 0x42]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// Substitution reaches into nested call arguments.
+    #[test]
+    fn inline_fn_substitutes_nested_call_args() {
+        let mut codegen = test_codegen_with_rom_section();
+        // inline fn write(value) { lda value }
+        codegen.inline_fns.insert(
+            "write".to_string(),
+            InlineFn {
+                params: vec!["value".to_string()],
+                body: vec![FnStmt::AsmStmt {
+                    opcode: "lda".to_string(),
+                    operands: vec![Operand::MemoryOperand {
+                        mode_prefix: None,
+                        expr: Expr::Ident {
+                            name: "value".to_string(),
+                        },
+                        index_reg: None,
+                    }],
+                }],
+            },
+        );
+        // inline fn pipe(value) { write(value) }
+        codegen.inline_fns.insert(
+            "pipe".to_string(),
+            InlineFn {
+                params: vec!["value".to_string()],
+                body: vec![FnStmt::FnCall {
+                    name: "write".to_string(),
+                    args: vec![Expr::Ident {
+                        name: "value".to_string(),
+                    }],
+                }],
+            },
+        );
+
+        codegen.compile_fn_call("pipe", &[Expr::Number { value: 0x42 }]);
+
+        // pipe(0x42) -> write(0x42) -> lda $42.
+        assert_eq!(codegen.sections[0].data, vec![0xA5, 0x42]);
         assert!(codegen.sections[0].relocations.is_empty());
     }
 }
