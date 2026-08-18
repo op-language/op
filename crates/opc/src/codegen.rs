@@ -79,6 +79,7 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         current_section: None,
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
+        module_cache: ModuleCache::default(),
         label_counter: 0,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -108,6 +109,53 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
     (obj, codegen.diags)
 }
 
+// --- Module cache -----------------------------------------------------------
+
+/// Parsed std modules keyed by absolute file path.
+///
+/// Each file is parsed once. Later references to the same file reuse
+/// the cached [`Module`], which prevents duplicate parses and
+/// duplicate diagnostics.
+#[derive(Default)]
+struct ModuleCache {
+    modules: HashMap<std::path::PathBuf, Module>,
+}
+
+impl ModuleCache {
+    /// Load the module at `path`, parsing the file on a cache miss.
+    ///
+    /// cfg evaluation happens during parsing: the parser drops items
+    /// whose `#[cfg]` predicate does not match `target`. The
+    /// `allow` attribute stays until Phase 5 wires this into use
+    /// resolution.
+    #[allow(dead_code)]
+    fn load_module(
+        &mut self,
+        path: &std::path::Path,
+        target: &TargetTriplet,
+        features: &[String],
+    ) -> Result<Module> {
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(module) = self.modules.get(&key) {
+            return Ok(module.clone());
+        }
+        let path_str = key.to_string_lossy().to_string();
+        let source = std::fs::read_to_string(&key)
+            .map_err(|e| anyhow::anyhow!("failed to read {path_str}: {e}"))?;
+        let (ast, diags) = parser::parse_source(&path_str, &source, &target.as_str(), features);
+        let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
+        if has_errors {
+            for d in &diags {
+                d.print(None);
+            }
+            anyhow::bail!("parser errors in {path_str}");
+        }
+        let module = ast.root;
+        self.modules.insert(key, module.clone());
+        Ok(module)
+    }
+}
+
 // --- Codegen struct ---------------------------------------------------------
 
 struct Codegen {
@@ -118,6 +166,10 @@ struct Codegen {
     current_section: Option<usize>,
     inline_fns: HashMap<String, Vec<FnStmt>>,
     const_values: HashMap<String, i64>,
+    /// Parsed std modules keyed by absolute file path. The `allow`
+    /// attribute stays until Phase 5 reads this field.
+    #[allow(dead_code)]
+    module_cache: ModuleCache,
     label_counter: u32,
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
@@ -1212,6 +1264,8 @@ fn find_std_root(include_paths: &[String]) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::find_std_root;
+    use super::ModuleCache;
+    use op_common::TargetTriplet;
 
     /// Run `f` with `OP_STD_PATH` and `HOME` pointed at locations that do
     /// not contain a std root, then restore the previous environment.
@@ -1240,5 +1294,32 @@ mod tests {
             assert_eq!(find_std_root(&include), None);
             assert_eq!(find_std_root(&[]), None);
         });
+    }
+
+    #[test]
+    fn load_module_caches_parsed_module() {
+        let tmp = std::env::temp_dir().join(format!("opc-module-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tmp.canonicalize().unwrap();
+        let file = tmp.join("cache-test.op");
+        std::fs::write(&file, "const ANSWER: u8 = 42;\n").unwrap();
+        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+
+        let mut cache = ModuleCache::default();
+        let first = cache.load_module(&file, &target, &[]).unwrap();
+        assert_eq!(first.items.len(), 1);
+
+        // Remove the file. A second load must still succeed from the cache.
+        std::fs::remove_file(&file).unwrap();
+        let second = cache.load_module(&file, &target, &[]).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn load_module_errors_when_file_missing() {
+        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        let mut cache = ModuleCache::default();
+        let missing = std::path::Path::new("/nonexistent-opc-test/missing.op");
+        assert!(cache.load_module(missing, &target, &[]).is_err());
     }
 }
