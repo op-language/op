@@ -9,7 +9,7 @@
 use anyhow::Result;
 use op_common::ast::{
     Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, Operand, PlacementArg, SwitchCase,
-    Type,
+    Type, UseRoot,
 };
 use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
@@ -80,6 +80,7 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
         module_cache: ModuleCache::default(),
+        module_path: Vec::new(),
         label_counter: 0,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -170,6 +171,10 @@ struct Codegen {
     /// attribute stays until Phase 5 reads this field.
     #[allow(dead_code)]
     module_cache: ModuleCache,
+    /// Current module path stack. Empty at the crate root. A name is
+    /// pushed when the codegen enters a module and popped when it
+    /// leaves.
+    module_path: Vec<String>,
     label_counter: u32,
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
@@ -186,6 +191,33 @@ impl Codegen {
     fn walk_module(&mut self, module: &Module) {
         for item in &module.items {
             self.walk_item(item);
+        }
+    }
+
+    /// Return a clone of the current module path stack. The stack is
+    /// empty at the crate root. The `allow` attribute stays until
+    /// Phase 5 reads the module path.
+    #[allow(dead_code)]
+    fn current_module_path(&self) -> Vec<String> {
+        self.module_path.clone()
+    }
+
+    /// Convert a use-tree root into a module path. `Lib` is the crate
+    /// root (an empty path). `SelfMod` is the current stack. `Super`
+    /// is the current stack without its last element. `Name` is a bare
+    /// name. The `allow` attribute stays until Phase 5 uses this in
+    /// use resolution.
+    #[allow(dead_code)]
+    fn resolve_root(&self, root: &UseRoot) -> Vec<String> {
+        match root {
+            UseRoot::Lib => Vec::new(),
+            UseRoot::SelfMod => self.module_path.clone(),
+            UseRoot::Super => {
+                let mut path = self.module_path.clone();
+                path.pop();
+                path
+            }
+            UseRoot::Name(name) => vec![name.clone()],
         }
     }
 
@@ -247,7 +279,13 @@ impl Codegen {
             Item::StructDecl { .. } | Item::TypeDecl { .. } | Item::EnumDecl { .. } => {
                 // No codegen output for type declarations.
             }
-            Item::ModDecl { resolved, body, .. } => {
+            Item::ModDecl {
+                name,
+                resolved,
+                body,
+                ..
+            } => {
+                self.module_path.push(name.clone());
                 if let Some(sub_module) = resolved {
                     self.walk_module(sub_module);
                 } else if let Some(items) = body {
@@ -255,6 +293,7 @@ impl Codegen {
                         self.walk_item(item);
                     }
                 }
+                self.module_path.pop();
             }
             Item::UseDecl { .. } => {
                 // No codegen output for use declarations.
@@ -1264,8 +1303,12 @@ fn find_std_root(include_paths: &[String]) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::find_std_root;
+    use super::Codegen;
     use super::ModuleCache;
+    use crate::encoding::get_full_encoding_table;
+    use op_common::ast::UseRoot;
     use op_common::TargetTriplet;
+    use std::collections::HashMap;
 
     /// Run `f` with `OP_STD_PATH` and `HOME` pointed at locations that do
     /// not contain a std root, then restore the previous environment.
@@ -1321,5 +1364,62 @@ mod tests {
         let mut cache = ModuleCache::default();
         let missing = std::path::Path::new("/nonexistent-opc-test/missing.op");
         assert!(cache.load_module(missing, &target, &[]).is_err());
+    }
+
+    /// Build a minimal Codegen for unit tests.
+    fn test_codegen() -> Codegen {
+        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        Codegen {
+            target,
+            opt_level: 0,
+            encoding_table: get_full_encoding_table("mos6502"),
+            sections: Vec::new(),
+            current_section: None,
+            inline_fns: HashMap::new(),
+            const_values: HashMap::new(),
+            module_cache: ModuleCache::default(),
+            module_path: Vec::new(),
+            label_counter: 0,
+            interrupt_vectors: Vec::new(),
+            header: None,
+            pad_byte: 0,
+            source_dir: std::path::PathBuf::new(),
+            diags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_root_converts_use_roots() {
+        let mut codegen = test_codegen();
+
+        // At the crate root: lib, self, and super all resolve to the
+        // empty path.
+        assert_eq!(codegen.resolve_root(&UseRoot::Lib), Vec::<String>::new());
+        assert_eq!(
+            codegen.resolve_root(&UseRoot::SelfMod),
+            Vec::<String>::new()
+        );
+        assert_eq!(codegen.resolve_root(&UseRoot::Super), Vec::<String>::new());
+        assert_eq!(
+            codegen.resolve_root(&UseRoot::Name("std".into())),
+            vec!["std".to_string()]
+        );
+
+        // Inside a nested module: self is the full stack, super drops
+        // the last element.
+        codegen.module_path.push("std".to_string());
+        codegen.module_path.push("cpu".to_string());
+        assert_eq!(
+            codegen.current_module_path(),
+            vec!["std".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(
+            codegen.resolve_root(&UseRoot::SelfMod),
+            vec!["std".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(
+            codegen.resolve_root(&UseRoot::Super),
+            vec!["std".to_string()]
+        );
     }
 }
