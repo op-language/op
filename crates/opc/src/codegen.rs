@@ -28,7 +28,7 @@ pub fn run(args: &OpcArgs) -> Result<()> {
         return Ok(());
     }
     let target = args.target.as_deref().unwrap_or("");
-    let obj = compile_file(&args.input.input, target, args.opt_level as u8)?;
+    let obj = compile_file(&args.input.input, target, args.opt_level)?;
     let json = op_common::to_json(&obj)?;
     match &args.output {
         Some(path) => std::fs::write(path, json)?,
@@ -689,9 +689,8 @@ impl Codegen {
                     if mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
+                        || mode == AddrMode::Relative
                     {
-                        self.emit_byte((v & 0xFF) as u8);
-                    } else if mode == AddrMode::Relative {
                         self.emit_byte((v & 0xFF) as u8);
                     } else {
                         // Absolute: 2 bytes, little-endian.
@@ -753,7 +752,7 @@ impl Codegen {
             self.emit_byte(0);
 
             // Patch the branch to skip over the then-block + JMP.
-            let then_size = (self.current_data_len() as i64 - patch_offset as i64 - 1) as i64;
+            let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
             if then_size >= 0 {
                 self.patch_byte(patch_offset, then_size as u8);
             }
@@ -769,7 +768,7 @@ impl Codegen {
             self.patch_byte(else_jump_patch + 1, ((else_end >> 8) & 0xFF) as u8);
         } else {
             // Patch the branch to skip over the then-block.
-            let then_size = (self.current_data_len() as i64 - patch_offset as i64 - 1) as i64;
+            let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
             if then_size >= 0 {
                 self.patch_byte(patch_offset, then_size as u8);
             }
@@ -796,7 +795,7 @@ impl Codegen {
         self.emit_byte(((loop_start >> 8) & 0xFF) as u8);
 
         // Patch the branch to skip over the body + JMP.
-        let body_size = (self.current_data_len() as i64 - patch_offset as i64 - 1) as i64;
+        let body_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
         if body_size >= 0 {
             self.patch_byte(patch_offset, body_size as u8);
         }

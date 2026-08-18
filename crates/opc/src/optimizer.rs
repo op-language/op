@@ -485,8 +485,7 @@ fn try_dead_store(instructions: &[Instruction], i: usize) -> Option<usize> {
     // Look ahead: is there a read of the same address before the next
     // store to the same address?
     let store_addr = &store.operand;
-    for j in (i + 1)..instructions.len() {
-        let inst = &instructions[j];
+    for inst in instructions.iter().take(instructions.len()).skip(i + 1) {
         let reads_addr = inst
             .mnemonic
             .as_deref()

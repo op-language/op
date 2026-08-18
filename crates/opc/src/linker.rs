@@ -208,7 +208,7 @@ impl Linker {
                         // Relative offset: target - (reloc_site + 1)
                         let reloc_site_addr = section_org + reloc.offset;
                         let relative = target_addr as i64 - (reloc_site_addr as i64 + 1);
-                        if relative < -128 || relative > 127 {
+                        if !(-128..=127).contains(&relative) {
                             self.diags.push(Diagnostic::error(
                                 401,
                                 "",
@@ -227,7 +227,7 @@ impl Linker {
                     RelocKind::Branch16 => {
                         let reloc_site_addr = section_org + reloc.offset;
                         let relative = target_addr as i64 - (reloc_site_addr as i64 + 2);
-                        if relative < -32768 || relative > 32767 {
+                        if !(-32768..=32767).contains(&relative) {
                             self.diags.push(Diagnostic::error(
                                 401,
                                 "",

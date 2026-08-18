@@ -375,8 +375,7 @@ impl Parser {
         }
 
         // Keywords
-        if kind.starts_with("Kw_") {
-            let kw = &kind[3..];
+        if let Some(kw) = kind.strip_prefix("Kw_") {
             return match kw {
                 "const" => Some(self.parse_const_decl(attrs)),
                 "fn" => Some(self.parse_fn_decl(false, attrs)),
@@ -408,8 +407,7 @@ impl Parser {
     fn parse_pub_item(&mut self, attrs: Vec<Attribute>) -> Item {
         self.advance(); // consume 'pub'
         let kind = self.peek_kind().to_string();
-        if kind.starts_with("Kw_") {
-            let kw = &kind[3..];
+        if let Some(kw) = kind.strip_prefix("Kw_") {
             match kw {
                 "mod" => {
                     let mut item = self.parse_mod_decl(attrs);
@@ -450,11 +448,7 @@ impl Parser {
 
     fn parse_block_attribute_item(&mut self, attrs: Vec<Attribute>) -> Option<Item> {
         // Parse the attribute
-        let attr = if let Some(a) = self.parse_single_attribute() {
-            a
-        } else {
-            return None;
-        };
+        let attr = self.parse_single_attribute()?;
 
         // Check for block: #[attr] { items }
         if self.check("Op_lbrace") {
@@ -1299,13 +1293,14 @@ impl Parser {
 
     fn parse_index_reg(&mut self) -> Option<String> {
         // cpu::ident or just ident
-        if self.check("IDENT") && self.check_value("cpu") {
-            if self.tokens.get(self.pos + 1).map(|t| t.kind.as_str()) == Some("Op_colon_colon") {
-                self.advance(); // cpu
-                self.advance(); // ::
-                let name = self.advance().map(|t| t.value).unwrap_or_default();
-                return Some(format!("cpu::{}", name));
-            }
+        if self.check("IDENT")
+            && self.check_value("cpu")
+            && self.tokens.get(self.pos + 1).map(|t| t.kind.as_str()) == Some("Op_colon_colon")
+        {
+            self.advance(); // cpu
+            self.advance(); // ::
+            let name = self.advance().map(|t| t.value).unwrap_or_default();
+            return Some(format!("cpu::{}", name));
         }
         if self.check("IDENT") {
             let name = self.advance().map(|t| t.value).unwrap_or_default();
