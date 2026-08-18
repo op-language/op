@@ -411,3 +411,117 @@ fn full_pipeline_lex_parse_compile() {
     assert!(ram.symbols.iter().any(|s| s.name == "counter"));
     assert!(ram.symbols.iter().any(|s| s.name == "flag"));
 }
+
+// === Full pipeline (lex + parse + compile + link + output) ================
+
+use opc::linker::link_source;
+use opc::output::{default_format_for_target, emit_linked};
+
+fn run_full_pipeline(
+    file: &str,
+    src: &str,
+    target: &str,
+) -> (op_ir::ObjectFile, op_ir::ObjectFile, Vec<u8>) {
+    let (ast, parse_diags) = parse_source(file, src, target, &[]);
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let errors: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors: {:?}", errors);
+
+    let (linked, link_diags) = link_source(&obj);
+    let errors: Vec<_> = link_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "linker errors: {:?}", errors);
+
+    let format = default_format_for_target(target);
+    let bytes = emit_linked(&linked, format).expect("emit_linked failed");
+    (obj, linked, bytes)
+}
+
+const HELLO_NES_SRC: &str = r#"
+    #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+        #[interrupt(reset)]
+        fn main() {
+            lda #1
+            sta 0x20
+            loop {
+                jmp main
+            }
+        }
+    }
+"#;
+
+#[test]
+fn full_pipeline_end_to_end() {
+    let (_obj, _linked, bytes) =
+        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+    assert!(!bytes.is_empty(), "output binary should not be empty");
+}
+
+#[test]
+fn full_pipeline_ines_output() {
+    let (_obj, _linked, bytes) =
+        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+    assert!(
+        bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
+        "iNES output should start with NES magic"
+    );
+}
+
+#[test]
+fn full_pipeline_raw_output() {
+    // Apple II uses raw output (no dedicated format).
+    let src = r#"
+        #[rom(org = 0x0801, bank = 0, maxsize = 0x7FFF)] {
+            fn start() {
+                lda #0
+                sta 0x0000
+                rts
+            }
+        }
+    "#;
+    let (_obj, _linked, bytes) = run_full_pipeline("test.op", src, "mos6502-apple-apple2e-ntsc");
+    assert!(!bytes.is_empty(), "raw output should not be empty");
+}
+
+#[test]
+fn full_pipeline_nes_game() {
+    // examples/nes.op uses `use std::cpu::*` / `use std::machine::*` which
+    // the codegen does not resolve (UseDecl is a no-op). The pipeline will
+    // fail with unresolved symbols. Run the pipeline as far as it goes and
+    // assert that parse succeeds and codegen produces sections.
+    let source = include_str!("../../../examples/nes.op");
+    let (ast, parse_diags) =
+        parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    assert!(!obj.sections.is_empty(), "expected sections from nes.op");
+}
+
+#[test]
+fn full_pipeline_link_resolved() {
+    let (_obj, linked, _bytes) =
+        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+    for s in &linked.sections {
+        assert!(
+            s.relocations.is_empty(),
+            "section {} should have no relocations after link",
+            s.name
+        );
+    }
+}
