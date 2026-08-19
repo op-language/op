@@ -11,14 +11,14 @@ use opc::parser::parse_source;
 /// Helper: parse and compile a source string with the 6502 target.
 fn compile(src: &str) -> ObjectFile {
     let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
-    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
     obj
 }
 
 /// Helper: parse and compile with a specific opt level.
 fn compile_with_opt(src: &str, opt_level: u8) -> ObjectFile {
     let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
-    let (obj, _) = compile_source(&ast, opt_level);
+    let (obj, _) = compile_source(&ast, opt_level, &[], &[]);
     obj
 }
 
@@ -419,7 +419,7 @@ fn optimizer_disabled() {
 #[test]
 fn codegen_z80_target() {
     let (ast, _) = parse_source("test.op", "fn f() { nop }", "z80-nintendo-gameboy", &[]);
-    let (obj, _) = compile_source(&ast, 1);
+    let (obj, _) = compile_source(&ast, 1, &[], &[]);
     // Z80 should produce at least an empty or minimal output.
     assert_eq!(obj.target, "z80-nintendo-gameboy");
 }
@@ -427,14 +427,14 @@ fn codegen_z80_target() {
 #[test]
 fn codegen_68000_target() {
     let (ast, _) = parse_source("test.op", "fn f() { nop }", "m68000-sega-genesis", &[]);
-    let (obj, _) = compile_source(&ast, 1);
+    let (obj, _) = compile_source(&ast, 1, &[], &[]);
     assert_eq!(obj.target, "m68000-sega-genesis");
 }
 
 #[test]
 fn codegen_65c816_target() {
     let (ast, _) = parse_source("test.op", "fn f() { nop }", "wdc65c816-nintendo-snes", &[]);
-    let (obj, _) = compile_source(&ast, 1);
+    let (obj, _) = compile_source(&ast, 1, &[], &[]);
     assert_eq!(obj.target, "wdc65c816-nintendo-snes");
 }
 
@@ -443,7 +443,7 @@ fn codegen_65c816_target() {
 #[test]
 fn codegen_empty_source() {
     let (ast, _) = parse_source("test.op", "", "mos6502-nintendo-nes-ntsc", &[]);
-    let (obj, _) = compile_source(&ast, 1);
+    let (obj, _) = compile_source(&ast, 1, &[], &[]);
     assert_eq!(obj.sections.len(), 0);
 }
 

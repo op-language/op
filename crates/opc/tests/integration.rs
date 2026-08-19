@@ -319,7 +319,7 @@ fn lex_parse_compile_nes_code() {
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
 
     // nes.op has block attributes (rom, ram, chr, ines, setpad).
     // The codegen should not crash. The font.chr locate_bytes may
@@ -341,7 +341,7 @@ fn lex_parse_compile_nes_game() {
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
     let has_sections = !obj.sections.is_empty();
 
     // nes.op has #[rom], #[ram], #[chr] blocks — should produce sections.
@@ -388,7 +388,7 @@ fn full_pipeline_lex_parse_compile() {
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let (obj, codegen_diags) = compile_source(&ast, 1, &[], &[]);
     let errors: Vec<_> = codegen_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
@@ -429,7 +429,7 @@ fn run_full_pipeline(
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let (obj, codegen_diags) = compile_source(&ast, 1, &[], &[]);
     let errors: Vec<_> = codegen_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
@@ -509,7 +509,7 @@ fn full_pipeline_nes_game() {
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, _codegen_diags) = compile_source(&ast, 1);
+    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
     assert!(!obj.sections.is_empty(), "expected sections from nes.op");
 }
 

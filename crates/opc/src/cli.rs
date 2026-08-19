@@ -111,8 +111,10 @@ fn run_pipeline(args: &OpcArgs) -> Result<()> {
         anyhow::bail!("parser errors in {input_path}");
     }
 
-    // 3. Compile (codegen + optimizer).
-    let (obj, codegen_diags) = crate::codegen::compile_source(&ast, args.opt_level);
+    // 3. Compile (codegen + optimizer). Include paths and features are
+    // forwarded so codegen can locate and parse std modules.
+    let (obj, codegen_diags) =
+        crate::codegen::compile_source(&ast, args.opt_level, &args.include, &args.features);
     print_diags(&codegen_diags, input_path, &source);
     if has_errors(&codegen_diags) {
         anyhow::bail!("codegen errors in {input_path}");

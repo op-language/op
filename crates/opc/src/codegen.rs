@@ -28,7 +28,13 @@ pub fn run(args: &OpcArgs) -> Result<()> {
         return Ok(());
     }
     let target = args.target.as_deref().unwrap_or("");
-    let obj = compile_file(&args.input.input, target, args.opt_level)?;
+    let obj = compile_file(
+        &args.input.input,
+        target,
+        args.opt_level,
+        &args.include,
+        &args.features,
+    )?;
     let json = op_common::to_json(&obj)?;
     match &args.output {
         Some(path) => std::fs::write(path, json)?,
@@ -38,10 +44,16 @@ pub fn run(args: &OpcArgs) -> Result<()> {
 }
 
 /// Compile a source file into an [`ObjectFile`].
-pub fn compile_file(path: &str, target: &str, opt_level: u8) -> Result<ObjectFile> {
+pub fn compile_file(
+    path: &str,
+    target: &str,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+) -> Result<ObjectFile> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path))?;
-    let (ast, parse_diags) = parser::parse_source(path, &source, target, &[]);
+    let (ast, parse_diags) = parser::parse_source(path, &source, target, features);
     let has_errors = parse_diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &parse_diags {
@@ -49,7 +61,7 @@ pub fn compile_file(path: &str, target: &str, opt_level: u8) -> Result<ObjectFil
         }
         anyhow::bail!("parser errors in {}", path);
     }
-    let (obj, codegen_diags) = compile_source(&ast, opt_level);
+    let (obj, codegen_diags) = compile_source(&ast, opt_level, include_paths, features);
     let has_errors = codegen_diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &codegen_diags {
@@ -61,7 +73,12 @@ pub fn compile_file(path: &str, target: &str, opt_level: u8) -> Result<ObjectFil
 }
 
 /// Compile a parsed AST into an [`ObjectFile`] and a list of diagnostics.
-pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnostic>) {
+pub fn compile_source(
+    ast: &AstFile,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+) -> (ObjectFile, Vec<Diagnostic>) {
     let triplet = TargetTriplet::parse(&ast.target).unwrap_or(TargetTriplet {
         cpu: String::new(),
         manufacturer: String::new(),
@@ -83,6 +100,8 @@ pub fn compile_source(ast: &AstFile, opt_level: u8) -> (ObjectFile, Vec<Diagnost
         module_path: Vec::new(),
         enum_variants: HashMap::new(),
         use_aliases: HashMap::new(),
+        include_paths: include_paths.to_vec(),
+        features: features.to_vec(),
         label_counter: 0,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -186,6 +205,11 @@ struct Codegen {
     enum_variants: HashMap<String, i64>,
     /// Module paths bound by `use ... as alias` imports.
     use_aliases: HashMap<String, Vec<String>>,
+    /// Include search paths from the CLI. The first directory that
+    /// contains a `lib.op` file is the std crate root.
+    include_paths: Vec<String>,
+    /// Feature flags from the CLI. Used when parsing std modules.
+    features: Vec<String>,
     label_counter: u32,
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
@@ -371,7 +395,9 @@ impl Codegen {
         tail: &UseTail,
         visited: &mut HashSet<std::path::PathBuf>,
     ) {
-        if path.first().is_some_and(|name| name == "std") && find_std_root(&[]).is_none() {
+        if path.first().is_some_and(|name| name == "std")
+            && find_std_root(&self.include_paths).is_none()
+        {
             self.error(
                 302,
                 "std library not found: set OP_STD_PATH or use --include",
@@ -559,14 +585,14 @@ impl Codegen {
     fn lookup_module(&mut self, path: &[String]) -> Option<(Module, std::path::PathBuf)> {
         let (base, rest) = match path.first() {
             Some(name) if name == "std" => {
-                let root = find_std_root(&[])?;
+                let root = find_std_root(&self.include_paths)?;
                 (root, &path[1..])
             }
             _ => (self.source_dir.clone(), path),
         };
         let file = module_file_path(&base, rest)?;
         self.module_cache
-            .load_module(&file, &self.target, &[])
+            .load_module(&file, &self.target, &self.features)
             .ok()
             .map(|module| (module, file))
     }
@@ -2197,6 +2223,8 @@ mod tests {
             module_path: Vec::new(),
             enum_variants: HashMap::new(),
             use_aliases: HashMap::new(),
+            include_paths: Vec::new(),
+            features: Vec::new(),
             label_counter: 0,
             interrupt_vectors: Vec::new(),
             header: None,

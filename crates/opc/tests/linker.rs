@@ -469,7 +469,7 @@ fn link_full_object_from_codegen() {
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, codegen_diags) = compile_source(&ast, 1);
+    let (obj, codegen_diags) = compile_source(&ast, 1, &[], &[]);
     let errors: Vec<_> = codegen_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
