@@ -102,6 +102,7 @@ pub fn compile_source(
         use_aliases: HashMap::new(),
         include_paths: include_paths.to_vec(),
         features: features.to_vec(),
+        current_module_dir: None,
         label_counter: 0,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -140,7 +141,16 @@ pub fn compile_source(
 /// duplicate diagnostics.
 #[derive(Default)]
 struct ModuleCache {
-    modules: HashMap<std::path::PathBuf, Module>,
+    modules: HashMap<std::path::PathBuf, CachedModule>,
+}
+
+/// A parsed module plus the directory of the file it was loaded
+/// from. The directory lets placement macros inside a std module
+/// (such as `locate_bytes!`) resolve paths relative to the std file
+/// instead of the root source file.
+struct CachedModule {
+    module: Module,
+    dir: std::path::PathBuf,
 }
 
 impl ModuleCache {
@@ -155,8 +165,8 @@ impl ModuleCache {
         features: &[String],
     ) -> Result<Module> {
         let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if let Some(module) = self.modules.get(&key) {
-            return Ok(module.clone());
+        if let Some(entry) = self.modules.get(&key) {
+            return Ok(entry.module.clone());
         }
         let path_str = key.to_string_lossy().to_string();
         let source = std::fs::read_to_string(&key)
@@ -170,8 +180,25 @@ impl ModuleCache {
             anyhow::bail!("parser errors in {path_str}");
         }
         let module = ast.root;
-        self.modules.insert(key, module.clone());
+        let dir = key
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| key.clone());
+        self.modules.insert(
+            key,
+            CachedModule {
+                module: module.clone(),
+                dir,
+            },
+        );
         Ok(module)
+    }
+
+    /// Return the directory of the file a cached module was loaded
+    /// from.
+    fn dir_of(&self, path: &std::path::Path) -> Option<&std::path::PathBuf> {
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.modules.get(&key).map(|entry| &entry.dir)
     }
 }
 
@@ -214,6 +241,11 @@ struct Codegen {
     interrupt_vectors: Vec<op_ir::InterruptVector>,
     header: Option<op_ir::HeaderFields>,
     pad_byte: u8,
+    /// Directory of the std module file whose items are currently
+    /// being walked, if any. `None` while walking the root source
+    /// file. `locate_bytes!` and `locate_str!` inside std modules
+    /// resolve paths against this directory.
+    current_module_dir: Option<std::path::PathBuf>,
     /// Directory of the root source file. Used to resolve
     /// `locate_bytes!` and `locate_str!` paths.
     source_dir: std::path::PathBuf,
@@ -407,13 +439,17 @@ impl Codegen {
 
         if let Some((module, file)) = self.lookup_module(path) {
             let key = file.canonicalize().unwrap_or(file);
+            let module_dir = self.module_cache.dir_of(&key).cloned();
             if !visited.insert(key) {
                 return;
             }
             let saved = self.module_path.clone();
+            let saved_dir = self.current_module_dir.clone();
             self.module_path = path.to_vec();
+            self.current_module_dir = module_dir;
             self.import_module_items(&module.items, visited);
             self.module_path = saved;
+            self.current_module_dir = saved_dir;
             return;
         }
 
@@ -482,6 +518,17 @@ impl Codegen {
                     for tree in trees {
                         self.resolve_use_tree(tree, visited);
                     }
+                }
+                Item::Placement {
+                    macro_name,
+                    argument,
+                    ..
+                } if self.current_section.is_some() => {
+                    // Placement macros inside a std module emit into
+                    // the active section, resolving paths relative to
+                    // the std module's own directory. They are skipped
+                    // while collecting (no active section).
+                    self.handle_placement(macro_name, argument);
                 }
                 // Other item kinds produce no flat-namespace bindings.
                 _ => {}
@@ -821,7 +868,11 @@ impl Codegen {
             "locate_bytes" => {
                 if let PlacementArg::String_ { value } = argument {
                     let filename = value.trim_matches('"');
-                    let path = self.source_dir.join(filename);
+                    let base = self
+                        .current_module_dir
+                        .clone()
+                        .unwrap_or_else(|| self.source_dir.clone());
+                    let path = base.join(filename);
                     if let Ok(data) = std::fs::read(&path) {
                         self.emit_bytes(&data);
                     } else {
@@ -867,7 +918,11 @@ impl Codegen {
             "locate_str" => {
                 if let PlacementArg::String_ { value } = argument {
                     let filename = value.trim_matches('"');
-                    let path = self.source_dir.join(filename);
+                    let base = self
+                        .current_module_dir
+                        .clone()
+                        .unwrap_or_else(|| self.source_dir.clone());
+                    let path = base.join(filename);
                     if let Ok(source) = std::fs::read_to_string(&path) {
                         let (ast, _diags) = parser::parse_source(
                             &path.to_string_lossy(),
@@ -2104,7 +2159,8 @@ mod tests {
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
     use op_common::ast::{
-        Access, EnumVariant, Expr, FnStmt, OffsetOp, Operand, UseRoot, UseTail, UseTree,
+        Access, EnumVariant, Expr, FnStmt, OffsetOp, Operand, PlacementArg, UseRoot, UseTail,
+        UseTree,
     };
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
@@ -2247,6 +2303,7 @@ mod tests {
             use_aliases: HashMap::new(),
             include_paths: Vec::new(),
             features: Vec::new(),
+            current_module_dir: None,
             label_counter: 0,
             interrupt_vectors: Vec::new(),
             header: None,
@@ -2788,6 +2845,66 @@ mod tests {
             // diagnostics.
             assert_eq!(codegen.sections[0].data, vec![0x85, 0x80, 0x60]);
             assert!(codegen.sections[0].relocations.is_empty());
+            assert!(codegen.diags.is_empty());
+        });
+    }
+
+    #[test]
+    fn module_cache_records_source_directory() {
+        let tmp = std::env::temp_dir().join(format!("opc-module-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tmp.canonicalize().unwrap();
+        let file = tmp.join("dirtest.op");
+        std::fs::write(&file, "const X: u8 = 1;\n").unwrap();
+        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+
+        let mut cache = ModuleCache::default();
+        cache.load_module(&file, &target, &[]).unwrap();
+
+        assert_eq!(cache.dir_of(&file), Some(&tmp));
+        assert_eq!(cache.dir_of(&tmp.join("missing.op")), None);
+    }
+
+    #[test]
+    fn locate_bytes_resolves_relative_to_source_dir() {
+        let tmp = std::env::temp_dir().join(format!("opc-locate-src-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("blob.bin"), [0x11u8, 0x22, 0x33]).unwrap();
+
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.source_dir = tmp.clone();
+        let arg = PlacementArg::String_ {
+            value: "\"blob.bin\"".to_string(),
+        };
+        codegen.handle_placement("locate_bytes", &arg);
+
+        assert_eq!(codegen.sections[0].data, vec![0x11, 0x22, 0x33]);
+        assert!(codegen.diags.is_empty());
+    }
+
+    #[test]
+    fn locate_bytes_in_std_module_resolves_relative_to_std_file() {
+        let tmp = std::env::temp_dir().join(format!("opc-locate-std-{}", std::process::id()));
+        let std_root = tmp.join("std/src");
+        std::fs::create_dir_all(&std_root).unwrap();
+        std::fs::write(std_root.join("lib.op"), "pub mod res;\n").unwrap();
+        std::fs::write(std_root.join("res.op"), "locate_bytes!(\"data.bin\");\n").unwrap();
+        std::fs::write(std_root.join("data.bin"), [0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        with_std_env(&std_root, || {
+            // An active section is required for placement macros in
+            // imported modules to emit. source_dir is empty, so the
+            // bytes can only come from the std module's own
+            // directory.
+            let mut codegen = test_codegen_with_rom_section();
+            let tree = UseTree::Path {
+                root: UseRoot::Name("std".into()),
+                segments: vec!["res".to_string()],
+                tail: UseTail::Glob,
+            };
+            codegen.resolve_use_decl(&[tree]);
+
+            assert_eq!(codegen.sections[0].data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
             assert!(codegen.diags.is_empty());
         });
     }
