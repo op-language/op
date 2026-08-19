@@ -200,8 +200,62 @@ struct Codegen {
 
 impl Codegen {
     fn walk_module(&mut self, module: &Module) {
+        // Collect constants, enum variants, and imports first so that
+        // fn bodies can reference them regardless of the order the
+        // items appear in the file.
+        self.collect_module_items(&module.items);
         for item in &module.items {
             self.walk_item(item);
+        }
+    }
+
+    /// Collect constant and enum variant values from `items` without
+    /// compiling any fn bodies. Also resolves `use` declarations and
+    /// recurses into sub-modules and attribute blocks, so every name
+    /// is bound before the first fn body is compiled.
+    fn collect_module_items(&mut self, items: &[Item]) {
+        for item in items {
+            self.collect_item(item);
+        }
+    }
+
+    fn collect_item(&mut self, item: &Item) {
+        match item {
+            Item::ConstDecl {
+                name,
+                value,
+                evaluated_value,
+                ..
+            } => {
+                let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                if let Some(val) = val {
+                    self.const_values.insert(name.clone(), val);
+                }
+            }
+            Item::EnumDecl { name, variants, .. } => {
+                self.collect_enum(name, variants, false);
+            }
+            Item::UseDecl { trees, .. } => {
+                self.resolve_use_decl(trees);
+            }
+            Item::ModDecl {
+                name,
+                resolved,
+                body,
+                ..
+            } => {
+                self.module_path.push(name.clone());
+                if let Some(sub_module) = resolved {
+                    self.collect_module_items(&sub_module.items);
+                } else if let Some(items) = body {
+                    self.collect_module_items(items);
+                }
+                self.module_path.pop();
+            }
+            Item::BlockAttribute { items, .. } => {
+                self.collect_module_items(items);
+            }
+            _ => {}
         }
     }
 
@@ -595,9 +649,13 @@ impl Codegen {
                 body,
                 ..
             } => {
+                // The sub-module's items were already collected during
+                // the module's collection pass.
                 self.module_path.push(name.clone());
                 if let Some(sub_module) = resolved {
-                    self.walk_module(sub_module);
+                    for item in &sub_module.items {
+                        self.walk_item(item);
+                    }
                 } else if let Some(items) = body {
                     for item in items {
                         self.walk_item(item);
@@ -605,8 +663,9 @@ impl Codegen {
                 }
                 self.module_path.pop();
             }
-            Item::UseDecl { trees, .. } => {
-                self.resolve_use_decl(trees);
+            Item::UseDecl { .. } => {
+                // Imports are resolved by `collect_module_items` before
+                // any fn body is compiled.
             }
             Item::BlockAttribute { attr, items } => {
                 self.handle_block_attribute(attr, items);
@@ -2612,6 +2671,52 @@ mod tests {
 
         // pipe(0x42) -> write(0x42) -> lda $42.
         assert_eq!(codegen.sections[0].data, vec![0xA5, 0x42]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// Parse `source` and run the two-pass module walk on it.
+    fn walk_parsed_source(source: &str) -> (Codegen, Vec<op_diagnostics::Diagnostic>) {
+        let (ast, diags) =
+            crate::parser::parse_source("multi-pass.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+        assert!(diags.is_empty(), "parse diagnostics: {diags:?}");
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.walk_module(&ast.root);
+        (codegen, diags)
+    }
+
+    #[test]
+    fn multi_pass_resolves_const_declared_after_fn() {
+        let (codegen, _) = walk_parsed_source(
+            "fn early() {\n    lda ANSWER\n    rts\n}\nconst ANSWER: u8 = 42;\n",
+        );
+        // lda $42 (zero-page) / rts, no relocation for ANSWER.
+        assert_eq!(codegen.sections[0].data, vec![0xA5, 0x2A, 0x60]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    #[test]
+    fn multi_pass_resolves_use_declared_after_fn() {
+        let tmp = std::env::temp_dir().join(format!("opc-multi-pass-use-{}", std::process::id()));
+        let std_root = tmp.join("std/src");
+        write_fake_std(&std_root);
+
+        with_std_env(&std_root, || {
+            let (codegen, _) =
+                walk_parsed_source("fn early() {\n    lda CYCLES\n    rts\n}\nuse std::cpu::*;\n");
+            // CYCLES is 1; lda $1 (zero-page) / rts, no relocation.
+            assert_eq!(codegen.sections[0].data, vec![0xA5, 0x01, 0x60]);
+            assert!(codegen.sections[0].relocations.is_empty());
+            assert!(codegen.diags.is_empty());
+        });
+    }
+
+    #[test]
+    fn multi_pass_const_references_earlier_const() {
+        let (codegen, _) = walk_parsed_source(
+            "fn early() {\n    lda B\n    rts\n}\nconst A: u8 = 40;\nconst B: u8 = A + 2;\n",
+        );
+        // B evaluates to 42 against the collected value of A.
+        assert_eq!(codegen.sections[0].data, vec![0xA5, 0x2A, 0x60]);
         assert!(codegen.sections[0].relocations.is_empty());
     }
 }
