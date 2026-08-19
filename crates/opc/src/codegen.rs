@@ -474,17 +474,16 @@ impl Codegen {
                 Item::EnumDecl { name, variants, .. } => {
                     self.collect_enum(name, variants, false);
                 }
-                Item::UseDecl {
-                    is_pub: true,
-                    trees,
-                } => {
+                Item::UseDecl { trees, .. } => {
+                    // Public uses re-export names; private uses (such
+                    // as `use super::constants::*;` inside a std
+                    // module) bind the names that module's own items
+                    // reference.
                     for tree in trees {
                         self.resolve_use_tree(tree, visited);
                     }
                 }
-                // Private uses name `self::`/`super::` parents that
-                // are only resolved in Phase 11. Other item kinds
-                // produce no flat-namespace bindings.
+                // Other item kinds produce no flat-namespace bindings.
                 _ => {}
             }
         }
@@ -2170,6 +2169,29 @@ mod tests {
         .unwrap();
     }
 
+    /// Write a fake std crate mirroring the `machine/nes` layout: a
+    /// module whose private `use super::` imports bind the names its
+    /// inline fns reference.
+    fn write_nes_std(std_root: &std::path::Path) {
+        std::fs::create_dir_all(std_root.join("nes")).unwrap();
+        std::fs::write(std_root.join("lib.op"), "pub mod nes;\n").unwrap();
+        std::fs::write(
+            std_root.join("nes.op"),
+            "mod constants;\nmod macros;\npub use constants::*;\npub use macros::*;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std_root.join("nes/constants.op"),
+            "const ST_VBLANK: u8 = 0x80;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            std_root.join("nes/macros.op"),
+            "use super::constants::*;\ninline fn vblank_on() {\n    sta ST_VBLANK\n}\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn find_std_root_returns_none_when_missing() {
         let tmp = std::env::temp_dir().join(format!("opc-find-std-root-{}", std::process::id()));
@@ -2746,5 +2768,27 @@ mod tests {
         // B evaluates to 42 against the collected value of A.
         assert_eq!(codegen.sections[0].data, vec![0xA5, 0x2A, 0x60]);
         assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    #[test]
+    fn use_tree_resolves_super_in_std_modules() {
+        let tmp = std::env::temp_dir().join(format!("opc-super-use-{}", std::process::id()));
+        let std_root = tmp.join("std/src");
+        write_nes_std(&std_root);
+
+        with_std_env(&std_root, || {
+            // The user imports the macros module directly, so the
+            // constants names can only arrive through macros.op's
+            // private `use super::constants::*;`.
+            let (codegen, _) = walk_parsed_source(
+                "use std::nes::macros::*;\nfn main() {\n    vblank_on()\n    rts\n}\n",
+            );
+            // vblank_on expands to `sta ST_VBLANK` -> sta $80
+            // (zero-page) / rts, with no relocation and no
+            // diagnostics.
+            assert_eq!(codegen.sections[0].data, vec![0x85, 0x80, 0x60]);
+            assert!(codegen.sections[0].relocations.is_empty());
+            assert!(codegen.diags.is_empty());
+        });
     }
 }
