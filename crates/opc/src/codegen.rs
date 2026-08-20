@@ -816,7 +816,7 @@ impl Codegen {
         match stmt {
             FnStmt::AsmStmt { operands, .. } => {
                 for operand in operands {
-                    self.analyze_operand(operand, data_refs, enum_refs);
+                    self.analyze_operand(operand, data_refs, enum_refs, inline_calls, callees);
                 }
             }
             FnStmt::FnCall { name, args } => {
@@ -847,7 +847,7 @@ impl Codegen {
                 }
                 // Analyze args for data refs.
                 for arg in args {
-                    self.analyze_expr(arg, data_refs, enum_refs);
+                    self.analyze_expr(arg, data_refs, enum_refs, inline_calls, callees);
                 }
             }
             FnStmt::Label { stmt, .. } => {
@@ -898,13 +898,15 @@ impl Codegen {
         operand: &Operand,
         data_refs: &mut Vec<String>,
         enum_refs: &mut Vec<String>,
+        inline_calls: &mut Vec<String>,
+        callees: &mut Vec<String>,
     ) {
         match operand {
             Operand::Immediate { value } => {
-                self.analyze_expr(value, data_refs, enum_refs);
+                self.analyze_expr(value, data_refs, enum_refs, inline_calls, callees);
             }
             Operand::MemoryOperand { expr, .. } => {
-                self.analyze_expr(expr, data_refs, enum_refs);
+                self.analyze_expr(expr, data_refs, enum_refs, inline_calls, callees);
             }
             Operand::LabelRef { name } => {
                 if self.symbol_types.contains_key(name) && !data_refs.contains(name) {
@@ -927,7 +929,7 @@ impl Codegen {
                 }
                 for access in accesses {
                     if let Access::Offset { value, .. } = access {
-                        self.analyze_expr(value, data_refs, enum_refs);
+                        self.analyze_expr(value, data_refs, enum_refs, inline_calls, callees);
                     }
                 }
             }
@@ -936,7 +938,14 @@ impl Codegen {
     }
 
     #[allow(clippy::collapsible_if)]
-    fn analyze_expr(&self, expr: &Expr, data_refs: &mut Vec<String>, enum_refs: &mut Vec<String>) {
+    fn analyze_expr(
+        &self,
+        expr: &Expr,
+        data_refs: &mut Vec<String>,
+        enum_refs: &mut Vec<String>,
+        inline_calls: &mut Vec<String>,
+        callees: &mut Vec<String>,
+    ) {
         match expr {
             Expr::Ident { name } => {
                 if self.symbol_types.contains_key(name) && !data_refs.contains(name) {
@@ -964,27 +973,49 @@ impl Codegen {
                 }
                 for access in accesses {
                     if let Access::Offset { value, .. } = access {
-                        self.analyze_expr(value, data_refs, enum_refs);
+                        self.analyze_expr(value, data_refs, enum_refs, inline_calls, callees);
                     }
                 }
             }
             Expr::BinOp { left, right, .. } => {
-                self.analyze_expr(left, data_refs, enum_refs);
-                self.analyze_expr(right, data_refs, enum_refs);
+                self.analyze_expr(left, data_refs, enum_refs, inline_calls, callees);
+                self.analyze_expr(right, data_refs, enum_refs, inline_calls, callees);
             }
             Expr::UnaryOp { operand, .. } => {
-                self.analyze_expr(operand, data_refs, enum_refs);
+                self.analyze_expr(operand, data_refs, enum_refs, inline_calls, callees);
             }
             Expr::MacroCall { arg, .. } => {
-                self.analyze_expr(arg, data_refs, enum_refs);
+                self.analyze_expr(arg, data_refs, enum_refs, inline_calls, callees);
             }
-            Expr::FnCall { args, .. } => {
+            Expr::FnCall { name, args } => {
+                // Record an expression-position function call as a use. Mirror
+                // the FnStmt::FnCall handling so the dead-code analyzer sees it.
+                if let Some(inline_fn) = self.inline_fns.get(name) {
+                    if inline_fn.is_inline {
+                        if !inline_calls.contains(name) {
+                            inline_calls.push(name.clone());
+                        }
+                        let substituted =
+                            self.substitute_params(&inline_fn.body, &inline_fn.params, args);
+                        self.analyze_stmts(
+                            &substituted,
+                            &inline_fn.params,
+                            callees,
+                            data_refs,
+                            enum_refs,
+                            inline_calls,
+                        );
+                    } else if !callees.contains(name) {
+                        callees.push(name.clone());
+                    }
+                }
+                // Unknown fn (stdlib or external) — not a callee for placement.
                 for arg in args {
-                    self.analyze_expr(arg, data_refs, enum_refs);
+                    self.analyze_expr(arg, data_refs, enum_refs, inline_calls, callees);
                 }
             }
             Expr::ParenExpr { inner } => {
-                self.analyze_expr(inner, data_refs, enum_refs);
+                self.analyze_expr(inner, data_refs, enum_refs, inline_calls, callees);
             }
             _ => {}
         }
