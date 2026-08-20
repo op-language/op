@@ -144,7 +144,7 @@ fn codegen_inx_implied() {
     let data = &obj.sections[0].data;
     // INX implied: E8
     assert_eq!(data[0], 0xE8);
-    assert_eq!(data.len(), 1);
+    assert_eq!(data.len(), 2); // INX + implicit RTS
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn codegen_zeropage_mode() {
     let data = &obj.sections[0].data;
     assert_eq!(data[0], 0xA5); // LDA zero-page
     assert_eq!(data[1], 0x42);
-    assert_eq!(data.len(), 2);
+    assert_eq!(data.len(), 3); // 2-byte instr + implicit RTS
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn codegen_absolute_mode() {
     let obj = compile("#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { lda 0x2000 } }");
     let data = &obj.sections[0].data;
     assert_eq!(data[0], 0xAD); // LDA absolute
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4); // 3-byte instr + implicit RTS
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn codegen_forced_zp_mode() {
     // Forced zero-page should use zero-page encoding even for larger addresses.
     assert_eq!(data[0], 0xA5); // LDA zero-page
     assert_eq!(data[1], 0x00); // truncated to 1 byte
-    assert_eq!(data.len(), 2);
+    assert_eq!(data.len(), 3); // 2-byte instr + implicit RTS
 }
 
 // === Relocations ==========================================================
@@ -380,7 +380,7 @@ fn optimizer_redundant_load() {
 
 #[test]
 fn optimizer_redundant_store() {
-    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { sta 0x2000 sta 0x2000 inx } }";
+    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { sta 0x0100 sta 0x0100 inx } }";
     let opt = compile_with_opt(src, 1);
     let nopt = compile_with_opt(src, 0);
     assert!(opt.sections[0].data.len() < nopt.sections[0].data.len());
@@ -733,10 +733,10 @@ fn std_inline_fn_param_substitution() {
         return;
     };
     let data = &obj.sections[0].data;
-    // vram_write(value) expands to `lda value; sta PPU::IO`. With
-    // value = 0x30 the load is zero-page and PPU::IO resolves to
-    // 0x2007: LDA $30 (A5 30) + STA $2007 (8D 07 20).
-    assert_eq!(&data[..5], &[0xA5, 0x30, 0x8D, 0x07, 0x20]);
+    // vram_write(value) expands to `lda #value; sta PPU::IO`. With
+    // value = 0x30 the load is immediate and PPU::IO resolves to
+    // 0x2007: LDA #$30 (A9 30) + STA $2007 (8D 07 20).
+    assert_eq!(&data[..5], &[0xA9, 0x30, 0x8D, 0x07, 0x20]);
     assert!(obj.sections[0].relocations.is_empty());
 }
 

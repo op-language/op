@@ -1317,6 +1317,7 @@ impl Parser {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect: true,
             });
         }
 
@@ -1331,6 +1332,7 @@ impl Parser {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect: false,
             });
         }
 
@@ -1350,6 +1352,7 @@ impl Parser {
             mode_prefix,
             expr,
             index_reg: None,
+            is_indirect: false,
         })
     }
 

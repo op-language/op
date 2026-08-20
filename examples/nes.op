@@ -18,7 +18,7 @@ use std::machine::*;
 // --- inline macros ---------------------------------------------------------
 
 inline fn wait_for(amount) {
-    ldx amount
+    ldx #amount
     wait_for_func()
 }
 
@@ -46,10 +46,10 @@ fn vram_init() {
     vram_write(0x0F)
 
     vram_set_address_i(NAME_TABLE_0_ADDRESS)
-    lda 0
-    ldy 8
+    lda #0
+    ldy #8
     do {
-        ldx 128
+        ldx #128
         do {
             vram_write_a()
             dex
@@ -59,7 +59,7 @@ fn vram_init() {
 }
 
 fn vram_write_string_loop() {
-    ldy 0
+    ldy #0
     loop {
         lda (pstr), y
         vram_write_a()
@@ -76,16 +76,16 @@ fn pal_animate() {
     vram_set_address_i(PAL_ADDRESS)
     lda palcol
     clc
-    adc 0x10
+    adc #0x10
     sta palcol
-    and 0x40
+    and #0x40
     php
     lda palcol
     plp
     if (set) {
-        eor 0x30
+        eor #0x30
     }
-    and 0x3F
+    and #0x3F
     vram_write_a()
     vram_clear_address()
 }
@@ -112,11 +112,13 @@ noreturn fn main() {
 
 #[interrupt(nmi)]
 fn nmi() {
+    rti
 }
 
 // --- the irq handler -------------------------------------------------------
 #[interrupt(irq)]
 fn irq() {
+    rti
 }
 
 // --- string data -----------------------------------------------------------

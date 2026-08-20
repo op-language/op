@@ -1818,6 +1818,15 @@ impl Codegen {
         // Compile the function body.
         self.compile_fn_body(body);
 
+        // Emit an implicit RTS at the end of the function unless the last
+        // statement already ends control flow (return, loop, or an
+        // unconditional branch). Without this, a function that lacks an
+        // explicit `return` falls through into whatever follows it in the
+        // section.
+        if !Self::body_ends_control_flow(body) {
+            self.emit_byte(0x60); // RTS
+        }
+
         let end_offset = if let Some(idx) = self.current_section {
             self.sections[idx].data.len() as u32
         } else {
@@ -1833,6 +1842,21 @@ impl Codegen {
                 kind: SymbolKind::Function,
                 is_pub: false,
             });
+        }
+    }
+
+    /// Return true when the last statement of a function body ends control
+    /// flow, making a trailing RTS redundant. `return`, infinite `loop`,
+    /// and an assembly instruction that returns or jumps (`rts`, `rti`,
+    /// `jmp`, `bra`) all end control flow.
+    fn body_ends_control_flow(body: &[FnStmt]) -> bool {
+        match body.last() {
+            Some(FnStmt::ReturnStmt) => true,
+            Some(FnStmt::LoopStmt { .. }) => true,
+            Some(FnStmt::AsmStmt { opcode, .. }) => {
+                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "bra")
+            }
+            _ => false,
         }
     }
 
@@ -2010,12 +2034,14 @@ impl Codegen {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect,
             } => {
                 self.compile_memory_operand(
                     opcode,
                     mode_prefix.as_deref(),
                     expr,
                     index_reg.as_deref(),
+                    *is_indirect,
                 );
             }
             Operand::RegisterRef { name: _ } => {
@@ -2080,6 +2106,7 @@ impl Codegen {
         mode_prefix: Option<&str>,
         expr: &Expr,
         index_reg: Option<&str>,
+        is_indirect: bool,
     ) {
         let val = eval_expr(expr, &self.const_values, &self.symbol_types);
 
@@ -2094,6 +2121,18 @@ impl Codegen {
                 "ind_l" => AddrMode::Indirect,
                 "ind_idx" => AddrMode::IndirectY,
                 _ => AddrMode::Absolute,
+            }
+        } else if is_indirect {
+            // Parenthesized operand: (expr) or (expr), reg.
+            // Indirect (JMP) or indirect-indexed (LDA/STA etc. with Y).
+            if let Some(idx) = index_reg {
+                if idx.contains("x") {
+                    AddrMode::IndirectX
+                } else {
+                    AddrMode::IndirectY
+                }
+            } else {
+                AddrMode::Indirect
             }
         } else if let Some(idx) = index_reg {
             // Indexed mode.
@@ -2135,11 +2174,13 @@ impl Codegen {
                     if mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
+                        || mode == AddrMode::IndirectX
+                        || mode == AddrMode::IndirectY
                         || mode == AddrMode::Relative
                     {
                         self.emit_byte((v & 0xFF) as u8);
                     } else {
-                        // Absolute: 2 bytes, little-endian.
+                        // Absolute or Indirect: 2 bytes, little-endian.
                         self.emit_byte((v & 0xFF) as u8);
                         self.emit_byte(((v >> 8) & 0xFF) as u8);
                     }
@@ -2150,7 +2191,9 @@ impl Codegen {
                     let addend = selector_addend(expr, &self.const_values, &self.symbol_types);
                     let zp = mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
-                        || mode == AddrMode::ZeroPageY;
+                        || mode == AddrMode::ZeroPageY
+                        || mode == AddrMode::IndirectX
+                        || mode == AddrMode::IndirectY;
                     if zp {
                         self.emit_byte(0);
                     } else {
@@ -2219,7 +2262,7 @@ impl Codegen {
             }
 
             // Patch the JMP to skip over the else-block.
-            let else_end = self.current_data_len() as u32;
+            let else_end = self.current_data_len() as u32 + self.current_org();
             self.patch_byte(else_jump_patch, (else_end & 0xFF) as u8);
             self.patch_byte(else_jump_patch + 1, ((else_end >> 8) & 0xFF) as u8);
         } else {
@@ -2233,6 +2276,8 @@ impl Codegen {
 
     fn compile_while(&mut self, condition: &Condition, body: &[FnStmt]) {
         let loop_start = self.current_data_len() as u32;
+        let org = self.current_org();
+        let loop_abs = loop_start + org;
 
         // Emit branch-if-not-condition past the body.
         let branch_op = self.condition_to_branch_op(condition, false);
@@ -2245,10 +2290,10 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP back to loop_start.
+        // Emit JMP back to loop_start (absolute address = offset + org).
         self.emit_byte(0x4C); // JMP absolute
-        self.emit_byte((loop_start & 0xFF) as u8);
-        self.emit_byte(((loop_start >> 8) & 0xFF) as u8);
+        self.emit_byte((loop_abs & 0xFF) as u8);
+        self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
 
         // Patch the branch to skip over the body + JMP.
         let body_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
@@ -2274,16 +2319,18 @@ impl Codegen {
 
     fn compile_loop(&mut self, body: &[FnStmt]) {
         let loop_start = self.current_data_len() as u32;
+        let org = self.current_org();
+        let loop_abs = loop_start + org;
 
         // Compile the body.
         for stmt in body {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP back to loop_start.
+        // Emit JMP back to loop_start (absolute address = offset + org).
         self.emit_byte(0x4C); // JMP absolute
-        self.emit_byte((loop_start & 0xFF) as u8);
-        self.emit_byte(((loop_start >> 8) & 0xFF) as u8);
+        self.emit_byte((loop_abs & 0xFF) as u8);
+        self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
     }
 
     fn compile_switch(&mut self, _register: &str, cases: &[SwitchCase]) {
@@ -2534,10 +2581,12 @@ impl Codegen {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect,
             } => Operand::MemoryOperand {
                 mode_prefix: mode_prefix.clone(),
                 expr: self.substitute_expr(expr, params, args),
                 index_reg: index_reg.clone(),
+                is_indirect: *is_indirect,
             },
             Operand::RegisterRef { name } => Operand::RegisterRef { name: name.clone() },
             Operand::LabelRef { name } => Operand::LabelRef { name: name.clone() },
@@ -2664,6 +2713,17 @@ impl Codegen {
         }
     }
 
+    /// Return the `org` address of the current section, or 0 if no section
+    /// is active. JMP absolute targets must add this to the section-relative
+    /// offset to form the correct absolute address.
+    fn current_org(&self) -> u32 {
+        if let Some(idx) = self.current_section {
+            self.sections[idx].org
+        } else {
+            0
+        }
+    }
+
     fn add_relocation(&mut self, offset_from_end: u32, kind: RelocKind, symbol: &str, addend: i64) {
         if let Some(idx) = self.current_section {
             let abs_offset = self.sections[idx].data.len() as u32 - offset_from_end;
@@ -2698,7 +2758,10 @@ impl Codegen {
             "zero" | "unset" | "false" | "clear" | "equal" => (0xF0, 0xD0), // BEQ, BNE
             _ => (0xD0, 0xF0),                               // default: BNE, BEQ
         };
-        if invert {
+        // The "not" modifier inverts the condition sense.
+        let inverted_by_mod = condition.modifiers.iter().any(|m| m == "not");
+        let effective_invert = invert ^ inverted_by_mod;
+        if effective_invert {
             branch_if_true
         } else {
             branch_if_false
@@ -3509,6 +3572,7 @@ mod tests {
             mode_prefix: None,
             expr,
             index_reg: None,
+            is_indirect: false,
         };
         codegen.compile_asm("sta", &[operand]);
 
@@ -3539,6 +3603,7 @@ mod tests {
             mode_prefix: None,
             expr,
             index_reg: None,
+            is_indirect: false,
         };
         codegen.compile_asm("sta", &[operand]);
 
@@ -3650,6 +3715,7 @@ mod tests {
                                 name: "src".to_string(),
                             },
                             index_reg: None,
+                            is_indirect: false,
                         }],
                     },
                     FnStmt::AsmStmt {
@@ -3660,6 +3726,7 @@ mod tests {
                                 name: "dst".to_string(),
                             },
                             index_reg: None,
+                            is_indirect: false,
                         }],
                     },
                 ],
@@ -3718,6 +3785,7 @@ mod tests {
                                 name: "value".to_string(),
                             },
                             index_reg: None,
+                            is_indirect: false,
                         }],
                     },
                 ],
@@ -3749,6 +3817,7 @@ mod tests {
                             name: "value".to_string(),
                         },
                         index_reg: None,
+                        is_indirect: false,
                     }],
                 }],
                 is_inline: true,

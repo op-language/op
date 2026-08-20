@@ -229,6 +229,7 @@ pub enum Operand {
         mode_prefix: Option<String>,
         expr: Expr,
         index_reg: Option<String>,
+        is_indirect: bool,
     },
     RegisterRef {
         name: String,
