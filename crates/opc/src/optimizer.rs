@@ -9,7 +9,7 @@
 //!
 //! The optimizer runs only when the opt level is 1 or higher.
 
-use op_ir::{Relocation, Section};
+use op_ir::{Relocation, Section, SectionKind};
 
 /// A decoded instruction for the optimizer to work with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,11 +32,18 @@ struct Instruction {
 
 /// Run the peephole optimizer on all sections in the object file.
 /// The optimizer runs only when `opt_level >= 1`.
+///
+/// Only ROM sections hold code. CHR and RAM sections hold data tables and
+/// variables. The optimizer must not run on data sections because it
+/// decodes data bytes as 6502 instructions and may drop them.
 pub fn optimize(sections: &mut [Section], opt_level: u8) {
     if opt_level < 1 {
         return;
     }
     for section in sections.iter_mut() {
+        if section.kind != SectionKind::Rom {
+            continue;
+        }
         optimize_section(section);
     }
 }
@@ -628,9 +635,16 @@ fn reencode(
     // Remap relocations to the new offsets.
     for reloc in relocations {
         // Find the instruction that contains this relocation offset.
+        // A relocation at byte `r` belongs to the instruction where
+        // `instruction.offset <= r < instruction.offset + instruction.size`.
         let containing = offset_map.iter().find(|entry| {
             let old = entry.0;
-            reloc.offset as usize >= old && (reloc.offset as usize) < (old + 3)
+            let inst_size = instructions
+                .iter()
+                .find(|inst| inst.offset == old)
+                .map(|inst| inst.size)
+                .unwrap_or(0);
+            reloc.offset as usize >= old && (reloc.offset as usize) < (old + inst_size)
         });
 
         if let Some(entry) = containing {
