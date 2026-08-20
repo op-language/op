@@ -1154,6 +1154,48 @@ impl Codegen {
         }
     }
 
+    /// Classify an immediate operand that could not be evaluated as a
+    /// constant. Returns the symbol name, relocation kind, and addend for
+    /// a one-byte relocation. `lo!(sym)` and `hi!(sym)` produce `Lo8` and
+    /// `Hi8` relocations; a bare symbol or selector produces an `Abs8`
+    /// relocation. `nylo!`/`nyhi!` of a non-constant emit an error and
+    /// return `None`. Any other expression returns `None`.
+    fn classify_immediate(&mut self, expr: &Expr) -> Option<(String, RelocKind, i64)> {
+        match expr {
+            Expr::Ident { name } => Some((name.clone(), RelocKind::Abs8, 0)),
+            Expr::Selector { path, accesses } => {
+                if path.is_empty() {
+                    None
+                } else {
+                    Some((
+                        path.join("::"),
+                        RelocKind::Abs8,
+                        selector_offset(accesses, &self.const_values),
+                    ))
+                }
+            }
+            Expr::MacroCall { name, arg } => match name.as_str() {
+                "lo" => {
+                    let (sym, _, addend) = self.classify_immediate(arg)?;
+                    Some((sym, RelocKind::Lo8, addend))
+                }
+                "hi" => {
+                    let (sym, _, addend) = self.classify_immediate(arg)?;
+                    Some((sym, RelocKind::Hi8, addend))
+                }
+                "nylo" | "nyhi" => {
+                    self.error(
+                        305,
+                        format!("`{}!` of a non-constant is not supported", name),
+                    );
+                    None
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     // --- Assembly encoding ---------------------------------------------------
 
     fn compile_asm(&mut self, opcode: &str, operands: &[Operand]) {
@@ -1184,15 +1226,19 @@ impl Codegen {
                             self.emit_byte((v & 0xFF) as u8);
                         }
                         None => {
-                            // Symbol reference — emit placeholder and relocation.
+                            // Symbol reference — classify and emit a
+                            // one-byte relocation, or report an error.
                             self.emit_byte(0);
-                            if let Some(sym) = expr_to_symbol(value) {
-                                self.add_relocation(
-                                    1,
-                                    RelocKind::Abs8,
-                                    &sym,
-                                    selector_addend(value, &self.const_values),
-                                );
+                            match self.classify_immediate(value) {
+                                Some((sym, kind, addend)) => {
+                                    self.add_relocation(1, kind, &sym, addend);
+                                }
+                                None => {
+                                    self.error(
+                                        305,
+                                        "immediate operand is neither a constant nor a symbol",
+                                    );
+                                }
                             }
                         }
                     }
@@ -1342,21 +1388,30 @@ impl Codegen {
                     }
                 }
                 None => {
-                    // Symbol reference.
+                    // Symbol reference, or an error if the expression is
+                    // neither a constant nor a symbol.
                     let addend = selector_addend(expr, &self.const_values);
-                    if mode == AddrMode::ZeroPage
+                    let zp = mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
-                        || mode == AddrMode::ZeroPageY
-                    {
+                        || mode == AddrMode::ZeroPageY;
+                    if zp {
                         self.emit_byte(0);
-                        if let Some(sym) = expr_to_symbol(expr) {
-                            self.add_relocation(1, RelocKind::Abs8, &sym, addend);
-                        }
                     } else {
                         self.emit_byte(0);
                         self.emit_byte(0);
-                        if let Some(sym) = expr_to_symbol(expr) {
-                            self.add_relocation(2, RelocKind::Abs16, &sym, addend);
+                    }
+                    match expr_to_symbol(expr) {
+                        Some(sym) => {
+                            let size = if zp { 1 } else { 2 };
+                            let kind = if zp {
+                                RelocKind::Abs8
+                            } else {
+                                RelocKind::Abs16
+                            };
+                            self.add_relocation(size, kind, &sym, addend);
+                        }
+                        None => {
+                            self.error(305, "address operand is neither a constant nor a symbol");
                         }
                     }
                 }
@@ -2204,7 +2259,7 @@ mod tests {
     };
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
-    use op_ir::{Section, SectionKind};
+    use op_ir::{RelocKind, Section, SectionKind};
     use std::collections::HashMap;
 
     /// Serializes tests that mutate the process environment.
@@ -2679,6 +2734,53 @@ mod tests {
         // `sta $2001` -> 8D 01 20.
         assert_eq!(codegen.sections[0].data, vec![0x8D, 0x01, 0x20]);
         assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// `lda #lo!(sym)` emits `A9 00` plus a one-byte `Lo8` relocation
+    /// against `sym`. `lda #hi!(sym)` emits the same bytes with a `Hi8`
+    /// relocation.
+    #[test]
+    fn immediate_lo_hi_of_symbol_emits_relocations() {
+        let mk = |macro_name: &str, expected_kind: RelocKind| {
+            let mut codegen = test_codegen_with_rom_section();
+            let operand = Operand::Immediate {
+                value: Expr::MacroCall {
+                    name: macro_name.to_string(),
+                    arg: Box::new(Expr::Ident {
+                        name: "sym".to_string(),
+                    }),
+                },
+            };
+            codegen.compile_asm("lda", &[operand]);
+            assert_eq!(codegen.sections[0].data, vec![0xA9, 0x00]);
+            let relocs = &codegen.sections[0].relocations;
+            assert_eq!(relocs.len(), 1);
+            assert_eq!(relocs[0].symbol, "sym");
+            assert_eq!(relocs[0].kind, expected_kind);
+            assert_eq!(relocs[0].addend, 0);
+        };
+
+        mk("lo", RelocKind::Lo8);
+        mk("hi", RelocKind::Hi8);
+    }
+
+    /// An immediate operand that is neither a constant nor a symbol
+    /// produces error 305 instead of a silent zero byte.
+    #[test]
+    fn unresolvable_immediate_emits_error_305() {
+        let mut codegen = test_codegen_with_rom_section();
+        let operand = Operand::Immediate {
+            value: Expr::FnCall {
+                name: "unknown".to_string(),
+                args: vec![],
+            },
+        };
+        codegen.compile_asm("lda", &[operand]);
+        assert_eq!(codegen.sections[0].data, vec![0xA9, 0x00]);
+        assert!(codegen
+            .diags
+            .iter()
+            .any(|d| { d.severity == op_diagnostics::Severity::Error && d.code == 305 }));
     }
 
     /// Expand an inline fn with two parameters and check the emitted
