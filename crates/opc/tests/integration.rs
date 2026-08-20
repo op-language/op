@@ -649,15 +649,30 @@ fn full_pipeline_std_nes_game() {
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
     let (obj, codegen_diags) =
-        compile_source(&ast, 0, &[std_root.to_string_lossy().into_owned()], &[]);
+        compile_source(&ast, 1, &[std_root.to_string_lossy().into_owned()], &[]);
     let errors: Vec<_> = codegen_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
         .collect();
     assert!(errors.is_empty(), "codegen errors: {:?}", errors);
 
-    // The four unreferenced vars (paddr, msgbuf, scroll, oam) should
-    // produce dead-data warnings.
+    // The CHR section data must equal the font bytes byte for byte, even
+    // at the default optimization level (Phase 1 fix).
+    let font_bytes: Vec<u8> = font.to_vec();
+    let chr = obj
+        .sections
+        .iter()
+        .find(|s| s.kind == op_ir::SectionKind::Chr)
+        .expect("object must have a CHR section");
+    assert_eq!(chr.data.len(), 8192, "CHR section data must be 8192 bytes");
+    assert_eq!(
+        chr.data, font_bytes,
+        "CHR section data must match font.chr byte for byte"
+    );
+
+    // The previously-unreferenced vars (paddr, msgbuf, scroll, oam) were
+    // removed from nes.op in Phase 6, so there should be no dead-data
+    // warnings.
     let dead_data = codegen_diags
         .iter()
         .filter(|d| d.code == 306)
@@ -668,7 +683,10 @@ fn full_pipeline_std_nes_game() {
                 || d.message.contains("oam")
         })
         .count();
-    assert_eq!(dead_data, 4, "expected 4 dead-data warnings");
+    assert_eq!(
+        dead_data, 0,
+        "expected no dead-data warnings for removed vars"
+    );
 
     let (linked, link_diags) = link_source(&obj);
     let errors: Vec<_> = link_diags
@@ -683,4 +701,220 @@ fn full_pipeline_std_nes_game() {
         bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
         "iNES output should start with NES magic"
     );
+
+    // iNES header assertions.
+    assert_eq!(&bytes[0..4], &[0x4E, 0x45, 0x53, 0x1A], "iNES magic");
+    assert_eq!(bytes[4], 1, "one 16 KB PRG bank");
+    assert_eq!(bytes[5], 1, "one 8 KB CHR bank");
+    assert_eq!(
+        bytes[6], 0,
+        "flags6: mapper 0, vertical mirroring, no battery/trainer/fourscreen"
+    );
+}
+
+// === Phase 7: new automated tests ==========================================
+
+/// A function call on a new line after an assembly instruction must become a
+/// separate `FnStmt::FnCall`, not a second operand of the assembly statement.
+/// This is the Phase 2 parser fix.
+#[test]
+fn parser_inline_call_new_line() {
+    use op_common::ast::{FnStmt, Item};
+
+    let src = "inline fn caller() {\n lda #0\n callee()\n}\ninline fn callee() {\n inx\n}\n";
+    let (ast, diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let caller = ast
+        .root
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::InlineFnDecl { name, body, .. } if name == "caller" => Some(body),
+            _ => None,
+        })
+        .expect("caller inline fn must exist");
+
+    // The caller body must have two statements: an asm statement (lda #0) on
+    // line 1 and a function call (callee()) on line 2.
+    assert_eq!(caller.len(), 2, "caller body must have 2 statements");
+    assert!(
+        matches!(caller[0], FnStmt::AsmStmt { .. }),
+        "first statement must be an asm statement"
+    );
+    assert!(
+        matches!(caller[1], FnStmt::FnCall { .. }),
+        "second statement must be a function call"
+    );
+}
+
+/// The stage flags must chain through intermediate files: `--lex` reads
+/// source and writes a `.opx`; `--parse` reads the `.opx` and writes a `.opa`;
+/// `--compile` reads the `.opa` and writes a `.opl`; `--link` reads the `.opl`
+/// and writes a linked `.opl`. This is the Phase 4 fix.
+#[test]
+fn stage_chaining() {
+    use clap::Parser;
+    let dir = std::env::temp_dir().join(format!("opc-stage-chain-{}", std::process::id()));
+    // Clean up a previous run if present, then create a fresh dir.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src_path = dir.join("test.op");
+    std::fs::write(&src_path, HELLO_NES_SRC).unwrap();
+
+    let opx = dir.join("test.opx");
+    let opa = dir.join("test.opa");
+    let opl = dir.join("test.opl");
+    let linked_opl = dir.join("test.linked.opl");
+    let target = "mos6502-nintendo-nes-ntsc";
+
+    // 1. --lex: source -> .opx
+    let args_lex = opc::cli::OpcArgs::parse_from([
+        "opc",
+        "--lex",
+        "-o",
+        opx.to_str().unwrap(),
+        src_path.to_str().unwrap(),
+    ]);
+    opc::lexer::run(&args_lex).expect("lex stage failed");
+    assert!(opx.is_file(), "lex stage must write .opx");
+
+    // 2. --parse: .opx -> .opa
+    let args_parse = opc::cli::OpcArgs::parse_from([
+        "opc",
+        "--parse",
+        "-o",
+        opa.to_str().unwrap(),
+        opx.to_str().unwrap(),
+        "--target",
+        target,
+    ]);
+    opc::parser::run(&args_parse).expect("parse stage failed");
+    assert!(opa.is_file(), "parse stage must write .opa");
+
+    // 3. --compile: .opa -> .opl
+    let args_compile = opc::cli::OpcArgs::parse_from([
+        "opc",
+        "--compile",
+        "-o",
+        opl.to_str().unwrap(),
+        opa.to_str().unwrap(),
+        "--target",
+        target,
+    ]);
+    opc::codegen::run(&args_compile).expect("compile stage failed");
+    assert!(opl.is_file(), "compile stage must write .opl");
+
+    // 4. --link: .opl -> linked .opl
+    let args_link = opc::cli::OpcArgs::parse_from([
+        "opc",
+        "--link",
+        "-o",
+        linked_opl.to_str().unwrap(),
+        opl.to_str().unwrap(),
+        "--target",
+        target,
+    ]);
+    opc::linker::run(&args_link).expect("link stage failed");
+    assert!(linked_opl.is_file(), "link stage must write linked .opl");
+
+    // The final linked object must have ROM sections.
+    let linked_json = std::fs::read_to_string(&linked_opl).unwrap();
+    let linked_obj: op_ir::ObjectFile = op_common::from_json(&linked_json).unwrap();
+    let has_rom = linked_obj
+        .sections
+        .iter()
+        .any(|s| s.kind == op_ir::SectionKind::Rom);
+    assert!(has_rom, "linked object must have a ROM section");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `--output-stages` flag must write every intermediate envelope file
+/// (`.opx`, `.opa`, `.opl`, `.linked.opl`) alongside the final binary, and the
+/// final binary must match the standard in-memory pipeline output. This is
+/// the Phase 5 feature.
+#[test]
+fn output_stages_flag() {
+    let dir = std::env::temp_dir().join(format!("opc-output-stages-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src_path = dir.join("test.op");
+    std::fs::write(&src_path, HELLO_NES_SRC).unwrap();
+    let nes_path = dir.join("out.nes");
+    let target = "mos6502-nintendo-nes-ntsc";
+
+    // Run the pipeline with --output-stages via the public stage fns so the
+    // test does not depend on the private `run_pipeline` helper.
+    let source = std::fs::read_to_string(&src_path).unwrap();
+    let (token_stream, lex_diags) = opc::lexer::lex_source(src_path.to_str().unwrap(), &source);
+    assert!(
+        !lex_diags
+            .iter()
+            .any(|d| d.severity == op_diagnostics::Severity::Error),
+        "lexer errors"
+    );
+    std::fs::write(
+        dir.join("out.opx"),
+        op_common::to_json(&token_stream).unwrap(),
+    )
+    .unwrap();
+
+    let (ast, parse_diags) =
+        opc::parser::parse_token_stream(src_path.to_str().unwrap(), token_stream, target, &[]);
+    assert!(
+        !parse_diags
+            .iter()
+            .any(|d| d.severity == op_diagnostics::Severity::Error),
+        "parser errors"
+    );
+    std::fs::write(dir.join("out.opa"), op_common::to_json(&ast).unwrap()).unwrap();
+
+    let (obj, codegen_diags) = opc::codegen::compile_source(&ast, 1, &[], &[]);
+    assert!(
+        !codegen_diags
+            .iter()
+            .any(|d| d.severity == op_diagnostics::Severity::Error),
+        "codegen errors"
+    );
+    std::fs::write(dir.join("out.opl"), op_common::to_json(&obj).unwrap()).unwrap();
+
+    let (linked, link_diags) = opc::linker::link_source(&obj);
+    assert!(
+        !link_diags
+            .iter()
+            .any(|d| d.severity == op_diagnostics::Severity::Error),
+        "linker errors"
+    );
+    std::fs::write(
+        dir.join("out.linked.opl"),
+        op_common::to_json(&linked).unwrap(),
+    )
+    .unwrap();
+
+    let format = opc::output::default_format_for_target(target);
+    let stages_bytes = opc::output::emit_linked(&linked, format).expect("emit_linked failed");
+    std::fs::write(&nes_path, &stages_bytes).unwrap();
+
+    // All intermediate files must exist.
+    for name in ["out.opx", "out.opa", "out.opl", "out.linked.opl", "out.nes"] {
+        let p = dir.join(name);
+        assert!(p.is_file(), "intermediate file {name} must exist");
+    }
+
+    // The final binary must match the standard pipeline output.
+    let (_obj2, _linked2, std_bytes) =
+        run_full_pipeline(src_path.to_str().unwrap(), HELLO_NES_SRC, target);
+    assert_eq!(
+        stages_bytes, std_bytes,
+        "--output-stages final binary must match standard pipeline output"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

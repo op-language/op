@@ -60,6 +60,11 @@ pub struct OpcArgs {
     #[arg(long, default_value = "20")]
     pub error_limit: u32,
 
+    /// Write all intermediate stage files (.opx, .opa, .opl, .linked.opl) in
+    /// addition to the final binary. Orthogonal to the stage flags.
+    #[arg(long)]
+    pub output_stages: bool,
+
     #[command(flatten)]
     pub input: Input,
 }
@@ -95,23 +100,43 @@ pub fn run() -> Result<()> {
 
 /// Run the full in-memory pipeline: lex, parse, codegen, optimize, link,
 /// and emit. Each stage passes its output to the next stage in memory.
+/// When `--output-stages` is set, every intermediate envelope is also
+/// written to disk alongside the final binary.
 fn run_pipeline(args: &OpcArgs) -> Result<()> {
     let target = args.target.as_deref().unwrap_or("");
     let input_path = &args.input.input;
+    let paths = stage_paths(args);
 
     // 1. Read the source file.
     let source = std::fs::read_to_string(input_path)
         .map_err(|e| anyhow::anyhow!("failed to read {input_path}: {e}"))?;
 
-    // 2. Parse (parse_source calls lex_source internally).
+    // 2. Lex.
+    let (token_stream, lex_diags) = crate::lexer::lex_source(input_path, &source);
+    print_diags(&lex_diags, input_path, &source);
+    if has_errors(&lex_diags) {
+        anyhow::bail!("lexer errors in {input_path}");
+    }
+    if args.output_stages {
+        if let Some(p) = &paths.opx {
+            std::fs::write(p, op_common::to_json(&token_stream)?)?;
+        }
+    }
+
+    // 3. Parse.
     let (ast, parse_diags) =
-        crate::parser::parse_source(input_path, &source, target, &args.features);
+        crate::parser::parse_token_stream(input_path, token_stream, target, &args.features);
     print_diags(&parse_diags, input_path, &source);
     if has_errors(&parse_diags) {
         anyhow::bail!("parser errors in {input_path}");
     }
+    if args.output_stages {
+        if let Some(p) = &paths.opa {
+            std::fs::write(p, op_common::to_json(&ast)?)?;
+        }
+    }
 
-    // 3. Compile (codegen + optimizer). Include paths and features are
+    // 4. Compile (codegen + optimizer). Include paths and features are
     // forwarded so codegen can locate and parse std modules.
     let (obj, codegen_diags) =
         crate::codegen::compile_source(&ast, args.opt_level, &args.include, &args.features);
@@ -119,19 +144,29 @@ fn run_pipeline(args: &OpcArgs) -> Result<()> {
     if has_errors(&codegen_diags) {
         anyhow::bail!("codegen errors in {input_path}");
     }
+    if args.output_stages {
+        if let Some(p) = &paths.opl {
+            std::fs::write(p, op_common::to_json(&obj)?)?;
+        }
+    }
 
-    // 4. Link.
+    // 5. Link.
     let (linked, linker_diags) = crate::linker::link_source(&obj);
     print_diags(&linker_diags, input_path, &source);
     if has_errors(&linker_diags) {
         anyhow::bail!("linker errors in {input_path}");
     }
+    if args.output_stages {
+        if let Some(p) = &paths.linked_opl {
+            std::fs::write(p, op_common::to_json(&linked)?)?;
+        }
+    }
 
-    // 5. Determine the output format and emit the final binary.
+    // 6. Determine the output format and emit the final binary.
     let format = crate::output::resolve_format(args, &linked.target);
     let bytes = crate::output::emit_linked(&linked, &format)?;
 
-    // 6. Write the bytes to the output file or to stdout.
+    // 7. Write the bytes to the output file or to stdout.
     match &args.output {
         Some(path) => std::fs::write(path, bytes)?,
         None => {
@@ -140,6 +175,53 @@ fn run_pipeline(args: &OpcArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The set of file paths used by `--output-stages`.
+struct StagePaths {
+    opx: Option<std::path::PathBuf>,
+    opa: Option<std::path::PathBuf>,
+    opl: Option<std::path::PathBuf>,
+    linked_opl: Option<std::path::PathBuf>,
+}
+
+/// Derive the intermediate and final output paths for `--output-stages`.
+///
+/// When the user sets `-o foo.nes`, the intermediate paths are `foo.opx`,
+/// `foo.opa`, `foo.opl`, and `foo.linked.opl` next to the output file.
+///
+/// When the user does not set `-o`, the paths are derived from the input
+/// basename in the current directory. The final binary goes to stdout in
+/// that case, so only the intermediate paths are returned.
+fn stage_paths(args: &OpcArgs) -> StagePaths {
+    let stem = |path: &std::path::Path| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "out".to_string())
+    };
+
+    if let Some(out) = &args.output {
+        let out_path = std::path::Path::new(out);
+        let dir = out_path.parent().unwrap_or(std::path::Path::new("."));
+        let base = stem(out_path);
+        let join = |ext: &str| dir.join(format!("{base}.{ext}"));
+        StagePaths {
+            opx: Some(join("opx")),
+            opa: Some(join("opa")),
+            opl: Some(join("opl")),
+            linked_opl: Some(dir.join(format!("{base}.linked.opl"))),
+        }
+    } else {
+        let input_path = std::path::Path::new(&args.input.input);
+        let base = stem(input_path);
+        let join = |ext: &str| std::path::PathBuf::from(format!("{base}.{ext}"));
+        StagePaths {
+            opx: Some(join("opx")),
+            opa: Some(join("opa")),
+            opl: Some(join("opl")),
+            linked_opl: Some(std::path::PathBuf::from(format!("{base}.linked.opl"))),
+        }
+    }
 }
 
 /// Return true when the diagnostics list contains any error-severity entry.

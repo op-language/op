@@ -12,7 +12,7 @@ use op_common::{
         FnStmt, InitValue, Item, Module, OffsetOp, Operand, PlacementArg, SwitchCase, Type,
         UnaryOp, UseRoot, UseTail, UseTree,
     },
-    AstFile, TargetTriplet, Token,
+    AstFile, TargetTriplet, Token, TokenStream,
 };
 use op_diagnostics::{Diagnostic, Severity};
 use std::path::Path;
@@ -23,16 +23,34 @@ use crate::lexer;
 // --- Entry points -----------------------------------------------------------
 
 /// Run the parser stage when the `--parse` flag is set, or no-op otherwise.
+///
+/// When the `--parse` flag is set, the input is a `.opx` token-stream file
+/// produced by the `--lex` stage. The parser deserializes the token stream
+/// and builds an AST from it.
 pub fn run(args: &OpcArgs) -> Result<()> {
     if !args.parse {
         return Ok(());
     }
     let target = args.target.as_deref().unwrap_or("");
-    let ast = parse_file(&args.input.input, target, &args.features)?;
-    let json = op_common::to_json(&ast)?;
+    let json = std::fs::read_to_string(&args.input.input)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", args.input.input))?;
+    let stream: TokenStream = op_common::from_json(&json)?;
+    // The token stream's `file` field holds the original source path. Use it
+    // so the AST carries the source path forward to the codegen, which needs
+    // it to resolve `locate_bytes!`/`locate_str!` paths and the standard
+    // library relative to the source directory.
+    let (ast, diags) = parse_token_stream(&stream.file.clone(), stream, target, &args.features);
+    let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
+    if has_errors {
+        for d in &diags {
+            d.print(None);
+        }
+        anyhow::bail!("parser errors in {}", args.input.input);
+    }
+    let out = op_common::to_json(&ast)?;
     match &args.output {
-        Some(path) => std::fs::write(path, json)?,
-        None => println!("{json}"),
+        Some(path) => std::fs::write(path, out)?,
+        None => println!("{out}"),
     }
     Ok(())
 }
@@ -60,6 +78,34 @@ pub fn parse_source(
     features: &[String],
 ) -> (AstFile, Vec<Diagnostic>) {
     let (token_stream, lex_diags) = lexer::lex_source(file, source);
+    parse_token_stream_with_diags(file, token_stream, lex_diags, target, features)
+}
+
+/// Parse a serialized [`TokenStream`] into an [`AstFile`] and a list of
+/// diagnostics. This is the entry point for the `--parse` stage when it
+/// reads a `.opx` file. The token stream already contains the lexer
+/// diagnostics, if any, from the `--lex` stage.
+pub fn parse_token_stream(
+    file: &str,
+    stream: TokenStream,
+    target: &str,
+    features: &[String],
+) -> (AstFile, Vec<Diagnostic>) {
+    parse_token_stream_with_diags(file, stream, Vec::new(), target, features)
+}
+
+/// Shared body of [`parse_source`] and [`parse_token_stream`].
+///
+/// `lex_diags` are diagnostics produced by the lexer stage. When the parser
+/// reads a `.opx` file, the lexer diagnostics are not re-emitted, so the
+/// caller passes an empty vector.
+fn parse_token_stream_with_diags(
+    file: &str,
+    stream: TokenStream,
+    lex_diags: Vec<Diagnostic>,
+    target: &str,
+    features: &[String],
+) -> (AstFile, Vec<Diagnostic>) {
     let triplet = TargetTriplet::parse(target).unwrap_or(TargetTriplet {
         cpu: String::new(),
         manufacturer: String::new(),
@@ -68,7 +114,7 @@ pub fn parse_source(
     });
 
     let mut parser = Parser {
-        tokens: token_stream.tokens,
+        tokens: stream.tokens,
         pos: 0,
         file: file.to_string(),
         dir: Path::new(file)
@@ -1171,7 +1217,12 @@ impl Parser {
     }
 
     fn parse_asm_stmt(&mut self) -> FnStmt {
-        let opcode = self.advance().map(|t| t.value).unwrap_or_default();
+        let opcode_tok = self.advance();
+        let opcode = opcode_tok
+            .as_ref()
+            .map(|t| t.value.clone())
+            .unwrap_or_default();
+        let opcode_line = opcode_tok.map(|t| t.line).unwrap_or(0);
         let mut operands = Vec::new();
         while !self.at_eof() {
             let kind = self.peek_kind();
@@ -1183,6 +1234,16 @@ impl Parser {
                 || kind == "OPCODE"
             {
                 break;
+            }
+            // Stop when the next token starts on a later line than the
+            // opcode. The lexer discards newlines, so a line break is the
+            // statement boundary for assembly instructions. This prevents
+            // a function call on the next line from being consumed as a
+            // second operand of the opcode on this line.
+            if let Some(tok) = self.peek() {
+                if tok.line > opcode_line {
+                    break;
+                }
             }
             if let Some(operand) = self.parse_operand() {
                 operands.push(operand);
@@ -1256,6 +1317,7 @@ impl Parser {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect: true,
             });
         }
 
@@ -1270,6 +1332,7 @@ impl Parser {
                 mode_prefix,
                 expr,
                 index_reg,
+                is_indirect: false,
             });
         }
 
@@ -1289,6 +1352,7 @@ impl Parser {
             mode_prefix,
             expr,
             index_reg: None,
+            is_indirect: false,
         })
     }
 

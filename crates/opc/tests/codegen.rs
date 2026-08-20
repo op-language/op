@@ -144,7 +144,7 @@ fn codegen_inx_implied() {
     let data = &obj.sections[0].data;
     // INX implied: E8
     assert_eq!(data[0], 0xE8);
-    assert_eq!(data.len(), 1);
+    assert_eq!(data.len(), 2); // INX + implicit RTS
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn codegen_zeropage_mode() {
     let data = &obj.sections[0].data;
     assert_eq!(data[0], 0xA5); // LDA zero-page
     assert_eq!(data[1], 0x42);
-    assert_eq!(data.len(), 2);
+    assert_eq!(data.len(), 3); // 2-byte instr + implicit RTS
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn codegen_absolute_mode() {
     let obj = compile("#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { lda 0x2000 } }");
     let data = &obj.sections[0].data;
     assert_eq!(data[0], 0xAD); // LDA absolute
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4); // 3-byte instr + implicit RTS
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn codegen_forced_zp_mode() {
     // Forced zero-page should use zero-page encoding even for larger addresses.
     assert_eq!(data[0], 0xA5); // LDA zero-page
     assert_eq!(data[1], 0x00); // truncated to 1 byte
-    assert_eq!(data.len(), 2);
+    assert_eq!(data.len(), 3); // 2-byte instr + implicit RTS
 }
 
 // === Relocations ==========================================================
@@ -380,7 +380,7 @@ fn optimizer_redundant_load() {
 
 #[test]
 fn optimizer_redundant_store() {
-    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { sta 0x2000 sta 0x2000 inx } }";
+    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { sta 0x0100 sta 0x0100 inx } }";
     let opt = compile_with_opt(src, 1);
     let nopt = compile_with_opt(src, 0);
     assert!(opt.sections[0].data.len() < nopt.sections[0].data.len());
@@ -412,6 +412,174 @@ fn optimizer_disabled() {
     let data = &opt0.sections[0].data;
     assert_eq!(data[0], 0xA9); // first lda
     assert_eq!(data[2], 0xA9); // second lda (not removed)
+}
+
+#[test]
+fn optimizer_skips_chr_sections() {
+    // CHR sections hold pattern-table data, not code. The optimizer must
+    // not decode the bytes as 6502 instructions or apply transforms.
+    // The byte sequence below contains patterns that the optimizer would
+    // drop if it ran on the section (pha/pla = 0x48/0x68, redundant loads).
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
+    let chr_bytes: Vec<u8> = vec![
+        0xA9, 0x00, 0xA9, 0x00, // redundant lda #0, lda #0
+        0x48, 0x68, // pha, pla (push-pop pair)
+        0x00, 0x18, 0x00, 0x18, // brk/clc pattern bytes
+        0xEA, 0xEA, 0xEA, 0xEA, // nop nop nop nop
+    ];
+    let mut sections = vec![Section {
+        name: "chr_bank0".to_string(),
+        kind: SectionKind::Chr,
+        org: 0,
+        bank: 0,
+        maxsize: 0,
+        symbols: Vec::new(),
+        relocations: Vec::new(),
+        data: chr_bytes.clone(),
+    }];
+    optimize(&mut sections, 1);
+    // The CHR data must equal the input bytes exactly. The optimizer must
+    // not remove or change any byte.
+    assert_eq!(sections[0].data, chr_bytes, "optimizer corrupted CHR data");
+    assert_eq!(
+        sections[0].data.len(),
+        chr_bytes.len(),
+        "optimizer changed CHR section length"
+    );
+}
+
+#[test]
+fn optimizer_skips_ram_sections() {
+    // RAM sections hold variable data and initialization bytes, not code.
+    // The optimizer must not run on them.
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
+    let ram_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00, 0x48, 0x68, 0xEA, 0xEA];
+    let mut sections = vec![Section {
+        name: "ram_bank0".to_string(),
+        kind: SectionKind::Ram,
+        org: 0x0000,
+        bank: 0,
+        maxsize: 0x100,
+        symbols: Vec::new(),
+        relocations: Vec::new(),
+        data: ram_bytes.clone(),
+    }];
+    optimize(&mut sections, 1);
+    assert_eq!(sections[0].data, ram_bytes, "optimizer corrupted RAM data");
+}
+
+#[test]
+fn optimizer_relocation_remaps_to_instruction_boundary() {
+    // When a peephole transform drops an instruction, the relocations that
+    // follow must map to the correct new offset. This test places a
+    // relocation (Abs16 against a symbol) inside a 3-byte instruction,
+    // with a redundant load before it that the optimizer will remove.
+    // The relocation offset must shift by the size of the dropped
+    // instruction (2 bytes for lda #0).
+    use op_ir::RelocKind;
+    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
+        fn f() {
+            lda #0
+            lda #0
+            jsr target
+        }
+    }";
+    let opt = compile_with_opt(src, 1);
+    let nopt = compile_with_opt(src, 0);
+    let rom = opt
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("ROM section must exist");
+    let rom0 = nopt
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("ROM section must exist");
+    // The optimized ROM must be shorter: one lda #0 (2 bytes) removed.
+    assert!(
+        rom.data.len() < rom0.data.len(),
+        "optimizer did not remove the redundant load"
+    );
+    // The jsr relocation must still be present and point at the jsr
+    // instruction's operand byte (offset = jsr_pos + 1).
+    let jsr_reloc = rom
+        .relocations
+        .iter()
+        .find(|r| r.kind == RelocKind::Abs16 && r.symbol == "target")
+        .expect("jsr target relocation must survive optimization");
+    // The jsr opcode must be at offset = jsr_reloc.offset - 1.
+    let jsr_offset = jsr_reloc.offset as usize;
+    assert!(jsr_offset >= 1, "relocation offset too small");
+    assert_eq!(
+        rom.data[jsr_offset - 1],
+        0x20,
+        "byte before relocation must be the jsr opcode 0x20"
+    );
+}
+
+#[test]
+fn optimizer_changes_rom_but_not_chr() {
+    // Build an object with one ROM section and one CHR section. Run the
+    // optimizer at level 1. The ROM data must change (the redundant load is
+    // folded) and the CHR data must stay byte-for-byte identical.
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
+
+    // ROM bytes: lda #0, lda #0 (redundant pair the optimizer folds to one).
+    let rom_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00];
+    // CHR bytes: a pattern that would be corrupted if the optimizer ran on it.
+    let chr_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00, 0x48, 0x68, 0xEA, 0xEA];
+
+    let mut sections = vec![
+        Section {
+            name: "rom_bank0".to_string(),
+            kind: SectionKind::Rom,
+            org: 0xC000,
+            bank: 0,
+            maxsize: 0x4000,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: rom_bytes.clone(),
+        },
+        Section {
+            name: "chr_bank0".to_string(),
+            kind: SectionKind::Chr,
+            org: 0,
+            bank: 0,
+            maxsize: 0,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: chr_bytes.clone(),
+        },
+    ];
+
+    optimize(&mut sections, 1);
+
+    // The ROM section must change: the redundant lda #0 pair collapses to
+    // a single lda #0 (2 bytes instead of 4).
+    assert_eq!(
+        sections[0].data.len(),
+        2,
+        "optimizer must fold the redundant lda pair in ROM"
+    );
+    assert_ne!(
+        sections[0].data, rom_bytes,
+        "ROM data must change after optimization"
+    );
+
+    // The CHR section must not change at all.
+    assert_eq!(
+        sections[1].data, chr_bytes,
+        "optimizer must not change CHR data"
+    );
+    assert_eq!(
+        sections[1].data.len(),
+        chr_bytes.len(),
+        "CHR section length must not change"
+    );
 }
 
 // === Other CPU families ===================================================
@@ -565,10 +733,10 @@ fn std_inline_fn_param_substitution() {
         return;
     };
     let data = &obj.sections[0].data;
-    // vram_write(value) expands to `lda value; sta PPU::IO`. With
-    // value = 0x30 the load is zero-page and PPU::IO resolves to
-    // 0x2007: LDA $30 (A5 30) + STA $2007 (8D 07 20).
-    assert_eq!(&data[..5], &[0xA5, 0x30, 0x8D, 0x07, 0x20]);
+    // vram_write(value) expands to `lda #value; sta PPU::IO`. With
+    // value = 0x30 the load is immediate and PPU::IO resolves to
+    // 0x2007: LDA #$30 (A9 30) + STA $2007 (8D 07 20).
+    assert_eq!(&data[..5], &[0xA9, 0x30, 0x8D, 0x07, 0x20]);
     assert!(obj.sections[0].relocations.is_empty());
 }
 

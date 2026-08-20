@@ -9,7 +9,7 @@
 //!
 //! The optimizer runs only when the opt level is 1 or higher.
 
-use op_ir::{Relocation, Section};
+use op_ir::{Relocation, Section, SectionKind};
 
 /// A decoded instruction for the optimizer to work with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +28,67 @@ struct Instruction {
     is_volatile: bool,
     /// The total size of this instruction in bytes.
     size: usize,
+    /// The index of the relocation that covers this instruction's operand,
+    /// or `None` when the operand is a literal constant. Two instructions
+    /// that reference different symbols (or the same symbol with different
+    /// addends) are never "the same address" even when their raw operand
+    /// bytes are identical (both placeholder zeros before linking).
+    reloc_index: Option<usize>,
+}
+
+/// Return true when the instruction accesses a memory-mapped I/O
+/// register. On the NES, the PPU registers occupy $2000-$2007 and
+/// APU/IO registers occupy $4000-$4017. Reads and writes to these
+/// addresses have side effects and must not be removed or reordered
+/// by the peephole optimizer.
+fn is_mmio_access(_mnemonic: Option<&str>, mode: Option<&str>, operand: &[u8]) -> bool {
+    let Some(mode) = mode else {
+        return false;
+    };
+    // Only absolute, zero-page, absoluteX, absoluteY, and indirect
+    // addressing modes reference memory addresses. Immediate operands
+    // are constants, not memory accesses.
+    let absolute_mode = matches!(
+        mode,
+        "absolute" | "zeropage" | "absolutex" | "absolutey" | "indirect"
+    );
+    if !absolute_mode {
+        return false;
+    }
+    // Extract the 16-bit address from the operand.
+    let addr = if mode == "zeropage" {
+        // Zero-page: 1-byte operand, high byte is $00.
+        if operand.is_empty() {
+            return false;
+        }
+        u16::from(operand[0])
+    } else {
+        // Absolute: 2-byte operand, little-endian.
+        if operand.len() < 2 {
+            return false;
+        }
+        u16::from_le_bytes([operand[0], operand[1]])
+    };
+    // NES PPU registers: $2000-$2007. APU/IO: $4000-$4017.
+    // Use the mnemonic to distinguish loads (reads) from stores (writes),
+    // but treat both as volatile in this range.
+    (0x2000..=0x2007).contains(&addr) || (0x4000..=0x4017).contains(&addr)
 }
 
 /// Run the peephole optimizer on all sections in the object file.
 /// The optimizer runs only when `opt_level >= 1`.
+///
+/// Only ROM sections hold code. CHR and RAM sections hold data tables and
+/// variables. The optimizer must not run on data sections because it
+/// decodes data bytes as 6502 instructions and may drop them.
 pub fn optimize(sections: &mut [Section], opt_level: u8) {
     if opt_level < 1 {
         return;
     }
     for section in sections.iter_mut() {
+        if section.kind != SectionKind::Rom {
+            continue;
+        }
         optimize_section(section);
     }
 }
@@ -44,7 +96,7 @@ pub fn optimize(sections: &mut [Section], opt_level: u8) {
 /// Run the peephole optimizer on a single section.
 fn optimize_section(section: &mut Section) {
     // Decode the section data into a list of instructions.
-    let instructions = decode_instructions(&section.data);
+    let instructions = decode_instructions(&section.data, &section.relocations);
     if instructions.is_empty() {
         return;
     }
@@ -76,7 +128,12 @@ fn optimize_section(section: &mut Section) {
 /// This is a simplified decoder that recognizes common 6502 instruction
 /// patterns. For unrecognized bytes, it treats each byte as a 1-byte
 /// instruction.
-fn decode_instructions(data: &[u8]) -> Vec<Instruction> {
+///
+/// `relocations` is used to tag each instruction with the relocation that
+/// covers its operand bytes (if any). Two instructions with different
+/// relocations are never considered "the same address" by the transforms,
+/// even when their raw operand bytes are identical placeholder zeros.
+fn decode_instructions(data: &[u8], relocations: &[Relocation]) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pos = 0;
 
@@ -91,14 +148,31 @@ fn decode_instructions(data: &[u8]) -> Vec<Instruction> {
         };
 
         let size = 1 + operand.len();
+        // Mark instructions that access memory-mapped hardware registers
+        // as volatile. The NES PPU registers live at $2000-$2007 and
+        // APU/IO registers at $4000-$4017. The optimizer must not remove
+        // or reorder reads/writes to these addresses.
+        let is_volatile = is_mmio_access(mnemonic.as_deref(), mode.as_deref(), &operand);
+
+        // Find the relocation that covers the operand bytes of this
+        // instruction. A relocation at byte `r` belongs to the instruction
+        // whose operand spans `r`. The operand starts at `pos + 1` and has
+        // `operand.len()` bytes.
+        let operand_start = pos + 1;
+        let operand_end = pos + size;
+        let reloc_index = relocations.iter().position(|r| {
+            (r.offset as usize) >= operand_start && (r.offset as usize) < operand_end
+        });
+
         instructions.push(Instruction {
             offset: pos,
             opcode,
             operand,
             mnemonic,
             mode,
-            is_volatile: false,
+            is_volatile,
             size,
+            reloc_index,
         });
         pos += size;
     }
@@ -405,11 +479,29 @@ fn is_same_instruction(a: &Instruction, b: &Instruction, mnemonics: &[&str]) -> 
     if a.mnemonic.as_deref() == b.mnemonic.as_deref() {
         if let Some(m) = &a.mnemonic {
             if mnemonics.contains(&m.as_str()) {
-                return a.operand == b.operand && !a.is_volatile && !b.is_volatile;
+                return a.operand == b.operand
+                    && !a.is_volatile
+                    && !b.is_volatile
+                    && same_address_target(a, b);
             }
         }
     }
     false
+}
+
+/// Return true when two instructions reference the same address target.
+///
+/// Two instructions with raw operand bytes that happen to be equal are only
+/// the same address when they also share the same relocation (or both have
+/// no relocation — literal constants). A relocation placeholder (e.g.
+/// `00 00` for a symbol that has not been linked yet) must not match a
+/// different symbol's placeholder even when the bytes are identical.
+fn same_address_target(a: &Instruction, b: &Instruction) -> bool {
+    match (a.reloc_index, b.reloc_index) {
+        (None, None) => true,
+        (Some(i), Some(j)) if i == j => true,
+        _ => false,
+    }
 }
 
 /// 1. Redundant load: lda X then lda X -> lda X (remove the second).
@@ -461,7 +553,13 @@ fn try_load_store_load(instructions: &[Instruction], i: usize) -> Option<usize> 
         .map(|m| ["lda", "ldx", "ldy"].contains(&m))
         .unwrap_or(false);
 
-    if is_load && is_store && is_load2 && store.operand == load2.operand && !load2.is_volatile {
+    if is_load
+        && is_store
+        && is_load2
+        && store.operand == load2.operand
+        && !load2.is_volatile
+        && same_address_target(store, load2)
+    {
         return Some(3); // skip all three, we keep the first two
     }
     None
@@ -497,7 +595,7 @@ fn try_dead_store(instructions: &[Instruction], i: usize) -> Option<usize> {
             .map(|m| ["sta", "stx", "sty", "stz"].contains(&m))
             .unwrap_or(false);
 
-        if inst.operand == *store_addr {
+        if inst.operand == *store_addr && same_address_target(store, inst) {
             if reads_addr {
                 // The store is read — not dead.
                 return None;
@@ -628,9 +726,16 @@ fn reencode(
     // Remap relocations to the new offsets.
     for reloc in relocations {
         // Find the instruction that contains this relocation offset.
+        // A relocation at byte `r` belongs to the instruction where
+        // `instruction.offset <= r < instruction.offset + instruction.size`.
         let containing = offset_map.iter().find(|entry| {
             let old = entry.0;
-            reloc.offset as usize >= old && (reloc.offset as usize) < (old + 3)
+            let inst_size = instructions
+                .iter()
+                .find(|inst| inst.offset == old)
+                .map(|inst| inst.size)
+                .unwrap_or(0);
+            reloc.offset as usize >= old && (reloc.offset as usize) < (old + inst_size)
         });
 
         if let Some(entry) = containing {
