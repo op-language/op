@@ -127,11 +127,7 @@ const HELLO: [u8; 11] = "Hello, NES!";
 
 counter: u8;
 palcol: u8;
-paddr: pointer;
 pstr: pointer;
-msgbuf: [u8; 64];
-scroll: SCROLL;
-oam: OAM_BUFFER;
 
 // --- iNES header -----------------------------------------------------------
 

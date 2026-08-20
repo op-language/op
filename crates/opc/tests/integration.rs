@@ -656,8 +656,9 @@ fn full_pipeline_std_nes_game() {
         .collect();
     assert!(errors.is_empty(), "codegen errors: {:?}", errors);
 
-    // The four unreferenced vars (paddr, msgbuf, scroll, oam) should
-    // produce dead-data warnings.
+    // The previously-unreferenced vars (paddr, msgbuf, scroll, oam) were
+    // removed from nes.op in Phase 6, so there should be no dead-data
+    // warnings.
     let dead_data = codegen_diags
         .iter()
         .filter(|d| d.code == 306)
@@ -668,7 +669,10 @@ fn full_pipeline_std_nes_game() {
                 || d.message.contains("oam")
         })
         .count();
-    assert_eq!(dead_data, 4, "expected 4 dead-data warnings");
+    assert_eq!(
+        dead_data, 0,
+        "expected no dead-data warnings for removed vars"
+    );
 
     let (linked, link_diags) = link_source(&obj);
     let errors: Vec<_> = link_diags
