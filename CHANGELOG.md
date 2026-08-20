@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operand that is neither a constant nor a symbol produces error 305
   instead of a silent zero byte.
 
+### Tests
+- 217 tests pass across all test binaries.
+
 ### Fixed
 - `self` token bug. The lexer maps `Kw_self_` to the token string
   `Kw_self`, which the parser's `check("Kw_self")` matches. No code change
