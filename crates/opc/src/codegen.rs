@@ -245,12 +245,17 @@ impl ModuleCache {
 
 // --- Inline functions -------------------------------------------------------
 
-/// An inline function: the parameter names and the body that is
-/// expanded, with arguments substituted, at each call site.
+/// A function stored for call-site expansion or subroutine linkage.
+/// `is_inline` is true for `inline fn` declarations (and for std inline
+/// fns imported via `use`); their bodies are substituted at each call
+/// site. `is_inline` is false for non-inline `fn` declarations; calls to
+/// them emit a `jsr` plus an `Abs16` relocation against the fn name, and
+/// the body is placed exactly once.
 #[derive(Clone)]
 struct InlineFn {
     params: Vec<String>,
     body: Vec<FnStmt>,
+    is_inline: bool,
 }
 
 // --- Codegen struct ---------------------------------------------------------
@@ -638,6 +643,7 @@ impl Codegen {
             InlineFn {
                 params: params.to_vec(),
                 body: body.to_vec(),
+                is_inline: true,
             },
         );
     }
@@ -758,6 +764,7 @@ impl Codegen {
                     InlineFn {
                         params: Vec::new(),
                         body: body.clone(),
+                        is_inline: false,
                     },
                 );
                 // When declared inside a section, compile in place.
@@ -774,6 +781,7 @@ impl Codegen {
                     InlineFn {
                         params: params.clone(),
                         body: body.clone(),
+                        is_inline: true,
                     },
                 );
             }
@@ -1606,16 +1614,28 @@ impl Codegen {
     fn compile_fn_call(&mut self, name: &str, args: &[Expr]) {
         // Check if it's an inline fn.
         if let Some(inline_fn) = self.inline_fns.get(name).cloned() {
-            // Substitute the call arguments for the parameters, then
-            // expand the body at the call site. Nested inline calls
-            // in the substituted body resolve during this compile
-            // pass.
-            let body = self.substitute_params(&inline_fn.body, &inline_fn.params, args);
-            for stmt in &body {
-                self.compile_stmt(stmt);
+            if inline_fn.is_inline {
+                // Substitute the call arguments for the parameters, then
+                // expand the body at the call site. Nested inline calls
+                // in the substituted body resolve during this compile
+                // pass.
+                let body = self.substitute_params(&inline_fn.body, &inline_fn.params, args);
+                for stmt in &body {
+                    self.compile_stmt(stmt);
+                }
+            } else {
+                // Non-inline fn call: emit JSR plus an Abs16 relocation
+                // against the fn name. The fn body is placed exactly once
+                // (in a section block or via locate_fn!), so calls jump to
+                // it rather than inlining.
+                self.emit_byte(0x20); // JSR absolute
+                self.emit_byte(0);
+                self.emit_byte(0);
+                self.add_relocation(2, RelocKind::Abs16, name, 0);
             }
         } else {
-            // Regular function call — emit JSR.
+            // Unknown fn call — emit JSR with a relocation; the linker
+            // reports an unresolved symbol if nothing defines it.
             self.emit_byte(0x20); // JSR absolute
             self.emit_byte(0);
             self.emit_byte(0);
@@ -2921,6 +2941,7 @@ mod tests {
                         }],
                     },
                 ],
+                is_inline: true,
             },
         );
 
@@ -2954,6 +2975,7 @@ mod tests {
                     opcode: "nop".to_string(),
                     operands: Vec::new(),
                 }],
+                is_inline: true,
             },
         );
         // inline fn step(value) { pause(); lda value }
@@ -2977,6 +2999,7 @@ mod tests {
                         }],
                     },
                 ],
+                is_inline: true,
             },
         );
 
@@ -3006,8 +3029,10 @@ mod tests {
                         index_reg: None,
                     }],
                 }],
+                is_inline: true,
             },
         );
+
         // inline fn pipe(value) { write(value) }
         codegen.inline_fns.insert(
             "pipe".to_string(),
@@ -3019,6 +3044,7 @@ mod tests {
                         name: "value".to_string(),
                     }],
                 }],
+                is_inline: true,
             },
         );
 
@@ -3037,6 +3063,41 @@ mod tests {
         let mut codegen = test_codegen_with_rom_section();
         codegen.walk_module(&ast.root);
         (codegen, diags)
+    }
+
+    #[test]
+    fn non_inline_fn_call_emits_jsr_relocation() {
+        // A non-inline `fn` is placed once in the section; calls to it
+        // emit `jsr` plus an `Abs16` relocation rather than inlining.
+        let (codegen, diags) = walk_parsed_source(
+            "fn helper() {\n    lda #5\n    rts\n}\nfn caller() {\n    helper()\n    rts\n}\n",
+        );
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == op_diagnostics::Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        let rom = &codegen.sections[0];
+        // helper compiles to lda #5 (A9 05) + rts (60); it must appear
+        // exactly once in the section.
+        let helper_bytes: [u8; 3] = [0xA9, 0x05, 0x60];
+        let helper_count = rom.data.windows(3).filter(|w| *w == helper_bytes).count();
+        assert_eq!(helper_count, 1, "helper body should appear exactly once");
+        // caller compiles to jsr helper (20 00 00) + rts (60).
+        assert!(rom.data.contains(&0x20), "caller should emit a jsr opcode");
+        // Exactly one Abs16 relocation against helper.
+        let helper_relocs: Vec<_> = rom
+            .relocations
+            .iter()
+            .filter(|r| r.symbol == "helper")
+            .collect();
+        assert_eq!(
+            helper_relocs.len(),
+            1,
+            "one relocation against helper, got {helper_relocs:?}"
+        );
+        assert_eq!(helper_relocs[0].kind, RelocKind::Abs16);
     }
 
     #[test]
