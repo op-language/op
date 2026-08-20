@@ -5,7 +5,7 @@
 //! data bytes).
 
 use op_ir::{ObjectFile, SectionKind, SymbolKind};
-use opc::codegen::compile_source;
+use opc::codegen::{compile_source, compile_source_with_tables, NameTables};
 use opc::parser::parse_source;
 
 /// Helper: parse and compile a source string with the 6502 target.
@@ -452,4 +452,138 @@ fn codegen_no_block_attributes() {
     // Functions without a #[rom] block produce no sections.
     let obj = compile("fn f() { lda 0 }");
     assert_eq!(obj.sections.len(), 0);
+}
+
+// === Std library resolution ================================================
+//
+// These tests resolve the real std library (the directory named by
+// `OP_STD_PATH`, or the std repository that is a sibling of this
+// workspace) and verify what `use std::...` declarations import. They
+// skip themselves when std is not available.
+
+/// Locate the std crate root (the directory that contains `lib.op`).
+///
+/// Checks `OP_STD_PATH` first, then the std repository that is a
+/// sibling of this workspace. Returns `None` when std is not
+/// available.
+fn std_root() -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("OP_STD_PATH") {
+        let root = std::path::PathBuf::from(root);
+        if root.join("lib.op").is_file() {
+            return Some(root);
+        }
+    }
+    let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("std")
+        .join("src");
+    if sibling.join("lib.op").is_file() {
+        return Some(sibling);
+    }
+    None
+}
+
+/// Parse and compile a source string against the std library, returning
+/// the object file and the codegen name tables.
+fn compile_std(src: &str) -> Option<(ObjectFile, NameTables)> {
+    let root = std_root()?;
+    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let includes = vec![root.to_string_lossy().into_owned()];
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 0, &includes, &[]);
+    Some((obj, tables))
+}
+
+/// Parse a std source file directly (as the root source) and compile it,
+/// returning the object file and the codegen name tables.
+fn compile_std_file(path: &std::path::Path) -> Option<(ObjectFile, NameTables)> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let file = path.to_string_lossy().into_owned();
+    let (ast, _diags) = parse_source(&file, &source, "mos6502-nintendo-nes-ntsc", &[]);
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 0, &[], &[]);
+    Some((obj, tables))
+}
+
+#[test]
+fn std_resolves_cpu_glob() {
+    let Some((_obj, tables)) = compile_std("use std::cpu::*;") else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    // The cpu module exports no inline fns.
+    assert!(tables.inline_fn_names.is_empty());
+    // Enum variants land in the flat const namespace under qualified keys.
+    assert_eq!(tables.const_values.get("STATUS::N"), Some(&0x80));
+    assert_eq!(tables.const_values.get("STATUS::C"), Some(&0x01));
+    assert_eq!(tables.const_values.get("CPU_REG::a"), Some(&0));
+    assert_eq!(tables.const_values.get("CPU_REG::y"), Some(&2));
+    // Implicit variant values are counted from the previous variant.
+    assert_eq!(tables.const_values.get("OPCODE::BRK"), Some(&10));
+    // The module's `pub use CPU_REG::*;` re-exports the register names bare.
+    assert_eq!(tables.const_values.get("a"), Some(&0));
+    assert_eq!(tables.const_values.get("y"), Some(&2));
+}
+
+#[test]
+fn std_resolves_machine_macros() {
+    let Some((_obj, tables)) = compile_std("use std::machine::*;") else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    for name in ["system_initialize", "vram_write", "turn_video_on"] {
+        assert!(
+            tables.inline_fn_names.contains(&name.to_string()),
+            "missing inline fn `{name}`"
+        );
+    }
+}
+
+#[test]
+fn std_enum_variant_resolves() {
+    let Some((obj, _tables)) = compile_std(
+        "use std::machine::*;
+         #[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { lda #COLOUR::YELLOW } }",
+    ) else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    let data = &obj.sections[0].data;
+    // LDA immediate with the resolved variant value: A9 07.
+    assert_eq!(data[0], 0xA9);
+    assert_eq!(data[1], 0x07);
+    assert!(obj.sections[0].relocations.is_empty());
+}
+
+#[test]
+fn std_inline_fn_param_substitution() {
+    let Some((obj, _tables)) = compile_std(
+        "use std::machine::*;
+         #[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { vram_write(0x30) } }",
+    ) else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    let data = &obj.sections[0].data;
+    // vram_write(value) expands to `lda value; sta PPU::IO`. With
+    // value = 0x30 the load is zero-page and PPU::IO resolves to
+    // 0x2007: LDA $30 (A5 30) + STA $2007 (8D 07 20).
+    assert_eq!(&data[..5], &[0xA5, 0x30, 0x8D, 0x07, 0x20]);
+    assert!(obj.sections[0].relocations.is_empty());
+}
+
+#[test]
+fn std_super_resolution() {
+    let Some(root) = std_root() else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    let path = root.join("machine").join("nes").join("macros.op");
+    let Some((_obj, tables)) = compile_std_file(&path) else {
+        eprintln!("skipping: {} not readable", path.display());
+        return;
+    };
+    // macros.op's `use super::types::*;` resolves against its own
+    // directory and imports the PPU register enum.
+    assert_eq!(tables.const_values.get("PPU::CNT0"), Some(&0x2000));
 }

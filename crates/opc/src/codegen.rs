@@ -79,6 +79,63 @@ pub fn compile_source(
     include_paths: &[String],
     features: &[String],
 ) -> (ObjectFile, Vec<Diagnostic>) {
+    let (obj, diags, _tables) = compile_source_with_tables(ast, opt_level, include_paths, features);
+    (obj, diags)
+}
+
+/// The codegen name tables after a compile, exposed for tests that
+/// need to inspect what a `use` declaration imported.
+#[derive(Debug, Default)]
+pub struct NameTables {
+    /// Names of every inline fn known to the codegen, sorted.
+    pub inline_fn_names: Vec<String>,
+    /// Every constant value keyed by its flat-namespace name.
+    pub const_values: HashMap<String, i64>,
+}
+
+/// Compile a parsed AST into an [`ObjectFile`], a list of diagnostics,
+/// and a snapshot of the codegen name tables.
+pub fn compile_source_with_tables(
+    ast: &AstFile,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+) -> (ObjectFile, Vec<Diagnostic>, NameTables) {
+    let mut codegen = build_codegen(ast, opt_level, include_paths, features);
+
+    codegen.walk_module(&ast.root);
+
+    let mut inline_fn_names: Vec<String> = codegen.inline_fns.keys().cloned().collect();
+    inline_fn_names.sort();
+
+    let tables = NameTables {
+        inline_fn_names,
+        const_values: codegen.const_values.clone(),
+    };
+
+    // Run the peephole optimizer on the sections.
+    let mut sections = codegen.sections;
+    crate::optimizer::optimize(&mut sections, opt_level);
+
+    let obj = ObjectFile {
+        version: 1,
+        target: ast.target.clone(),
+        sections,
+        interrupt_vectors: codegen.interrupt_vectors,
+        header: codegen.header,
+        pad_byte: codegen.pad_byte,
+    };
+
+    (obj, codegen.diags, tables)
+}
+
+/// Build a [`Codegen`] for the target of `ast`.
+fn build_codegen(
+    ast: &AstFile,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+) -> Codegen {
     let triplet = TargetTriplet::parse(&ast.target).unwrap_or(TargetTriplet {
         cpu: String::new(),
         manufacturer: String::new(),
@@ -88,7 +145,7 @@ pub fn compile_source(
 
     let encoding_table = get_full_encoding_table(&triplet.cpu);
 
-    let mut codegen = Codegen {
+    Codegen {
         target: triplet,
         opt_level,
         encoding_table,
@@ -112,24 +169,7 @@ pub fn compile_source(
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf(),
         diags: Vec::new(),
-    };
-
-    codegen.walk_module(&ast.root);
-
-    // Run the peephole optimizer on the sections.
-    let mut sections = codegen.sections;
-    crate::optimizer::optimize(&mut sections, opt_level);
-
-    let obj = ObjectFile {
-        version: 1,
-        target: ast.target.clone(),
-        sections,
-        interrupt_vectors: codegen.interrupt_vectors,
-        header: codegen.header,
-        pad_byte: codegen.pad_byte,
-    };
-
-    (obj, codegen.diags)
+    }
 }
 
 // --- Module cache -----------------------------------------------------------

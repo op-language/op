@@ -90,11 +90,12 @@ fn pal_animate() {
 
 // --- the main entry point --------------------------------------------------
 
+#[interrupt(reset)]
 noreturn fn main() {
     system_initialize()
     vram_init()
     turn_video_off()
-    vram_write_string(NAME_TABLE_0_ADDRESS + 0x40, str_hello)
+    vram_write_string(NAME_TABLE_0_ADDRESS + 0x40, HELLO)
     vram_clear_address()
     assign(palcol, COLOUR::YELLOW)
     turn_video_on()
@@ -105,15 +106,30 @@ noreturn fn main() {
     }
 }
 
-fn nmi_handler() {
+// --- the nmi handler -------------------------------------------------------
+
+#[interrupt(nmi)]
+fn nmi() {
 }
 
-fn irq_handler() {
+// --- the irq handler -------------------------------------------------------
+#[interrupt(irq)]
+fn irq() {
 }
 
 // --- string data -----------------------------------------------------------
 
-str_hello: [u8] = "Hello, NES!";
+const HELLO: [u8; 11] = "Hello, NES!";
+
+// --- global vars -----------------------------------------------------------
+
+counter: u8;
+palcol: u8;
+paddr: pointer;
+pstr: pointer;
+msgbuf: [u8; 64];
+scroll: SCROLL;
+oam: OAM_BUFFER;
 
 // --- iNES header -----------------------------------------------------------
 
@@ -128,27 +144,11 @@ str_hello: [u8] = "Hello, NES!";
 // --- RAM variables ---------------------------------------------------------
 
 #[ram(org = 0x0000, maxsize = 0x100)] {
-    counter: u8;
-    palcol: u8;
-    paddr: pointer;
-    pstr: pointer;
-    msgbuf: [u8; 64];
-    scroll: SCROLL;
-    oam: OAM_BUFFER;
 }
 
 // --- ROM: main code bank ---------------------------------------------------
 
 #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
-
-    #[interrupt(reset)]
-    locate_fn!(nes_code::main);
-
-    #[interrupt(nmi)]
-    locate_fn!(nes_code::nmi_handler);
-
-    #[interrupt(irq)]
-    locate_fn!(nes_code::irq_handler);
 }
 
 // --- CHR data (pattern tables) ---------------------------------------------

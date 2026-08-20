@@ -422,6 +422,15 @@ fn run_full_pipeline(
     src: &str,
     target: &str,
 ) -> (op_ir::ObjectFile, op_ir::ObjectFile, Vec<u8>) {
+    run_full_pipeline_with_includes(file, src, target, &[])
+}
+
+fn run_full_pipeline_with_includes(
+    file: &str,
+    src: &str,
+    target: &str,
+    include_paths: &[String],
+) -> (op_ir::ObjectFile, op_ir::ObjectFile, Vec<u8>) {
     let (ast, parse_diags) = parse_source(file, src, target, &[]);
     let errors: Vec<_> = parse_diags
         .iter()
@@ -429,7 +438,7 @@ fn run_full_pipeline(
         .collect();
     assert!(errors.is_empty(), "parser errors: {:?}", errors);
 
-    let (obj, codegen_diags) = compile_source(&ast, 1, &[], &[]);
+    let (obj, codegen_diags) = compile_source(&ast, 1, include_paths, &[]);
     let errors: Vec<_> = codegen_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
@@ -495,25 +504,6 @@ fn full_pipeline_raw_output() {
 }
 
 #[test]
-fn full_pipeline_nes_game() {
-    // examples/nes.op uses `use std::cpu::*` / `use std::machine::*` which
-    // the codegen does not resolve (UseDecl is a no-op). The pipeline will
-    // fail with unresolved symbols. Run the pipeline as far as it goes and
-    // assert that parse succeeds and codegen produces sections.
-    let source = include_str!("../../../examples/nes.op");
-    let (ast, parse_diags) =
-        parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
-    let errors: Vec<_> = parse_diags
-        .iter()
-        .filter(|d| d.severity == op_diagnostics::Severity::Error)
-        .collect();
-    assert!(errors.is_empty(), "parser errors: {:?}", errors);
-
-    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
-    assert!(!obj.sections.is_empty(), "expected sections from nes.op");
-}
-
-#[test]
 fn full_pipeline_link_resolved() {
     let (_obj, linked, _bytes) =
         run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
@@ -524,4 +514,106 @@ fn full_pipeline_link_resolved() {
             s.name
         );
     }
+}
+
+// === Full pipeline with the std library ====================================
+
+/// Locate the std crate root: the `OP_STD_PATH` environment variable if it
+/// contains a `lib.op` file, otherwise the `std/src` directory three levels
+/// above the crate directory.
+fn std_root() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("OP_STD_PATH") {
+        let root = std::path::PathBuf::from(path);
+        if root.join("lib.op").is_file() {
+            return Some(root);
+        }
+    }
+    let sibling = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../std/src");
+    if sibling.join("lib.op").is_file() {
+        return Some(sibling);
+    }
+    None
+}
+
+/// A self-contained std program: it imports the std globs, declares
+/// interrupt-attribute fns inside a ROM block, and locates a binary font in
+/// a CHR block.
+const STD_NES_SRC: &str = r#"
+use std::cpu::*;
+use std::machine::*;
+
+#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+    #[interrupt(reset)]
+    fn main() {
+        system_initialize()
+        turn_video_on()
+        loop {
+            vblank_wait()
+        }
+    }
+
+    #[interrupt(nmi)]
+    fn nmi() {
+    }
+}
+
+#[chr(bank = 0)] {
+    locate_bytes!("blob.chr")
+}
+"#;
+
+/// Write the std fixture (source + font file) into `dir` and run the full
+/// pipeline on the source, parsed with its absolute path.
+fn run_std_pipeline(dir: &std::path::Path, std_root: &std::path::Path) -> Vec<u8> {
+    std::fs::write(dir.join("blob.chr"), vec![0xABu8; 8192]).unwrap();
+    let src_path = dir.join("std_test.op");
+    std::fs::write(&src_path, STD_NES_SRC).unwrap();
+    let (_obj, _linked, bytes) = run_full_pipeline_with_includes(
+        src_path.to_str().unwrap(),
+        STD_NES_SRC,
+        "mos6502-nintendo-nes-ntsc",
+        &[std_root.to_string_lossy().into_owned()],
+    );
+    bytes
+}
+
+#[test]
+fn full_pipeline_std_nes() {
+    let Some(std_root) = std_root() else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("opc-int-std-nes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let bytes = run_std_pipeline(&dir, &std_root);
+    assert!(
+        bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
+        "iNES output should start with NES magic"
+    );
+    assert_eq!(
+        bytes.len(),
+        16 + 16384 + 8192,
+        "iNES ROM should be header + one PRG bank + one CHR bank"
+    );
+}
+
+#[test]
+fn full_pipeline_std_nes_rom_bytes() {
+    let Some(std_root) = std_root() else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("opc-int-std-rom-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let bytes = run_std_pipeline(&dir, &std_root);
+    let rom_path = dir.join("out.nes");
+    std::fs::write(&rom_path, &bytes).unwrap();
+    let rom = std::fs::read(&rom_path).unwrap();
+
+    assert_eq!(&rom[0..4], &[0x4E, 0x45, 0x53, 0x1A], "iNES magic");
+    assert_eq!(rom[4], 1, "one 16 KB PRG bank");
+    assert_eq!(rom[5], 1, "one 8 KB CHR bank");
+    assert_eq!(rom[6] & 0x0F, 0, "mapper zero");
 }
