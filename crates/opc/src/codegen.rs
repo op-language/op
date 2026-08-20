@@ -23,22 +23,35 @@ use crate::parser;
 // --- Entry points -----------------------------------------------------------
 
 /// Run the codegen and optimizer stage when the `--compile` flag is set.
+///
+/// When the `--compile` flag is set, the input is a `.opa` AST file
+/// produced by the `--parse` stage. The codegen deserializes the AST and
+/// compiles it into an object file.
 pub fn run(args: &OpcArgs) -> Result<()> {
     if !args.compile {
         return Ok(());
     }
-    let target = args.target.as_deref().unwrap_or("");
-    let obj = compile_file(
-        &args.input.input,
-        target,
-        args.opt_level,
-        &args.include,
-        &args.features,
-    )?;
-    let json = op_common::to_json(&obj)?;
+    let json = std::fs::read_to_string(&args.input.input)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", args.input.input))?;
+    let ast: AstFile = op_common::from_json(&json)?;
+    if ast.file.is_empty() {
+        anyhow::bail!(
+            "the input .opa file has an empty `file` field; the codegen cannot resolve the \
+             standard library without the original source path"
+        );
+    }
+    let (obj, codegen_diags) = compile_source(&ast, args.opt_level, &args.include, &args.features);
+    let has_errors = codegen_diags.iter().any(|d| d.severity == Severity::Error);
+    if has_errors {
+        for d in &codegen_diags {
+            d.print(None);
+        }
+        anyhow::bail!("codegen errors in {}", args.input.input);
+    }
+    let out = op_common::to_json(&obj)?;
     match &args.output {
-        Some(path) => std::fs::write(path, json)?,
-        None => println!("{json}"),
+        Some(path) => std::fs::write(path, out)?,
+        None => println!("{out}"),
     }
     Ok(())
 }
