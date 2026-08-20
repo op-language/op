@@ -520,6 +520,68 @@ fn optimizer_relocation_remaps_to_instruction_boundary() {
     );
 }
 
+#[test]
+fn optimizer_changes_rom_but_not_chr() {
+    // Build an object with one ROM section and one CHR section. Run the
+    // optimizer at level 1. The ROM data must change (the redundant load is
+    // folded) and the CHR data must stay byte-for-byte identical.
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
+
+    // ROM bytes: lda #0, lda #0 (redundant pair the optimizer folds to one).
+    let rom_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00];
+    // CHR bytes: a pattern that would be corrupted if the optimizer ran on it.
+    let chr_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00, 0x48, 0x68, 0xEA, 0xEA];
+
+    let mut sections = vec![
+        Section {
+            name: "rom_bank0".to_string(),
+            kind: SectionKind::Rom,
+            org: 0xC000,
+            bank: 0,
+            maxsize: 0x4000,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: rom_bytes.clone(),
+        },
+        Section {
+            name: "chr_bank0".to_string(),
+            kind: SectionKind::Chr,
+            org: 0,
+            bank: 0,
+            maxsize: 0,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: chr_bytes.clone(),
+        },
+    ];
+
+    optimize(&mut sections, 1);
+
+    // The ROM section must change: the redundant lda #0 pair collapses to
+    // a single lda #0 (2 bytes instead of 4).
+    assert_eq!(
+        sections[0].data.len(),
+        2,
+        "optimizer must fold the redundant lda pair in ROM"
+    );
+    assert_ne!(
+        sections[0].data, rom_bytes,
+        "ROM data must change after optimization"
+    );
+
+    // The CHR section must not change at all.
+    assert_eq!(
+        sections[1].data, chr_bytes,
+        "optimizer must not change CHR data"
+    );
+    assert_eq!(
+        sections[1].data.len(),
+        chr_bytes.len(),
+        "CHR section length must not change"
+    );
+}
+
 // === Other CPU families ===================================================
 
 #[test]
