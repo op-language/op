@@ -121,6 +121,7 @@ const COMPILE_MACROS: &[(&str, TokenType)] = &[
     ("hi", TokenType::Macro_hi),
     ("nylo", TokenType::Macro_nylo),
     ("nyhi", TokenType::Macro_nyhi),
+    ("len", TokenType::Macro_len),
     ("sizeof", TokenType::Macro_sizeof),
 ];
 

@@ -153,6 +153,7 @@ fn build_codegen(
         current_section: None,
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
+        symbol_types: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
         enum_variants: HashMap::new(),
@@ -262,6 +263,10 @@ struct Codegen {
     current_section: Option<usize>,
     inline_fns: HashMap<String, InlineFn>,
     const_values: HashMap<String, i64>,
+    /// Types of top-level const and var declarations, keyed by name.
+    /// Populated during the collect pass before values are evaluated,
+    /// so that `len!` and `sizeof!` of a later declaration resolve.
+    symbol_types: HashMap<String, Type>,
     /// Parsed std modules keyed by absolute file path.
     module_cache: ModuleCache,
     /// Current module path stack. Empty at the crate root. A name is
@@ -310,8 +315,25 @@ impl Codegen {
     /// recurses into sub-modules and attribute blocks, so every name
     /// is bound before the first fn body is compiled.
     fn collect_module_items(&mut self, items: &[Item]) {
+        // Register the types of all const and var declarations first,
+        // so that `len!` and `sizeof!` of a later declaration resolve
+        // when an earlier declaration's value is evaluated.
+        for item in items {
+            self.register_type(item);
+        }
         for item in items {
             self.collect_item(item);
+        }
+    }
+
+    /// Record the type of a top-level const or var declaration in
+    /// `symbol_types`. Other items are ignored.
+    fn register_type(&mut self, item: &Item) {
+        match item {
+            Item::ConstDecl { name, ty, .. } | Item::VarDecl { name, ty, .. } => {
+                self.symbol_types.insert(name.clone(), ty.clone());
+            }
+            _ => {}
         }
     }
 
@@ -323,7 +345,8 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
-                let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                let val = (*evaluated_value)
+                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
                 if let Some(val) = val {
                     self.const_values.insert(name.clone(), val);
                 }
@@ -542,7 +565,8 @@ impl Codegen {
                     evaluated_value,
                     ..
                 } => {
-                    let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                    let val = (*evaluated_value)
+                        .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
                     if let Some(val) = val {
                         self.import_const(name, val);
                     }
@@ -587,7 +611,8 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
-                let val = (*evaluated_value).or_else(|| eval_expr(value, &self.const_values));
+                let val = (*evaluated_value)
+                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
                 if let Some(val) = val {
                     self.import_const(name, val);
                 }
@@ -646,7 +671,7 @@ impl Codegen {
             let val = variant
                 .value
                 .as_ref()
-                .and_then(|v| eval_expr(v, &self.const_values))
+                .and_then(|v| eval_expr(v, &self.const_values, &self.symbol_types))
                 .or_else(|| prev.map(|p| p + 1))
                 .unwrap_or(0);
             let qualified = format!("{name}::{}", variant.name);
@@ -987,7 +1012,7 @@ impl Codegen {
     ) {
         let size = type_size(ty);
         let offset = if let Some(addr_expr) = addr_binding {
-            eval_expr(addr_expr, &self.const_values).unwrap_or(0) as u32
+            eval_expr(addr_expr, &self.const_values, &self.symbol_types).unwrap_or(0) as u32
         } else if let Some(idx) = self.current_section {
             let offset = self.sections[idx].data.len() as u32;
             // Allocate space.
@@ -1004,7 +1029,8 @@ impl Codegen {
             if let Some(idx) = self.current_section {
                 match init_val {
                     InitValue::Expr { value } => {
-                        if let Some(val) = eval_expr(value, &self.const_values) {
+                        if let Some(val) = eval_expr(value, &self.const_values, &self.symbol_types)
+                        {
                             let bytes = val_to_bytes(val, size);
                             for (i, b) in bytes.iter().enumerate() {
                                 if (offset as usize + i) < self.sections[idx].data.len() {
@@ -1025,7 +1051,9 @@ impl Codegen {
                         let mut pos = offset as usize;
                         for item in items {
                             if let InitValue::Expr { value } = item {
-                                if let Some(val) = eval_expr(value, &self.const_values) {
+                                if let Some(val) =
+                                    eval_expr(value, &self.const_values, &self.symbol_types)
+                                {
                                     self.sections[idx].data[pos] = val as u8;
                                     pos += 1;
                                 }
@@ -1170,7 +1198,7 @@ impl Codegen {
                     Some((
                         path.join("::"),
                         RelocKind::Abs8,
-                        selector_offset(accesses, &self.const_values),
+                        selector_offset(accesses, &self.const_values, &self.symbol_types),
                     ))
                 }
             }
@@ -1220,7 +1248,7 @@ impl Codegen {
             Operand::Immediate { value } => {
                 if let Some(op_byte) = self.lookup(opcode, AddrMode::Immediate) {
                     self.emit_byte(op_byte);
-                    let val = eval_expr(value, &self.const_values);
+                    let val = eval_expr(value, &self.const_values, &self.symbol_types);
                     match val {
                         Some(v) => {
                             self.emit_byte((v & 0xFF) as u8);
@@ -1285,7 +1313,7 @@ impl Codegen {
                 // Selector like PPU::CNT0 — resolve to a constant, or
                 // fall back to a symbol relocation.
                 let path_name = path.join("::");
-                match resolve_selector(path, accesses, &self.const_values) {
+                match resolve_selector(path, accesses, &self.const_values, &self.symbol_types) {
                     Some(val) => {
                         // Known constant: emit the (offset-adjusted)
                         // value directly as an absolute operand.
@@ -1307,7 +1335,7 @@ impl Codegen {
                                 2,
                                 RelocKind::Abs16,
                                 &path_name,
-                                selector_offset(accesses, &self.const_values),
+                                selector_offset(accesses, &self.const_values, &self.symbol_types),
                             );
                         }
                     }
@@ -1324,7 +1352,7 @@ impl Codegen {
         expr: &Expr,
         index_reg: Option<&str>,
     ) {
-        let val = eval_expr(expr, &self.const_values);
+        let val = eval_expr(expr, &self.const_values, &self.symbol_types);
 
         // Determine the addressing mode.
         let mode = if let Some(prefix) = mode_prefix {
@@ -1390,7 +1418,7 @@ impl Codegen {
                 None => {
                     // Symbol reference, or an error if the expression is
                     // neither a constant nor a symbol.
-                    let addend = selector_addend(expr, &self.const_values);
+                    let addend = selector_addend(expr, &self.const_values, &self.symbol_types);
                     let zp = mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY;
@@ -1537,7 +1565,7 @@ impl Codegen {
             match case {
                 SwitchCase::Case { expr, body: _ } => {
                     // CMP #value
-                    let val = eval_expr(expr, &self.const_values).unwrap_or(0);
+                    let val = eval_expr(expr, &self.const_values, &self.symbol_types).unwrap_or(0);
                     self.emit_byte(0xC9); // CMP immediate
                     self.emit_byte((val & 0xFF) as u8);
                     // BEQ to case body
@@ -2012,11 +2040,15 @@ fn type_size(ty: &Type) -> usize {
 /// result. Returns `None` when the selector does not name a constant.
 /// Fold the evaluable `Offset` accesses of a selector into a signed
 /// addend. Offsets that cannot be evaluated are ignored.
-fn selector_offset(accesses: &[Access], const_values: &HashMap<String, i64>) -> i64 {
+fn selector_offset(
+    accesses: &[Access],
+    const_values: &HashMap<String, i64>,
+    symbol_types: &HashMap<String, Type>,
+) -> i64 {
     let mut offset: i64 = 0;
     for access in accesses {
         if let Access::Offset { op, value } = access {
-            if let Some(v) = eval_expr(value, const_values) {
+            if let Some(v) = eval_expr(value, const_values, symbol_types) {
                 offset = match op {
                     OffsetOp::Add => offset + v,
                     OffsetOp::Sub => offset - v,
@@ -2029,9 +2061,13 @@ fn selector_offset(accesses: &[Access], const_values: &HashMap<String, i64>) -> 
 
 /// The offset addend of an expression, if it is a selector with
 /// offset accesses; otherwise zero.
-fn selector_addend(expr: &Expr, const_values: &HashMap<String, i64>) -> i64 {
+fn selector_addend(
+    expr: &Expr,
+    const_values: &HashMap<String, i64>,
+    symbol_types: &HashMap<String, Type>,
+) -> i64 {
     match expr {
-        Expr::Selector { accesses, .. } => selector_offset(accesses, const_values),
+        Expr::Selector { accesses, .. } => selector_offset(accesses, const_values, symbol_types),
         _ => 0,
     }
 }
@@ -2040,6 +2076,7 @@ fn resolve_selector(
     path: &[String],
     accesses: &[Access],
     const_values: &HashMap<String, i64>,
+    symbol_types: &HashMap<String, Type>,
 ) -> Option<i64> {
     let path_name = path.join("::");
     let mut full_name = path_name.clone();
@@ -2049,7 +2086,7 @@ fn resolve_selector(
             full_name.push_str(name);
         }
     }
-    let offset = selector_offset(accesses, const_values);
+    let offset = selector_offset(accesses, const_values, symbol_types);
     let value = const_values.get(&full_name).or_else(|| {
         if full_name != path_name {
             const_values.get(&path_name)
@@ -2061,13 +2098,17 @@ fn resolve_selector(
 }
 
 /// Evaluate an expression to a constant value, using the const value table.
-fn eval_expr(expr: &Expr, const_values: &HashMap<String, i64>) -> Option<i64> {
+fn eval_expr(
+    expr: &Expr,
+    const_values: &HashMap<String, i64>,
+    symbol_types: &HashMap<String, Type>,
+) -> Option<i64> {
     match expr {
         Expr::Number { value } => Some(*value),
         Expr::Boolean { value } => Some(if *value { 1 } else { 0 }),
         Expr::Ident { name } => const_values.get(name).copied(),
         Expr::UnaryOp { op, operand } => {
-            let v = eval_expr(operand, const_values)?;
+            let v = eval_expr(operand, const_values, symbol_types)?;
             Some(match op {
                 op_common::ast::UnaryOp::Neg => -v,
                 op_common::ast::UnaryOp::Pos => v,
@@ -2082,8 +2123,8 @@ fn eval_expr(expr: &Expr, const_values: &HashMap<String, i64>) -> Option<i64> {
             })
         }
         Expr::BinOp { op, left, right } => {
-            let l = eval_expr(left, const_values)?;
-            let r = eval_expr(right, const_values)?;
+            let l = eval_expr(left, const_values, symbol_types)?;
+            let r = eval_expr(right, const_values, symbol_types)?;
             Some(match op {
                 op_common::ast::BinaryOp::Or => l | r,
                 op_common::ast::BinaryOp::Xor => l ^ r,
@@ -2108,20 +2149,47 @@ fn eval_expr(expr: &Expr, const_values: &HashMap<String, i64>) -> Option<i64> {
                 _ => return None,
             })
         }
-        Expr::MacroCall { name, arg } => {
-            let v = eval_expr(arg, const_values)?;
-            Some(match name.as_str() {
-                "lo" => v & 0xFF,
-                "hi" => (v >> 8) & 0xFF,
-                "nylo" => v & 0x0F,
-                "nyhi" => (v >> 4) & 0x0F,
-                _ => return None,
-            })
-        }
-        Expr::ParenExpr { inner } => eval_expr(inner, const_values),
+        Expr::MacroCall { name, arg } => match name.as_str() {
+            "lo" | "hi" | "nylo" | "nyhi" => {
+                let v = eval_expr(arg, const_values, symbol_types)?;
+                Some(match name.as_str() {
+                    "lo" => v & 0xFF,
+                    "hi" => (v >> 8) & 0xFF,
+                    "nylo" => v & 0x0F,
+                    "nyhi" => (v >> 4) & 0x0F,
+                    _ => return None,
+                })
+            }
+            "len" => {
+                if let Expr::Ident { name: sym } = arg.as_ref() {
+                    if let Some(Type::Array {
+                        size: Some(size_expr),
+                        ..
+                    }) = symbol_types.get(sym)
+                    {
+                        eval_expr(size_expr, const_values, symbol_types)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            "sizeof" => {
+                if let Expr::Ident { name: sym } = arg.as_ref() {
+                    symbol_types.get(sym).map(|ty| type_size(ty) as i64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        Expr::ParenExpr { inner } => eval_expr(inner, const_values, symbol_types),
         // Selector like PPU::CNT0 — resolve against the const table so
         // that memory and immediate operands can use the value directly.
-        Expr::Selector { path, accesses } => resolve_selector(path, accesses, const_values),
+        Expr::Selector { path, accesses } => {
+            resolve_selector(path, accesses, const_values, symbol_types)
+        }
         _ => None,
     }
 }
@@ -2392,6 +2460,7 @@ mod tests {
             current_section: None,
             inline_fns: HashMap::new(),
             const_values: HashMap::new(),
+            symbol_types: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),
             enum_variants: HashMap::new(),
@@ -2781,6 +2850,43 @@ mod tests {
             .diags
             .iter()
             .any(|d| { d.severity == op_diagnostics::Severity::Error && d.code == 305 }));
+    }
+
+    /// `len!(HELLO)` resolves to the element count of the array type.
+    #[test]
+    fn len_macro_resolves_array_element_count() {
+        let (codegen, _) = walk_parsed_source(
+            "fn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
+             const HELLO: [u8; 11] = \"Hello, NES!\";\n",
+        );
+        assert_eq!(codegen.sections[0].data, vec![0xA9, 0x0B, 0x60]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// `sizeof!(ptr)` resolves to the byte size of the pointer type.
+    #[test]
+    fn sizeof_macro_resolves_type_size() {
+        let (codegen, _) = walk_parsed_source(
+            "fn main() {\n    lda #sizeof!(ptr)\n    rts\n}\n\
+             ptr: pointer;\n",
+        );
+        assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x02, 0x60]);
+        assert!(codegen.sections[0].relocations.is_empty());
+    }
+
+    /// `len!` on a non-array type is not a constant; the codegen emits
+    /// error 305.
+    #[test]
+    fn len_macro_on_non_array_emits_error() {
+        let (codegen, _) = walk_parsed_source(
+            "fn main() {\n    lda #len!(scalar)\n    rts\n}\n\
+             scalar: u8;\n",
+        );
+        assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x00, 0x60]);
+        assert!(codegen
+            .diags
+            .iter()
+            .any(|d| d.severity == op_diagnostics::Severity::Error && d.code == 305));
     }
 
     /// Expand an inline fn with two parameters and check the emitted
