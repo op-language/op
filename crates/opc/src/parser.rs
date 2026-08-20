@@ -1171,7 +1171,12 @@ impl Parser {
     }
 
     fn parse_asm_stmt(&mut self) -> FnStmt {
-        let opcode = self.advance().map(|t| t.value).unwrap_or_default();
+        let opcode_tok = self.advance();
+        let opcode = opcode_tok
+            .as_ref()
+            .map(|t| t.value.clone())
+            .unwrap_or_default();
+        let opcode_line = opcode_tok.map(|t| t.line).unwrap_or(0);
         let mut operands = Vec::new();
         while !self.at_eof() {
             let kind = self.peek_kind();
@@ -1183,6 +1188,16 @@ impl Parser {
                 || kind == "OPCODE"
             {
                 break;
+            }
+            // Stop when the next token starts on a later line than the
+            // opcode. The lexer discards newlines, so a line break is the
+            // statement boundary for assembly instructions. This prevents
+            // a function call on the next line from being consumed as a
+            // second operand of the opcode on this line.
+            if let Some(tok) = self.peek() {
+                if tok.line > opcode_line {
+                    break;
+                }
             }
             if let Some(operand) = self.parse_operand() {
                 operands.push(operand);

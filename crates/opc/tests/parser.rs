@@ -458,6 +458,65 @@ fn parse_asm_label_ref() {
     }
 }
 
+#[test]
+fn parse_asm_stmt_stops_at_line_break() {
+    // An assembly instruction on one line must not consume a function call
+    // on the next line as a second operand. The function call must become a
+    // separate FnStmt::FnCall statement. This is the regression test for the
+    // wait_for_func bug: before the fix, the parser folded wait_for_func()
+    // into ldx's operands because the lexer discards newlines.
+    let src = "inline fn wait_for(amount) { ldx amount\nwait_for_func() }\ninline fn wait_for_func() { dex }";
+    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    // Find the wait_for inline fn.
+    let inline = ast
+        .root
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::InlineFnDecl { name, body, .. } if name == "wait_for" => Some(body),
+            _ => None,
+        })
+        .expect("wait_for inline fn must exist");
+    // The body must have two statements, not one.
+    assert_eq!(
+        inline.len(),
+        2,
+        "expected 2 statements in wait_for body, got {}: {:?}",
+        inline.len(),
+        inline,
+    );
+    // First statement: AsmStmt with opcode "ldx" and one operand.
+    assert!(
+        matches!(&inline[0], FnStmt::AsmStmt { opcode, operands } if opcode == "ldx" && operands.len() == 1),
+        "first statement must be AsmStmt ldx with 1 operand, got {:?}",
+        inline[0],
+    );
+    // Second statement: FnCall to wait_for_func.
+    assert!(
+        matches!(&inline[1], FnStmt::FnCall { name, args } if name == "wait_for_func" && args.is_empty()),
+        "second statement must be FnCall wait_for_func, got {:?}",
+        inline[1],
+    );
+}
+
+#[test]
+fn parse_asm_stmt_same_line_operands() {
+    // Multiple operands on the same line must still be consumed by the
+    // assembly instruction. This confirms the line-break fix does not break
+    // multi-operand instructions on one line.
+    let item = parse_one("fn test() { sta 0x2000 0x1234 }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::AsmStmt { opcode, operands } => {
+                assert_eq!(opcode, "sta");
+                assert_eq!(operands.len(), 2, "same-line operands must be consumed");
+            }
+            _ => panic!("expected AsmStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
 // === Function body: control flow ===========================================
 
 #[test]

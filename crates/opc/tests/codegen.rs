@@ -420,8 +420,8 @@ fn optimizer_skips_chr_sections() {
     // not decode the bytes as 6502 instructions or apply transforms.
     // The byte sequence below contains patterns that the optimizer would
     // drop if it ran on the section (pha/pla = 0x48/0x68, redundant loads).
-    use opc::optimizer::optimize;
     use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
     let chr_bytes: Vec<u8> = vec![
         0xA9, 0x00, 0xA9, 0x00, // redundant lda #0, lda #0
         0x48, 0x68, // pha, pla (push-pop pair)
@@ -453,8 +453,8 @@ fn optimizer_skips_chr_sections() {
 fn optimizer_skips_ram_sections() {
     // RAM sections hold variable data and initialization bytes, not code.
     // The optimizer must not run on them.
-    use opc::optimizer::optimize;
     use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
     let ram_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00, 0x48, 0x68, 0xEA, 0xEA];
     let mut sections = vec![Section {
         name: "ram_bank0".to_string(),
