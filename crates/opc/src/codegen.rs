@@ -169,6 +169,7 @@ fn build_codegen(
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf(),
+        placed_items: std::collections::HashSet::new(),
         diags: Vec::new(),
     }
 }
@@ -245,6 +246,12 @@ impl ModuleCache {
 
 // --- Inline functions -------------------------------------------------------
 
+/// A placement root identified during the placement pass.
+struct PlacementRoot {
+    name: String,
+    section_idx: Option<usize>,
+}
+
 /// A function stored for call-site expansion or subroutine linkage.
 /// `is_inline` is true for `inline fn` declarations (and for std inline
 /// fns imported via `use`); their bodies are substituted at each call
@@ -299,6 +306,10 @@ struct Codegen {
     /// Directory of the root source file. Used to resolve
     /// `locate_bytes!` and `locate_str!` paths.
     source_dir: std::path::PathBuf,
+    /// Names of top-level fns, consts, and vars that the placement pass
+    /// has already placed into a section. The compile walk skips these
+    /// to avoid double emission.
+    placed_items: std::collections::HashSet<String>,
     diags: Vec<Diagnostic>,
 }
 
@@ -310,6 +321,14 @@ impl Codegen {
         // fn bodies can reference them regardless of the order the
         // items appear in the file.
         self.collect_module_items(&module.items);
+        // Create sections from block attributes before placement so
+        // the placer can append fn bodies and data into them.
+        self.create_sections(&module.items);
+        // Place reachable fns and top-level data into sections, then
+        // emit dead-code warnings for unreachable items.
+        self.placement_pass(&module.items);
+        // Walk items for codegen (section blocks, locate_bytes!, etc.).
+        // Top-level fns/consts/vars placed by the placer are skipped.
         for item in &module.items {
             self.walk_item(item);
         }
@@ -379,8 +398,649 @@ impl Codegen {
             Item::BlockAttribute { items, .. } => {
                 self.collect_module_items(items);
             }
+            Item::FnDecl { name, body, .. } => {
+                self.inline_fns.insert(
+                    name.clone(),
+                    InlineFn {
+                        params: Vec::new(),
+                        body: body.clone(),
+                        is_inline: false,
+                    },
+                );
+            }
+            Item::InlineFnDecl {
+                name, params, body, ..
+            } => {
+                self.inline_fns.insert(
+                    name.clone(),
+                    InlineFn {
+                        params: params.clone(),
+                        body: body.clone(),
+                        is_inline: true,
+                    },
+                );
+            }
             _ => {}
         }
+    }
+
+    /// Create sections from `#[rom]`, `#[ram]`, and `#[chr]` block
+    /// attributes without walking their items. This runs before the
+    /// placement pass so the placer can append fn bodies and data into
+    /// the already-created sections.
+    fn create_sections(&mut self, items: &[Item]) {
+        for item in items {
+            if let Item::BlockAttribute { attr, .. } = item {
+                self.create_section_from_attr(attr);
+            }
+        }
+    }
+
+    /// Create a single section from a block attribute (rom/ram/chr).
+    fn create_section_from_attr(&mut self, attr: &Attribute) {
+        let kind = match attr.path.as_str() {
+            "rom" => SectionKind::Rom,
+            "ram" => SectionKind::Ram,
+            "chr" => SectionKind::Chr,
+            _ => return,
+        };
+        let org = get_attr_u32(attr, "org").unwrap_or(0);
+        let bank = get_attr_u32(attr, "bank").unwrap_or(0);
+        let maxsize = get_attr_u32(attr, "maxsize").unwrap_or(0);
+        let name = format!(
+            "{}_bank{}",
+            match kind {
+                SectionKind::Rom => "rom",
+                SectionKind::Ram => "ram",
+                SectionKind::Chr => "chr",
+            },
+            bank
+        );
+        // Don't create duplicate sections (handle_block_attribute may
+        // also try to create one during the walk).
+        if self.sections.iter().any(|s| s.name == name) {
+            return;
+        }
+        self.sections.push(Section {
+            name,
+            kind,
+            org,
+            bank,
+            maxsize,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: Vec::new(),
+        });
+    }
+
+    /// Placement pass: gather roots, build a dependency tree, place
+    /// reachable fns and top-level data into sections, and emit
+    /// dead-code warnings. Runs after `collect_module_items` and
+    /// `create_sections`, before the compile walk.
+    fn placement_pass(&mut self, items: &[Item]) {
+        // If there are no sections, the placement pass is a no-op
+        // (the source has no rom/ram/chr blocks).
+        if self.sections.is_empty() {
+            return;
+        }
+
+        // Gather roots in declaration order.
+        let roots = self.gather_roots(items);
+
+        // If there are no roots, skip placement and dead-code warnings.
+        if roots.is_empty() {
+            return;
+        }
+
+        // Build a set of all top-level fn names (non-inline) and
+        // inline fn names for dead-code checking.
+        let mut all_non_inline_fns: Vec<String> = Vec::new();
+        let mut all_inline_fns: Vec<String> = Vec::new();
+        let mut all_consts: Vec<String> = Vec::new();
+        let mut all_vars: Vec<String> = Vec::new();
+        let mut all_enums: Vec<String> = Vec::new();
+        for item in items {
+            match item {
+                Item::FnDecl { name, .. } => all_non_inline_fns.push(name.clone()),
+                Item::InlineFnDecl { name, .. } => all_inline_fns.push(name.clone()),
+                Item::ConstDecl { name, .. } => all_consts.push(name.clone()),
+                Item::VarDecl { name, .. } => all_vars.push(name.clone()),
+                Item::EnumDecl { name, .. } => all_enums.push(name.clone()),
+                _ => {}
+            }
+        }
+
+        // Track which items have been placed/referenced.
+        let mut placed_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut called_inline_fns: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut referenced_data: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut referenced_enums: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // Find the first ROM section index (for unpinned interrupt roots).
+        let first_rom = self
+            .sections
+            .iter()
+            .position(|s| s.kind == SectionKind::Rom);
+        // Find the first RAM section index (for top-level vars).
+        let first_ram = self
+            .sections
+            .iter()
+            .position(|s| s.kind == SectionKind::Ram);
+
+        // DFS placement from each root.
+        for root in &roots {
+            let section_idx = root.section_idx.or(first_rom);
+            if let Some(idx) = section_idx {
+                self.place_fn_tree(
+                    &root.name,
+                    idx,
+                    &mut placed_fns,
+                    &mut called_inline_fns,
+                    &mut referenced_data,
+                    &mut referenced_enums,
+                );
+            }
+        }
+
+        // Place top-level vars in the first RAM section (never duplicated).
+        if let Some(ram_idx) = first_ram {
+            for item in items {
+                if let Item::VarDecl {
+                    name,
+                    ty,
+                    addr_binding,
+                    init,
+                    ..
+                } = item
+                {
+                    if !self.placed_items.contains(name) {
+                        self.current_section = Some(ram_idx);
+                        self.alloc_variable(name, ty, addr_binding, init);
+                        self.current_section = None;
+                        self.placed_items.insert(name.clone());
+                    }
+                }
+            }
+        }
+
+        // Place top-level consts that were referenced by live code.
+        // Process in first-reference order (which is the order they
+        // appear in referenced_data, built during DFS).
+        for item in items {
+            if let Item::ConstDecl {
+                name,
+                ty,
+                value,
+                evaluated_value,
+                ..
+            } = item
+            {
+                if referenced_data.contains(name) && !self.placed_items.contains(name) {
+                    if let Some(rom_idx) = first_rom {
+                        self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                        self.placed_items.insert(name.clone());
+                    }
+                }
+            }
+        }
+
+        // Dead-code warnings.
+        for name in &all_non_inline_fns {
+            if !placed_fns.contains(name) {
+                self.warning(
+                    306,
+                    format!("function `{name}` is never called from any root; dead code"),
+                );
+            }
+        }
+        for name in &all_inline_fns {
+            if !called_inline_fns.contains(name) {
+                self.warning(
+                    306,
+                    format!("inline function `{name}` is never called; dead code"),
+                );
+            }
+        }
+        for name in &all_consts {
+            if !referenced_data.contains(name) {
+                self.warning(
+                    306,
+                    format!("constant `{name}` is never referenced; dead code"),
+                );
+            }
+        }
+        for name in &all_vars {
+            if !referenced_data.contains(name) {
+                self.warning(
+                    306,
+                    format!("variable `{name}` is never referenced; dead code"),
+                );
+            }
+        }
+        for name in &all_enums {
+            if !referenced_enums.contains(name) {
+                self.warning(
+                    306,
+                    format!("enum `{name}` has no variant referenced; dead code"),
+                );
+            }
+        }
+    }
+
+    /// Gather placement roots from top-level items in declaration order.
+    #[allow(clippy::collapsible_if, clippy::collapsible_match)]
+    fn gather_roots(&self, items: &[Item]) -> Vec<PlacementRoot> {
+        let mut roots = Vec::new();
+        let first_rom = self
+            .sections
+            .iter()
+            .position(|s| s.kind == SectionKind::Rom);
+
+        for item in items {
+            match item {
+                Item::FnDecl {
+                    name, attributes, ..
+                } => {
+                    // #[interrupt] on a fn definition makes it a root.
+                    let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
+                    if has_interrupt {
+                        roots.push(PlacementRoot {
+                            name: name.clone(),
+                            section_idx: first_rom,
+                        });
+                    }
+                }
+                Item::BlockAttribute {
+                    attr,
+                    items: block_items,
+                } => {
+                    if attr.path == "rom" {
+                        let section_idx = self.sections.iter().position(|s| {
+                            s.kind == SectionKind::Rom
+                                && s.bank == get_attr_u32(attr, "bank").unwrap_or(0)
+                        });
+                        for block_item in block_items {
+                            match block_item {
+                                Item::FnDecl {
+                                    name, attributes, ..
+                                } => {
+                                    // In-block fn is a root (placed at its position in the block).
+                                    let has_interrupt =
+                                        attributes.iter().any(|a| a.path == "interrupt");
+                                    if has_interrupt || true {
+                                        roots.push(PlacementRoot {
+                                            name: name.clone(),
+                                            section_idx,
+                                        });
+                                    }
+                                }
+                                Item::Placement {
+                                    macro_name,
+                                    argument,
+                                    ..
+                                } if macro_name == "locate_fn" => {
+                                    if let PlacementArg::Path { segments } = argument {
+                                        if let Some(fn_name) = segments.last() {
+                                            roots.push(PlacementRoot {
+                                                name: fn_name.clone(),
+                                                section_idx,
+                                            });
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        roots
+    }
+
+    /// Place a fn and its transitive callees into a section using DFS.
+    fn place_fn_tree(
+        &mut self,
+        fn_name: &str,
+        section_idx: usize,
+        placed_fns: &mut std::collections::HashSet<String>,
+        called_inline_fns: &mut std::collections::HashSet<String>,
+        referenced_data: &mut std::collections::HashSet<String>,
+        referenced_enums: &mut std::collections::HashSet<String>,
+    ) {
+        if placed_fns.contains(fn_name) {
+            return;
+        }
+        placed_fns.insert(fn_name.to_string());
+
+        // Get the fn body from inline_fns (where FnDecl stores it).
+        let inline_fn = match self.inline_fns.get(fn_name).cloned() {
+            Some(f) => f,
+            None => return,
+        };
+
+        // Walk the body to find callees and data references before
+        // compiling (so we can place callees first, then compile this
+        // fn which will emit jsr relocations that resolve).
+        let (callees, data_refs, enum_refs, inline_calls) =
+            self.analyze_body(&inline_fn.body, &inline_fn.params, &inline_fn.is_inline);
+
+        // Record inline fn calls for dead-code detection.
+        for name in &inline_calls {
+            called_inline_fns.insert(name.clone());
+        }
+        // Record data references.
+        for name in &data_refs {
+            referenced_data.insert(name.clone());
+        }
+        // Record enum references.
+        for name in &enum_refs {
+            referenced_enums.insert(name.clone());
+        }
+
+        // Compile this fn into the section first (roots appear before
+        // their callees in the block).
+        self.current_section = Some(section_idx);
+        self.compile_fn(fn_name, &inline_fn.body, false);
+        self.current_section = None;
+        self.placed_items.insert(fn_name.to_string());
+
+        // Then place callees (DFS, first-call order).
+        for callee in &callees {
+            if !placed_fns.contains(callee) {
+                self.place_fn_tree(
+                    callee,
+                    section_idx,
+                    placed_fns,
+                    called_inline_fns,
+                    referenced_data,
+                    referenced_enums,
+                );
+            }
+        }
+    }
+
+    /// Analyze a fn body to find callees, data references, enum
+    /// references, and inline fn calls. Expands inline fn bodies to
+    /// find transitive references.
+    fn analyze_body(
+        &self,
+        body: &[FnStmt],
+        params: &[String],
+        is_inline: &bool,
+    ) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+        let _ = is_inline;
+        let mut callees = Vec::new();
+        let mut data_refs = Vec::new();
+        let mut enum_refs = Vec::new();
+        let mut inline_calls = Vec::new();
+        self.analyze_stmts(
+            body,
+            params,
+            &mut callees,
+            &mut data_refs,
+            &mut enum_refs,
+            &mut inline_calls,
+        );
+        (callees, data_refs, enum_refs, inline_calls)
+    }
+
+    /// Recursively walk statements to find references.
+    fn analyze_stmts(
+        &self,
+        stmts: &[FnStmt],
+        params: &[String],
+        callees: &mut Vec<String>,
+        data_refs: &mut Vec<String>,
+        enum_refs: &mut Vec<String>,
+        inline_calls: &mut Vec<String>,
+    ) {
+        for stmt in stmts {
+            self.analyze_stmt(stmt, params, callees, data_refs, enum_refs, inline_calls);
+        }
+    }
+
+    fn analyze_stmt(
+        &self,
+        stmt: &FnStmt,
+        params: &[String],
+        callees: &mut Vec<String>,
+        data_refs: &mut Vec<String>,
+        enum_refs: &mut Vec<String>,
+        inline_calls: &mut Vec<String>,
+    ) {
+        match stmt {
+            FnStmt::AsmStmt { operands, .. } => {
+                for operand in operands {
+                    self.analyze_operand(operand, data_refs, enum_refs);
+                }
+            }
+            FnStmt::FnCall { name, args } => {
+                // Check if this is an inline or non-inline fn.
+                if let Some(inline_fn) = self.inline_fns.get(name) {
+                    if inline_fn.is_inline {
+                        inline_calls.push(name.clone());
+                        // Expand: analyze the inline fn's body with
+                        // substituted params.
+                        let substituted =
+                            self.substitute_params(&inline_fn.body, &inline_fn.params, args);
+                        self.analyze_stmts(
+                            &substituted,
+                            &inline_fn.params,
+                            callees,
+                            data_refs,
+                            enum_refs,
+                            inline_calls,
+                        );
+                    } else {
+                        // Non-inline fn call → callee edge.
+                        if !callees.contains(name) {
+                            callees.push(name.clone());
+                        }
+                    }
+                } else {
+                    // Unknown fn (stdlib or external) — not a callee for placement.
+                }
+                // Analyze args for data refs.
+                for arg in args {
+                    self.analyze_expr(arg, data_refs, enum_refs);
+                }
+            }
+            FnStmt::Label { stmt, .. } => {
+                self.analyze_stmt(stmt, params, callees, data_refs, enum_refs, inline_calls);
+            }
+            FnStmt::IfStmt {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.analyze_stmts(
+                    then_block,
+                    params,
+                    callees,
+                    data_refs,
+                    enum_refs,
+                    inline_calls,
+                );
+                if let Some(else_stmts) = else_block {
+                    self.analyze_stmts(
+                        else_stmts,
+                        params,
+                        callees,
+                        data_refs,
+                        enum_refs,
+                        inline_calls,
+                    );
+                }
+            }
+            FnStmt::WhileStmt { body, .. }
+            | FnStmt::DoWhileStmt { body, .. }
+            | FnStmt::LoopStmt { body } => {
+                self.analyze_stmts(body, params, callees, data_refs, enum_refs, inline_calls);
+            }
+            FnStmt::SwitchStmt { cases, .. } => {
+                for case in cases {
+                    let (SwitchCase::Case { body, .. } | SwitchCase::Default { body }) = case;
+                    self.analyze_stmts(body, params, callees, data_refs, enum_refs, inline_calls);
+                }
+            }
+            FnStmt::ReturnStmt | FnStmt::VarDeclStmt { .. } => {}
+        }
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn analyze_operand(
+        &self,
+        operand: &Operand,
+        data_refs: &mut Vec<String>,
+        enum_refs: &mut Vec<String>,
+    ) {
+        match operand {
+            Operand::Immediate { value } => {
+                self.analyze_expr(value, data_refs, enum_refs);
+            }
+            Operand::MemoryOperand { expr, .. } => {
+                self.analyze_expr(expr, data_refs, enum_refs);
+            }
+            Operand::LabelRef { name } => {
+                if self.symbol_types.contains_key(name) && !data_refs.contains(name) {
+                    data_refs.push(name.clone());
+                }
+            }
+            Operand::Selector { path, accesses } => {
+                if let Some(first) = path.first() {
+                    if self.symbol_types.contains_key(first) && !data_refs.contains(first) {
+                        data_refs.push(first.clone());
+                    }
+                    // Enum reference: if first is in enum_variants as "EnumName::*".
+                    // Check if first matches any enum by looking for "first::" prefix in enum_variants.
+                    let prefix = format!("{}::", first);
+                    if self.enum_variants.keys().any(|k| k.starts_with(&prefix)) {
+                        if !enum_refs.contains(first) {
+                            enum_refs.push(first.clone());
+                        }
+                    }
+                }
+                for access in accesses {
+                    if let Access::Offset { value, .. } = access {
+                        self.analyze_expr(value, data_refs, enum_refs);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn analyze_expr(&self, expr: &Expr, data_refs: &mut Vec<String>, enum_refs: &mut Vec<String>) {
+        match expr {
+            Expr::Ident { name } => {
+                if self.symbol_types.contains_key(name) && !data_refs.contains(name) {
+                    data_refs.push(name.clone());
+                }
+                // Check if it's an enum name.
+                let prefix = format!("{}::", name);
+                if self.enum_variants.keys().any(|k| k.starts_with(&prefix)) {
+                    if !enum_refs.contains(name) {
+                        enum_refs.push(name.clone());
+                    }
+                }
+            }
+            Expr::Selector { path, accesses } => {
+                if let Some(first) = path.first() {
+                    let prefix = format!("{}::", first);
+                    if self.enum_variants.keys().any(|k| k.starts_with(&prefix)) {
+                        if !enum_refs.contains(first) {
+                            enum_refs.push(first.clone());
+                        }
+                    }
+                    if self.symbol_types.contains_key(first) && !data_refs.contains(first) {
+                        data_refs.push(first.clone());
+                    }
+                }
+                for access in accesses {
+                    if let Access::Offset { value, .. } = access {
+                        self.analyze_expr(value, data_refs, enum_refs);
+                    }
+                }
+            }
+            Expr::BinOp { left, right, .. } => {
+                self.analyze_expr(left, data_refs, enum_refs);
+                self.analyze_expr(right, data_refs, enum_refs);
+            }
+            Expr::UnaryOp { operand, .. } => {
+                self.analyze_expr(operand, data_refs, enum_refs);
+            }
+            Expr::MacroCall { arg, .. } => {
+                self.analyze_expr(arg, data_refs, enum_refs);
+            }
+            Expr::FnCall { args, .. } => {
+                for arg in args {
+                    self.analyze_expr(arg, data_refs, enum_refs);
+                }
+            }
+            Expr::ParenExpr { inner } => {
+                self.analyze_expr(inner, data_refs, enum_refs);
+            }
+            _ => {}
+        }
+    }
+
+    /// Place a top-level const's data into a section.
+    fn place_const(
+        &mut self,
+        name: &str,
+        ty: &Type,
+        value: &Expr,
+        evaluated_value: Option<i64>,
+        section_idx: usize,
+    ) {
+        // For string consts, emit the string bytes.
+        // For scalar consts, emit the evaluated value bytes.
+        // For other consts, emit based on type size.
+        self.current_section = Some(section_idx);
+        let offset = self.sections[section_idx].data.len() as u32;
+
+        match value {
+            Expr::String_ { value: s } => {
+                let s = s.trim_matches('"');
+                for b in s.bytes() {
+                    self.sections[section_idx].data.push(b);
+                }
+            }
+            _ => {
+                // Scalar or array const: use evaluated value.
+                let val = evaluated_value
+                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                let size = type_size(ty);
+                if let Some(v) = val {
+                    let bytes = val_to_bytes(v, size);
+                    for b in &bytes {
+                        self.sections[section_idx].data.push(*b);
+                    }
+                } else {
+                    // Can't evaluate — emit zero bytes for the type size.
+                    for _ in 0..type_size(ty) {
+                        self.sections[section_idx].data.push(0);
+                    }
+                }
+            }
+        }
+
+        let end_offset = self.sections[section_idx].data.len() as u32;
+        // Record symbol.
+        self.sections[section_idx].symbols.push(Symbol {
+            name: name.to_string(),
+            offset,
+            size: end_offset - offset,
+            kind: SymbolKind::Variable,
+            is_pub: false,
+        });
+        self.current_section = None;
     }
 
     /// Return a clone of the current module path stack. The stack is
@@ -721,6 +1381,9 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
+                if self.placed_items.contains(name) {
+                    return;
+                }
                 if let Some(val) = evaluated_value {
                     self.const_values.insert(name.clone(), *val);
                 }
@@ -732,6 +1395,9 @@ impl Codegen {
                 init,
                 ..
             } => {
+                if self.placed_items.contains(name) {
+                    return;
+                }
                 self.alloc_variable(name, ty, addr_binding, init);
             }
             Item::FnDecl {
@@ -758,15 +1424,19 @@ impl Codegen {
                         }
                     }
                 }
-                // Store the body so `locate_fn!` can place it later.
-                self.inline_fns.insert(
-                    name.clone(),
-                    InlineFn {
-                        params: Vec::new(),
-                        body: body.clone(),
-                        is_inline: false,
-                    },
-                );
+                // Store the body so `locate_fn!` can find it (the
+                // collect pass already does this, but repeat in case
+                // the fn was not seen by collect — e.g. in a nested
+                // walk).
+                self.inline_fns.entry(name.clone()).or_insert(InlineFn {
+                    params: Vec::new(),
+                    body: body.clone(),
+                    is_inline: false,
+                });
+                // Skip compilation if the placer already placed this fn.
+                if self.placed_items.contains(name) {
+                    return;
+                }
                 // When declared inside a section, compile in place.
                 // When declared outside a section, defer to `locate_fn!`.
                 if self.current_section.is_some() {
@@ -776,14 +1446,11 @@ impl Codegen {
             Item::InlineFnDecl {
                 name, params, body, ..
             } => {
-                self.inline_fns.insert(
-                    name.clone(),
-                    InlineFn {
-                        params: params.clone(),
-                        body: body.clone(),
-                        is_inline: true,
-                    },
-                );
+                self.inline_fns.entry(name.clone()).or_insert(InlineFn {
+                    params: params.clone(),
+                    body: body.clone(),
+                    is_inline: true,
+                });
             }
             Item::StructDecl { .. } | Item::TypeDecl { .. } | Item::EnumDecl { .. } => {
                 // No codegen output for type declarations.
@@ -902,9 +1569,7 @@ impl Codegen {
             _ => return,
         };
 
-        let org = get_attr_u32(attr, "org").unwrap_or(0);
         let bank = get_attr_u32(attr, "bank").unwrap_or(0);
-        let maxsize = get_attr_u32(attr, "maxsize").unwrap_or(0);
         let name = format!(
             "{}_bank{}",
             match kind {
@@ -915,19 +1580,27 @@ impl Codegen {
             bank
         );
 
-        let section = Section {
-            name,
-            kind,
-            org,
-            bank,
-            maxsize,
-            symbols: Vec::new(),
-            relocations: Vec::new(),
-            data: Vec::new(),
+        // Find the section if it was already created by create_sections.
+        let section_idx = if let Some(idx) = self.sections.iter().position(|s| s.name == name) {
+            idx
+        } else {
+            // Section doesn't exist yet — create it.
+            let org = get_attr_u32(attr, "org").unwrap_or(0);
+            let maxsize = get_attr_u32(attr, "maxsize").unwrap_or(0);
+            self.sections.push(Section {
+                name,
+                kind,
+                org,
+                bank,
+                maxsize,
+                symbols: Vec::new(),
+                relocations: Vec::new(),
+                data: Vec::new(),
+            });
+            self.sections.len() - 1
         };
 
-        self.sections.push(section);
-        self.current_section = Some(self.sections.len() - 1);
+        self.current_section = Some(section_idx);
 
         for item in items {
             self.walk_item(item);
@@ -961,6 +1634,10 @@ impl Codegen {
                     // Look up the function in the inline_fns map.
                     if !segments.is_empty() {
                         let fn_name = segments.last().unwrap();
+                        // Skip if the placer already placed this fn.
+                        if self.placed_items.contains(fn_name) {
+                            return;
+                        }
                         if let Some(inline_fn) = self.inline_fns.get(fn_name).cloned() {
                             // Record the function symbol at the current
                             // offset, then compile the body inline.
@@ -2493,6 +3170,7 @@ mod tests {
             header: None,
             pad_byte: 0,
             source_dir: std::path::PathBuf::new(),
+            placed_items: std::collections::HashSet::new(),
             diags: Vec::new(),
         }
     }

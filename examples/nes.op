@@ -29,9 +29,10 @@ inline fn wait_for_func() {
     } while (not zero)
 }
 
-inline fn vram_write_string(addr, str) {
+inline fn vram_write_string(addr, str, len) {
     vram_set_address_i(addr)
     assign_16i(pstr, str)
+    assign(counter, len)
     vram_write_string_loop()
 }
 
@@ -61,12 +62,13 @@ fn vram_write_string_loop() {
     ldy 0
     loop {
         lda (pstr), y
+        vram_write_a()
+        iny
+        dec counter
         if (zero) {
             vram_clear_address()
             return
         }
-        vram_write_a()
-        iny
     }
 }
 
@@ -95,7 +97,7 @@ noreturn fn main() {
     system_initialize()
     vram_init()
     turn_video_off()
-    vram_write_string(NAME_TABLE_0_ADDRESS + 0x40, HELLO)
+    vram_write_string(NAME_TABLE_0_ADDRESS + 0x40, HELLO, len!(HELLO))
     vram_clear_address()
     assign(palcol, COLOUR::YELLOW)
     turn_video_on()

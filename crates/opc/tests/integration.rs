@@ -617,3 +617,70 @@ fn full_pipeline_std_nes_rom_bytes() {
     assert_eq!(rom[5], 1, "one 8 KB CHR bank");
     assert_eq!(rom[6] & 0x0F, 0, "mapper zero");
 }
+
+#[test]
+fn full_pipeline_std_nes_game() {
+    let Some(std_root) = std_root() else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+
+    let source = include_str!("../../../examples/nes.op");
+    let font = include_bytes!("../../../examples/font.chr");
+
+    // Write the source and font into a temp dir so locate_bytes! can
+    // find font.chr regardless of the test's working directory.
+    let dir = std::env::temp_dir().join(format!("opc-int-nes-game-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nes.op"), source).unwrap();
+    std::fs::write(dir.join("font.chr"), font).unwrap();
+    let src_path = dir.join("nes.op");
+
+    let (ast, parse_diags) = parse_source(
+        src_path.to_str().unwrap(),
+        source,
+        "mos6502-nintendo-nes-ntsc",
+        &[],
+    );
+    let errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {:?}", errors);
+
+    let (obj, codegen_diags) =
+        compile_source(&ast, 0, &[std_root.to_string_lossy().into_owned()], &[]);
+    let errors: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors: {:?}", errors);
+
+    // The four unreferenced vars (paddr, msgbuf, scroll, oam) should
+    // produce dead-data warnings.
+    let dead_data = codegen_diags
+        .iter()
+        .filter(|d| d.code == 306)
+        .filter(|d| {
+            d.message.contains("paddr")
+                || d.message.contains("msgbuf")
+                || d.message.contains("scroll")
+                || d.message.contains("oam")
+        })
+        .count();
+    assert_eq!(dead_data, 4, "expected 4 dead-data warnings");
+
+    let (linked, link_diags) = link_source(&obj);
+    let errors: Vec<_> = link_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "linker errors: {:?}", errors);
+
+    let format = default_format_for_target("mos6502-nintendo-nes-ntsc");
+    let bytes = emit_linked(&linked, format).expect("emit_linked failed");
+    assert!(
+        bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
+        "iNES output should start with NES magic"
+    );
+}
