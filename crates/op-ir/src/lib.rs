@@ -16,6 +16,19 @@ pub struct ObjectFile {
     pub version: u32,
     pub target: String,
     pub sections: Vec<Section>,
+    /// Interrupt vector entries recorded by the codegen for the linker.
+    #[serde(default)]
+    pub interrupt_vectors: Vec<InterruptVector>,
+    /// Header fields from #[ines(...)] or #[lnx(...)] attributes.
+    #[serde(default)]
+    pub header: Option<HeaderFields>,
+    /// The padding byte from #[setpad(value)] or 0x00.
+    #[serde(default = "default_pad_byte")]
+    pub pad_byte: u8,
+}
+
+fn default_pad_byte() -> u8 {
+    0x00
 }
 
 impl ObjectFile {
@@ -24,6 +37,9 @@ impl ObjectFile {
             version: 1,
             target: target.into(),
             sections: Vec::new(),
+            interrupt_vectors: Vec::new(),
+            header: None,
+            pad_byte: 0x00,
         }
     }
 }
@@ -82,6 +98,9 @@ pub struct Relocation {
     pub offset: u32,
     pub kind: RelocKind,
     pub symbol: String,
+    /// A constant added to the symbol's address when patching.
+    #[serde(default)]
+    pub addend: i64,
 }
 
 /// The relocation kinds defined in the technical design.
@@ -97,4 +116,33 @@ pub enum RelocKind {
     Lo8,
     Hi8,
     Bank,
+}
+
+// --- Interrupt vectors and header metadata ----------------------------------
+
+/// An interrupt vector entry recorded by the codegen.
+///
+/// The linker writes the target function address into the vector table
+/// at the specified address. For the 6502, the vector addresses are
+/// `reset` at `0xFFFC`, `nmi` at `0xFFFA`, and `irq` at `0xFFFE`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptVector {
+    /// The interrupt name: "reset", "nmi", or "irq".
+    pub name: String,
+    /// The vector table address where the linker writes the 2-byte target.
+    pub address: u32,
+    /// The symbol name of the target function.
+    pub target: String,
+}
+
+/// Header fields from `#[ines(...)]` or `#[lnx(...)]` attributes.
+///
+/// The file output stage reads these fields to write the output file
+/// header (iNES, .lnx, or other format).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderFields {
+    /// The format name: "ines", "lnx", "sega", "snes", "gb", "sms", "a78".
+    pub format: String,
+    /// The key-value pairs from the attribute arguments.
+    pub fields: Vec<(String, String)>,
 }

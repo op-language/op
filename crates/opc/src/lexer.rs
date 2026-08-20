@@ -121,6 +121,7 @@ const COMPILE_MACROS: &[(&str, TokenType)] = &[
     ("hi", TokenType::Macro_hi),
     ("nylo", TokenType::Macro_nylo),
     ("nyhi", TokenType::Macro_nyhi),
+    ("len", TokenType::Macro_len),
     ("sizeof", TokenType::Macro_sizeof),
 ];
 
@@ -302,15 +303,15 @@ pub fn lex_source(file: &str, source: &str) -> (TokenStream, Vec<Diagnostic>) {
 
         for (op_text, op_type) in MULTI_CHAR_OPS {
             let op_chars: Vec<char> = op_text.chars().collect();
-            if pos + op_chars.len() <= chars.len() {
-                if chars[pos..pos + op_chars.len()] == op_chars[..] {
-                    push_token(&mut stream, *op_type, op_text, token_line, token_col);
-                    for _ in &op_chars {
-                        advance(&mut pos, &mut col);
-                    }
-                    matched = true;
-                    break;
+            if pos + op_chars.len() <= chars.len()
+                && chars[pos..pos + op_chars.len()] == op_chars[..]
+            {
+                push_token(&mut stream, *op_type, op_text, token_line, token_col);
+                for _ in &op_chars {
+                    advance(&mut pos, &mut col);
                 }
+                matched = true;
+                break;
             }
         }
         if matched {

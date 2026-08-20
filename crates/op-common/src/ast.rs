@@ -17,6 +17,11 @@ use crate::envelope::Envelope;
 pub struct AstFile {
     pub version: u32,
     pub target: String,
+    /// Path of the root source file. Used by the codegen to resolve
+    /// `locate_bytes!` and `locate_str!` paths relative to the source
+    /// directory. Empty when the AST was not parsed from a file.
+    #[serde(default)]
+    pub file: String,
     pub root: Module,
 }
 

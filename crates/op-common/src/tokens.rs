@@ -116,6 +116,7 @@ pub enum TokenType {
     Macro_hi,
     Macro_nylo,
     Macro_nyhi,
+    Macro_len,
     Macro_sizeof,
 
     // --- Include macros -------------------------------------------------
@@ -267,6 +268,7 @@ impl TokenType {
             Self::Macro_hi => "Macro_hi",
             Self::Macro_nylo => "Macro_nylo",
             Self::Macro_nyhi => "Macro_nyhi",
+            Self::Macro_len => "Macro_len",
             Self::Macro_sizeof => "Macro_sizeof",
 
             // Include macros

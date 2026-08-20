@@ -254,6 +254,17 @@ call syntax with the trailing `!`.
 | `nylo!(x)` | Low nibble of a byte |
 | `nyhi!(x)` | High nibble of a byte |
 | `sizeof!(x)` | Byte size of a variable, type, function, or file |
+| `len!(x)` | Element count of an array type |
+
+When `lo!` or `hi!` is applied to a symbol name (a constant, variable, or
+function), the compiler emits a `Lo8` or `Hi8` relocation against that
+symbol. The linker patches the byte with the low or high byte of the
+symbol's resolved address. This lets code load the address of a symbol in
+two bytes: `lda #lo!(HELLO)` loads the low byte, `lda #hi!(HELLO)` loads
+the high byte.
+
+An immediate or address operand that is neither a compile-time constant nor
+a symbol produces a compile error.
 
 ## Type system
 
@@ -623,6 +634,16 @@ import. Write `use path::to::{a, b::{c, d}};` to nest group import. Write
 Write `pub use path::to::item;` to re-export an item. A re-exported item is
 visible to modules that `use` the current module. A `use` declaration may
 import multiple paths. Write `use a, b, c;`.
+
+The compiler resolves `use` declarations at compile time. When the compiler
+encounters `use std::cpu::*;`, it searches for the std crate root in the
+following order: the directories passed with `--include` (or `-I`), the
+`OP_STD_PATH` environment variable, and the default location
+`~/.carts/std/src`. The first directory that contains a `lib.op` file is the
+std crate root. The compiler parses the imported modules, evaluates
+constants and enum variants, and makes inline functions available for
+call-site expansion. A `use` declaration that names a module the compiler
+cannot find produces a compile error.
 
 ```
 use nes::ppu;
@@ -1047,6 +1068,44 @@ call maps the function to an interrupt vector.
 The `locate_fn!` macro lets the game file act as a declarative layout script.
 The game file places functions, data, and binary blobs into ROM, RAM, and CHR
 regions without containing the function bodies themselves.
+
+### Automatic function and data placement
+
+When a source file does not use `locate_fn!` to pin every function, the
+compiler automatically places functions and data into the appropriate
+sections. The compiler builds a dependency tree from the following roots,
+in declaration order:
+
+1. A non-inline `fn` with an `#[interrupt(name)]` attribute on its
+   definition. The compiler places the fn in the first `#[rom]` block.
+2. A `fn` declared directly inside a `#[rom]` block. The compiler places
+   the fn at its position in the block.
+3. A `fn` pinned by a `locate_fn!` placement inside a `#[rom]` block.
+
+The compiler walks each root's body, expanding inline functions, and
+records edges to called non-inline functions and referenced top-level
+constants and variables. It traverses the tree depth-first and places
+each reachable non-inline fn in the block of the first fn that references
+it. A call to a non-inline fn emits a `jsr` instruction with a relocation
+that the linker resolves to the placed fn's address.
+
+The compiler places every top-level `const` that live code references into
+the ROM block of the first fn that references it. The const's data bytes
+and a symbol record are appended to the block. A scalar const emits its
+value bytes. An array const emits its element bytes.
+
+The compiler places every top-level variable (`var` declaration) into the
+first `#[ram]` block in file order. The compiler never duplicates RAM
+variables across banks.
+
+If a fn or const is referenced from `#[rom]` blocks in different banks, the
+compiler places a copy in each bank. Each bank's call sites and data
+references target the copy in their own bank.
+
+The compiler emits a dead-code warning for each main-module item that no
+root reaches: an unreachable non-inline fn, an unused inline fn, an
+unreferenced top-level const or var, and a top-level enum with no variant
+referenced. The compiler does not warn about std imports.
 
 ## Expressions and constant evaluation
 

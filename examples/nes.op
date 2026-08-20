@@ -1,0 +1,164 @@
+//! NES Demo Game
+//!
+//! This file demonstrates the Op language as specified in
+//! docs/language-specification.md. It targets the NTSC NES
+//! (mos6502-nintendo-nes-ntsc).
+//!
+//! Build with:
+//!   opc --target mos6502-nintendo-nes-ntsc --format ines -o nes.nes nes-game.op
+//!
+//! This example uses the `std` lib. The `std::cpu` module provides
+//! CPU register references, opcodes, and condition keywords. The
+//! `std::machine` module provides the NES platform constants, types,
+//! and inline macros.
+
+use std::cpu::*;
+use std::machine::*;
+
+// --- inline macros ---------------------------------------------------------
+
+inline fn wait_for(amount) {
+    ldx amount
+    wait_for_func()
+}
+
+inline fn wait_for_func() {
+    do {
+        vblank_wait_full()
+        dex
+    } while (not zero)
+}
+
+inline fn vram_write_string(addr, str, len) {
+    vram_set_address_i(addr)
+    assign_16i(pstr, str)
+    assign(counter, len)
+    vram_write_string_loop()
+}
+
+// --- functions -------------------------------------------------------------
+
+fn vram_init() {
+    vram_set_address_i(PAL_ADDRESS)
+    vram_write(0x30)
+    vram_write(0x21)
+    vram_write(0x22)
+    vram_write(0x0F)
+
+    vram_set_address_i(NAME_TABLE_0_ADDRESS)
+    lda 0
+    ldy 8
+    do {
+        ldx 128
+        do {
+            vram_write_a()
+            dex
+        } while (not zero)
+        dey
+    } while (not zero)
+}
+
+fn vram_write_string_loop() {
+    ldy 0
+    loop {
+        lda (pstr), y
+        vram_write_a()
+        iny
+        dec counter
+        if (zero) {
+            vram_clear_address()
+            return
+        }
+    }
+}
+
+fn pal_animate() {
+    vram_set_address_i(PAL_ADDRESS)
+    lda palcol
+    clc
+    adc 0x10
+    sta palcol
+    and 0x40
+    php
+    lda palcol
+    plp
+    if (set) {
+        eor 0x30
+    }
+    and 0x3F
+    vram_write_a()
+    vram_clear_address()
+}
+
+// --- the main entry point --------------------------------------------------
+
+#[interrupt(reset)]
+noreturn fn main() {
+    system_initialize()
+    vram_init()
+    turn_video_off()
+    vram_write_string(NAME_TABLE_0_ADDRESS + 0x40, HELLO, len!(HELLO))
+    vram_clear_address()
+    assign(palcol, COLOUR::YELLOW)
+    turn_video_on()
+
+    loop {
+        wait_for(6)
+        pal_animate()
+    }
+}
+
+// --- the nmi handler -------------------------------------------------------
+
+#[interrupt(nmi)]
+fn nmi() {
+}
+
+// --- the irq handler -------------------------------------------------------
+#[interrupt(irq)]
+fn irq() {
+}
+
+// --- string data -----------------------------------------------------------
+
+const HELLO: [u8; 11] = "Hello, NES!";
+
+// --- global vars -----------------------------------------------------------
+
+counter: u8;
+palcol: u8;
+paddr: pointer;
+pstr: pointer;
+msgbuf: [u8; 64];
+scroll: SCROLL;
+oam: OAM_BUFFER;
+
+// --- iNES header -----------------------------------------------------------
+
+#[ines(
+    mapper = 0,
+    mirroring = "vertical",
+    battery = false,
+    trainer = false,
+    fourscreen = false,
+)]
+
+// --- RAM variables ---------------------------------------------------------
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+// --- ROM: main code bank ---------------------------------------------------
+
+#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+}
+
+// --- CHR data (pattern tables) ---------------------------------------------
+
+#[chr(bank = 0)] {
+    locate_bytes!("font.chr")
+}
+
+// --- filler/padding --------------------------------------------------------
+
+#[setpad(0xFF)]

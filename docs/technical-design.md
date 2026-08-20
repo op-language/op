@@ -230,8 +230,12 @@ Post-compile (.opl):
 }
 ```
 
-Post-link (.opl after `--link`): all relocations are resolved, sections are
-laid out in the final memory map, and the data array contains the final bytes.
+Post-link (.opl after `--link`): all relocations are resolved, the
+`relocations` array is empty, the linker writes the interrupt vector
+tables into the ROM data, the linker pads ROM and CHR sections to their
+`maxsize` with the `pad_byte`, and the data array contains the final
+bytes. The `interrupt_vectors`, `header`, and `pad_byte` fields pass
+through to the file output stage.
 
 See `file-formats.md` for the full `.opl` format specification.
 
@@ -243,6 +247,11 @@ See `file-formats.md` for the full `.opl` format specification.
 | `lnx` | Atari Lynx | .lnx ROM file with Lynx header. |
 | `raw` | Any | Raw binary image with no header. |
 | `hex` | Any | Intel HEX file for EEPROM burners. |
+| `sega` | Genesis | SEGA TMSS header at offset `0x100`. |
+| `snes` | SNES | Internal SNES header at offset `0xFFC0`. |
+| `gb` | Game Boy, Game Boy Color | Cartridge header at offset `0x100`. |
+| `sms` | Master System, Game Gear, SG-1000 | `TMR SEGA` header at offset `0x7FF0`. |
+| `a78` | Atari 7800 | 78-byte `ATARI7800` header. |
 
 ## opc pipeline stages
 
@@ -368,6 +377,108 @@ records the interrupt vector entry.
 For each `#[ines(...)]` or `#[lnx(...)]` attribute, the code generator records
 the header fields. The linker writes the header into the output file.
 
+#### Std-lib module resolution
+
+The code generator resolves `use std::...` declarations at compile time. It
+searches for the std crate root in the following order: the directories
+passed with `--include` (or `-I`), the `OP_STD_PATH` environment variable,
+and the default location `~/.carts/std/src`. The first directory that
+contains a `lib.op` file is the std crate root.
+
+The code generator caches parsed std modules by absolute file path. When
+multiple `use` declarations reference the same module, the cache returns the
+already-parsed AST. The cache also records the directory of each std module
+file so that `locate_bytes!` and `locate_str!` inside a std module resolve
+paths relative to the std file.
+
+The code generator resolves use trees recursively. A glob import (`use
+std::cpu::*`) imports all public items from the target module. A single-item
+import (`use std::cpu::Cycles`) imports only the named item. A group import
+(`use std::{cpu, machine}`) resolves each sub-tree relative to the group
+parent. A `pub use` inside a std module re-exports items. A non-pub `use
+super::...` inside a std module resolves the parent module's items.
+
+#### Inline fn parameter substitution and enum variant resolution
+
+When the code generator encounters a call to an inline fn, it substitutes
+the call arguments for the fn parameters in a clone of the fn body, then
+compiles the expanded body at the call site. The substitution is recursive:
+an inline fn that calls another inline fn expands both bodies. Parameter
+substitution handles identifiers, selectors (including offset accesses like
+`dest + 1`), and all expression and statement forms.
+
+The code generator evaluates enum variants at compile time. An explicit
+variant value (`N = 0x80`) is evaluated directly. An implicit variant value
+(omitted) is the previous variant's value plus one; the first variant of an
+all-implicit enum starts at 0. A glob import of an enum (`pub use
+CPU_REG::*`) binds the variant names bare (e.g., `a`, `x`, `y`) into the
+flat namespace in addition to the qualified names (`CPU_REG::a`).
+
+#### Immediate operand resolution
+
+The code generator resolves immediate operands as follows:
+
+1. If the operand is a compile-time constant (a `const` value or an enum
+   variant), the code generator emits the value directly. No relocation is
+   needed.
+2. If the operand is `lo!(symbol)` or `hi!(symbol)`, the code generator
+   emits a zero placeholder byte and a `Lo8` or `Hi8` relocation against the
+   symbol. The linker patches the byte with the low or high byte of the
+   symbol's resolved address.
+3. If the operand is a plain symbol name, the code generator emits a zero
+   placeholder byte and an `Abs8` relocation.
+4. If the operand is neither a constant nor a symbol, the code generator
+   emits a compile error.
+
+Address operands follow the same rule: a constant resolves directly; a
+symbol emits an `Abs16` relocation; anything else is a compile error.
+
+#### `len!` and `sizeof!` macros
+
+The `len!(NAME)` macro returns the element count of `NAME`'s array type. The
+code generator maintains a map of top-level const and var names to their
+types. The type map is populated before constant values are evaluated, so a
+const declared before the array it references still resolves. `len!` of a
+non-array type produces a compile error.
+
+The `sizeof!(NAME)` macro returns the byte size of `NAME`'s type. For a
+scalar type (`u8`, `i8`), the size is 1 byte. For a 16-bit type (`u16`,
+`i16`, `pointer` on a 16-bit target), the size is 2 bytes. For an array
+type, the size is the element count times the element size. For a struct
+type, the size is the sum of the field sizes.
+
+Both macros resolve at compile time and may be used in `const` expressions
+and immediate operands.
+
+#### Function and data placement
+
+The code generator runs a placement pass after the collect pass and before
+the compile walk. The placement pass builds a dependency tree from the
+following roots, in declaration order:
+
+1. A non-inline `fn` with an `#[interrupt(name)]` attribute on its
+   definition. The placer places the fn in the first `#[rom]` block.
+2. A `fn` declared directly inside a `#[rom]` block.
+3. A `fn` pinned by a `locate_fn!` placement inside a `#[rom]` block.
+
+The placer walks each root's body, expanding inline fns with parameter
+substitution, and records edges to called non-inline fns and referenced
+top-level consts and vars. It traverses the tree depth-first: each root is
+placed first, then its callees are appended after. A call to a non-inline fn
+emits a `jsr` instruction with an `Abs16` relocation that the linker
+resolves to the placed fn's address.
+
+Top-level consts that live code references are placed in the ROM block of
+the first fn that references them. Top-level vars are placed in the first
+`#[ram]` block in file order. The placer never duplicates RAM. If a fn or
+const is referenced from `#[rom]` blocks in different banks, the placer
+places a copy in each bank.
+
+The placer emits dead-code warnings for main-module items that no root
+reaches: an unreachable non-inline fn, an unused inline fn, an unreferenced
+top-level const or var, and a top-level enum with no variant referenced.
+The placer does not warn about std imports.
+
 #### Addressing-mode selection
 
 The code generator selects the addressing mode as follows:
@@ -415,8 +526,9 @@ revision may add these.
 ### Stage 4: linker
 
 The linker reads the JSON object data (.opl post-compile). The linker resolves
-all relocations, lays out the sections in the final memory map, and writes the
-final linked data (.opl post-link).
+all relocations, writes the interrupt vector tables, pads the sections, and
+writes the final linked data (.opl post-link). The linker does not write the
+output file header. The file output stage writes the header in Stage 5.
 
 #### Linker steps
 
@@ -429,14 +541,18 @@ final linked data (.opl post-link).
 4. **Patch.** The linker patches each relocation with the resolved address.
    The linker checks that each branch relocation is in range. If a branch is
    out of range, the linker emits an error unless the `far` keyword was
-   present.
+   present. The linker clears the `relocations` array after all patches.
 5. **Lay out.** The linker places the sections in the target memory map.
 6. **Vector table.** The linker writes the interrupt vector entries into the
-   vector table at the target-defined addresses.
-7. **Header.** The linker writes the output file header (iNES, .lnx, or none)
-   from the recorded header fields.
-8. **Pad.** The linker pads each section to its maxsize with the padding byte.
-9. **Write.** The linker writes the final binary image to the output file.
+   ROM section data at the target-defined addresses. The linker writes each
+   entry as a 2-byte little-endian address. The linker extends the ROM section
+   with the padding byte when the section is too small to hold the vector
+   table.
+7. **Header.** The linker passes the `header` and `interrupt_vectors` fields
+   through to the file output stage. The file output stage writes the header.
+8. **Pad.** The linker pads each ROM and CHR section to its `maxsize` with the
+   `pad_byte` value. The linker does not pad RAM sections.
+9. **Write.** The linker writes the post-link object data to the `.opl` file.
 
 #### Memory map
 
@@ -462,7 +578,8 @@ size, and a bank count.
 
 When `opc` runs without a stage flag, the file output stage reads the linked
 data and writes the final ROM or binary image. The output format depends on
-the target or the `--format` flag.
+the target or the `--format` flag. The file output stage reads the `header`
+and `pad_byte` fields on the `ObjectFile` to write the output file header.
 
 **iNES (NES):** 16-byte header with mapper, mirroring, battery, trainer,
 fourscreen, PRG ROM size, CHR ROM size. PRG and CHR banks concatenated.
@@ -473,6 +590,25 @@ bank count, block count, block size. ROM blocks concatenated.
 **raw:** Raw binary image with no header. Suits the Atari Lynx two-stage build.
 
 **Intel HEX:** Sections as Intel HEX records. Suits EEPROM burners.
+
+**SEGA (Genesis):** 256-byte TMSS header at offset `0x100` with the game name,
+region codes, and a computed checksum. ROM data follows the header.
+
+**SNES:** Internal header at offset `0xFFC0` with the title, map mode, ROM
+type, ROM size, RAM size, region, vendor, version, and checksum.
+
+**Game Boy:** Cartridge header at offset `0x100` with the Nintendo logo, game
+title, CGB flag, license code, version, and a computed header checksum.
+
+**SMS / Game Gear:** `TMR SEGA` header at offset `0x7FF0` with the checksum,
+product code, region, version, and ROM size.
+
+**Atari 7800:** 78-byte `ATARI7800` header with the cart name, mapper, region,
+and Pokey flags. ROM data follows the header.
+
+See `docs/supported-emulators.md` for the complete list of supported
+emulators, ROM formats, and debug-target configuration for each target
+system.
 
 ## Libs
 

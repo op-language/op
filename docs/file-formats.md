@@ -820,13 +820,16 @@ indentation).
 
 ### Envelope fields
 
-The top-level JSON object has three fields.
+The top-level JSON object has these fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | integer | The format version. Current value: `1`. |
 | `target` | string | The target triplet string. |
 | `sections` | array | The list of Section objects. |
+| `interrupt_vectors` | array | The list of InterruptVector objects. The codegen records these from `#[interrupt(name)]` attributes. The linker writes the vector table entries into the ROM data. |
+| `header` | object or null | The HeaderFields object from `#[ines(...)]` or `#[lnx(...)]` attributes. The file output stage reads this to write the output file header. |
+| `pad_byte` | integer | The padding byte from `#[setpad(value)]`. The linker pads ROM and CHR sections to their `maxsize` with this byte. Default value: `0`. |
 
 ### Section fields
 
@@ -880,17 +883,45 @@ fields.
 | `hi8` | 1 byte | High byte of a 16-bit symbol address. |
 | `bank` | 1 byte | Bank number of a symbol (Lynx). |
 
+### InterruptVector fields
+
+Each element of the `interrupt_vectors` array is a JSON object with these
+fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The interrupt name. Valid values: `reset`, `nmi`, `irq`. |
+| `address` | integer | The vector table address where the linker writes the 2-byte target. For the 6502, `reset` is `0xFFFC`, `nmi` is `0xFFFA`, `irq` is `0xFFFE`. |
+| `target` | string | The symbol name of the target function. |
+
+### HeaderFields fields
+
+The `header` field is a JSON object with these fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `format` | string | The format name. Valid values: `ines`, `lnx`, `sega`, `snes`, `gb`, `sms`, `a78`. |
+| `fields` | array of pairs | The key-value pairs from the attribute arguments. Each pair is a two-element array of strings. |
+
 ### Post-compile and post-link differences
 
 The post-compile `.opl` file has unresolved relocations. The `data`
 array holds the encoded bytes with placeholder values where the linker
 must patch relocations. The `relocations` array lists every relocation
-that the linker must resolve.
+that the linker must resolve. The `interrupt_vectors`, `header`, and
+`pad_byte` fields on the `ObjectFile` carry the metadata that the codegen
+recorded from the source attributes.
 
 The post-link `.opl` file has all relocations resolved. The `data` array
 holds the final bytes with all relocation sites patched. The
-`relocations` array is empty or absent. The sections are laid out in the
-final memory map.
+`relocations` array is empty. The linker writes the interrupt vector
+table entries into the ROM section data at the vector table addresses.
+The linker pads each ROM and CHR section to its `maxsize` with the
+`pad_byte` value. The linker does not pad RAM sections.
+
+The `interrupt_vectors` and `header` fields on the `ObjectFile` pass
+through the linker to the file output stage. The file output stage reads
+these fields to write the output file header.
 
 ### Example
 
@@ -926,9 +957,49 @@ Post-compile `.opl` output:
       ],
       "data": [ 169, 0, 141, 0, 0, 96 ]
     }
-  ]
+  ],
+  "interrupt_vectors": [],
+  "header": null,
+  "pad_byte": 0
 }
 ```
+
+Post-link `.opl` output for the same source. The `relocations` array is
+empty. The `data` array holds the patched bytes. The section is padded
+to `maxsize`. The `interrupt_vectors`, `header`, and `pad_byte` fields
+pass through to the file output stage.
+
+```json
+{
+  "version": 1,
+  "target": "mos6502-nintendo-nes-ntsc",
+  "sections": [
+    {
+      "name": "rom_bank0",
+      "kind": "rom",
+      "org": 49152,
+      "bank": 0,
+      "maxsize": 16384,
+      "symbols": [
+        { "name": "main", "offset": 0, "size": 6, "kind": "function", "is_pub": false }
+      ],
+      "relocations": [],
+      "data": [ 169, 0, 141, 0, 32, 96, 255, 255, 255, "...", 255, 0, 192 ]
+    }
+  ],
+  "interrupt_vectors": [
+    { "name": "reset", "address": 65532, "target": "main" }
+  ],
+  "header": null,
+  "pad_byte": 255
+}
+```
+
+The vector table entry for `reset` writes the 2-byte address `0xC000`
+into the ROM data at offset `0x3FFC` (`0xFFFC - 0xC000`). The `data`
+array shows `0, 192` at that offset, which is `0xC000` in little-endian
+order. The section is padded to `maxsize` (`16384` bytes) with the
+`pad_byte` value `255`.
 
 ## Future work
 
