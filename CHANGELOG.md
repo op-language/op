@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0]
+
+### Added
+- The `--output-stages` command-line flag. This flag writes the `.opx`,
+  `.opa`, `.opl`, and `.linked.opl` intermediate files and the final
+  binary when the full pipeline runs.
+- Intermediate-file stage chaining. The `--parse` flag reads a `.opx`
+  file. The `--compile` flag reads a `.opa` file. The `--link` flag reads
+  a `.opl` file. Each stage writes the intermediate envelope for the next
+  stage.
+
+### Fixed
+- The peephole optimizer no longer runs on CHR or RAM sections. CHR
+  pattern data and RAM data stay intact at the default optimization
+  level.
+- The peephole optimizer is now relocation-aware. Stores to different
+  symbols with identical placeholder operand bytes are no longer treated
+  as writes to the same address. The `dead_store` and `load_store_load`
+  transforms compare relocation indices, not raw bytes.
+- The peephole optimizer marks NES PPU and APU memory-mapped register
+  accesses ($2000-$2007, $4000-$4017) as volatile. The dead-store and
+  redundant-store transforms no longer remove required hardware
+  register writes.
+- The parser now treats a function call on a new line as a separate
+  statement. It does not fold the call into the operands of the assembly
+  instruction on the previous line.
+- The dead-code analyzer now records a function call in an expression
+  position as a use. It no longer reports a false warning for inline
+  functions that other inline functions call.
+- The code generator now emits absolute addresses for `JMP` targets in
+  `loop`, `while`, and `if` else-blocks. Previously it emitted
+  section-relative offsets, which jumped to the wrong address.
+- The code generator now encodes indirect indexed addressing (`lda
+  (ptr), y`) as `IndirectY` (`B1`) and indirect indexed with X as
+  `IndirectX` (`A1`). Previously it encoded these as `AbsoluteY`/`AbsoluteX`.
+- The code generator now honors the `not` modifier in `do-while`
+  conditions. The branch direction is correctly inverted.
+- The code generator now appends an implicit `RTS` to functions that do
+  not end with an explicit `return`, `RTS`, `RTI`, `JMP`, or `BRA`.
+- Empty interrupt handler bodies no longer overlap with following data.
+  The `nes.op` example adds `RTI` to the `nmi` and `irq` handlers.
+- The `nes.op` example and the NES std-lib macros now use immediate mode
+  (`#` prefix) for constant operands in `assign`, `vram_write`,
+  `system_initialize`, `vram_clear_address`, `vram_init`, `wait_for`,
+  and `pal_animate`.
+
+### Tests
+- 226 tests pass across all test binaries (39, 49, 20, 43, 17, 58).
+- New `full_pipeline_std_nes_game` assertions verify the CHR section
+  data, the CHR data length, and the iNES header bytes at optimization
+  level 1.
+- New `parser_inline_call_new_line` test verifies the line-boundary fix.
+- New `stage_chaining` test verifies the `--lex`, `--parse`,
+  `--compile`, and `--link` flags chain through intermediate files.
+- New `output_stages_flag` test verifies the `--output-stages` flag
+  writes all intermediate files and a byte-identical final binary.
+- New `optimizer_changes_rom_but_not_chr` test verifies the optimizer
+  folds ROM data and leaves CHR data unchanged.
+
 ## [0.7.0]
 
 ### Added
