@@ -18,10 +18,10 @@ syntax keyword opKeyword near far as
 syntax keyword opBoolean true false
 
 " --- Compile-time macros ----------------------------------------------------
-" lo!(), hi!(), nylo!(), nyhi!(), sizeof!()
+" lo!(), hi!(), nylo!(), nyhi!(), sizeof!(), len!()
 " These use Rust-style macro call syntax with the trailing !.
 
-syntax match opBuiltin "\<\(lo\|hi\|nylo\|nyhi\|sizeof\)!"
+syntax match opBuiltin "\<\(lo\|hi\|nylo\|nyhi\|sizeof\|len\)!"
 
 " --- File inclusion macros --------------------------------------------------
 

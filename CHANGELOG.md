@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0]
+
+### Added
+- Std-lib module resolution. The compiler resolves `use std::cpu::*` and
+  `use std::machine::*` declarations at compile time. It searches for the
+  std crate root in `--include` directories, the `OP_STD_PATH` environment
+  variable, and `~/.carts/std/src`.
+- Module cache. Parsed std modules are cached by absolute file path so
+  repeated imports do not reparse.
+- Inline fn parameter substitution. Calls to `inline fn` declarations are
+  expanded at the call site with parameter substitution, including nested
+  inline calls and selector path substitution.
+- Enum variant constant resolution. Explicit and implicit enum variant
+  values are evaluated at compile time. Glob imports of enums bind variant
+  names bare.
+- Multi-pass const resolution. The collect pass gathers constants, enums,
+  and imports before any fn body is compiled, so fn bodies can reference
+  declarations that appear later in the file.
+- `lo!`/`hi!` symbol relocations. `lda #lo!(HELLO)` emits a `Lo8`
+  relocation; `lda #hi!(HELLO)` emits a `Hi8` relocation. The linker
+  patches the byte with the low or high byte of the symbol's address.
+- `len!` and `sizeof!` compile-time macros. `len!(HELLO)` returns the
+  element count of an array type. `sizeof!(ptr)` returns the byte size of
+  a type. Both resolve at compile time.
+- Dependency-tree function and data placement. The compiler builds a
+  dependency tree from interrupt-attribute fns, `locate_fn!` pins, and
+  in-block fns. It places reachable non-inline fns and top-level consts in
+  the first referrer's ROM block, duplicates them per bank, and places
+  top-level vars in the first `#[ram]` block.
+- `jsr` calls for non-inline fns. A call to a `fn` (not `inline fn`) emits
+  a `jsr` instruction with an `Abs16` relocation instead of inlining the
+  body.
+- Dead-code warnings. The compiler warns about unreachable fns, unused
+  inline fns, unreferenced top-level consts and vars, and unreferenced
+  top-level enums.
+- Relocation addends. `Relocation` entries carry an `addend` field so that
+  `sta pstr + 1` correctly patches the high byte at the next address.
+- Compile error for unresolvable immediates. An immediate or address
+  operand that is neither a constant nor a symbol produces error 305
+  instead of a silent zero byte.
+
+### Fixed
+- `self` token bug. The lexer maps `Kw_self_` to the token string
+  `Kw_self`, which the parser's `check("Kw_self")` matches. No code change
+  was needed; the bug was identified as a false alarm in the plan.
+
 ## [0.6.0]
 
 ### Added
