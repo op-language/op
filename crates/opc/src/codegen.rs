@@ -659,9 +659,7 @@ impl Codegen {
                 } => {
                     // #[interrupt] on a fn definition makes it a root.
                     let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
-                    // A function named `main` is always a root (entry point
-                    // for platforms without an interrupt-based reset vector).
-                    if has_interrupt || name == "main" {
+                    if has_interrupt {
                         roots.push(PlacementRoot {
                             name: name.clone(),
                             section_idx: first_rom,
@@ -2931,6 +2929,7 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             _ => None,
         },
         "sm83" => match interrupt_name {
+            "reset" => Some(0x0100),
             "vblank" => Some(0x0040),
             "lcdc" => Some(0x0048),
             "timer" => Some(0x0050),
@@ -3866,12 +3865,12 @@ mod tests {
     #[test]
     fn len_macro_resolves_array_element_count() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
              const HELLO: [u8; 11] = \"Hello, NES!\";\n",
         );
-        // main is a root, so it is placed first: LDA #11, RTS.
-        // The HELLO const is referenced by len!(HELLO), so it is
-        // placed after main in the same section.
+        // main is a root via #[interrupt(reset)], so it is placed first:
+        // LDA #11, RTS. The HELLO const is referenced by len!(HELLO), so
+        // it is placed after main in the same section.
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x0B, 0x60]);
         // The const data follows: "Hello, NES!" (11 bytes).
         assert_eq!(&codegen.sections[0].data[3..14], b"Hello, NES!");
@@ -3881,7 +3880,7 @@ mod tests {
     #[test]
     fn sizeof_macro_resolves_type_size() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #sizeof!(ptr)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #sizeof!(ptr)\n    rts\n}\n\
              ptr: pointer;\n",
         );
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x02, 0x60]);
@@ -3893,7 +3892,7 @@ mod tests {
     #[test]
     fn len_macro_on_non_array_emits_error() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #len!(scalar)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #len!(scalar)\n    rts\n}\n\
              scalar: u8;\n",
         );
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x00, 0x60]);
@@ -4145,7 +4144,7 @@ mod tests {
             // constants names can only arrive through macros.op's
             // private `use super::constants::*;`.
             let (codegen, _) = walk_parsed_source(
-                "use std::nes::macros::*;\nfn main() {\n    vblank_on()\n    rts\n}\n",
+                "use std::nes::macros::*;\n#[interrupt(reset)]\nfn main() {\n    vblank_on()\n    rts\n}\n",
             );
             // vblank_on expands to `sta ST_VBLANK` -> sta $80
             // (zero-page) / rts, with no relocation and no

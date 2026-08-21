@@ -536,19 +536,29 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     let roms = rom_sections(obj);
     let mut rom_bytes: Vec<u8> = roms.iter().flat_map(|s| s.data.iter().copied()).collect();
 
-    // Build a symbol table to look up the `main` function address.
+    // Build a symbol table to look up the entry-point function address.
     let symbol_table = build_symbol_table_from_sections(&roms);
 
-    // Entry point: write a JP instruction at 0x0100 that jumps to
-    // `main`. The Game Boy starts execution at 0x0100.
+    // Entry point: write a JP instruction at 0x0100 that jumps to the
+    // reset interrupt handler. The Game Boy starts execution at 0x0100.
+    // The linker already wrote a JP at 0x0100 from the interrupt vector,
+    // but the output stage overwrites it here to be safe.
     let header_min = 0x150usize;
     if rom_bytes.len() < header_min {
         rom_bytes.resize(header_min, 0);
     }
-    if let Some(&main_addr) = symbol_table.get("main") {
-        rom_bytes[0x100] = 0xC3; // JP
-        rom_bytes[0x101] = (main_addr & 0xFF) as u8;
-        rom_bytes[0x102] = ((main_addr >> 8) & 0xFF) as u8;
+    // Look up the reset interrupt vector target in the symbol table.
+    let entry_name = obj
+        .interrupt_vectors
+        .iter()
+        .find(|v| v.name == "reset")
+        .map(|v| v.target.as_str());
+    if let Some(name) = entry_name {
+        if let Some(&entry_addr) = symbol_table.get(name) {
+            rom_bytes[0x100] = 0xC3; // JP
+            rom_bytes[0x101] = (entry_addr & 0xFF) as u8;
+            rom_bytes[0x102] = ((entry_addr >> 8) & 0xFF) as u8;
+        }
     }
 
     // Nintendo logo at 0x104, 48 bytes.

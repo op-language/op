@@ -10,6 +10,7 @@ fn vblank() {
     reti
 }
 
+#[interrupt(reset)]
 noreturn fn main() {
     loop {
     }
