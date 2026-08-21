@@ -107,9 +107,9 @@ fn lex_then_parse_nes_game() {
 
 #[test]
 fn lex_then_parse_std_mos6502() {
-    let source = include_str!("../../../../std/src/cpu/mos6502.op");
+    let source = include_str!("../../../../std/src/cpu/mos6502/mod.op");
     let (ast, diags) = parse_source(
-        "std/src/cpu/mos6502.op",
+        "std/src/cpu/mos6502/mod.op",
         source,
         "rp2A03-nintendo-nes-ntsc",
         &[],

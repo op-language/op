@@ -2776,7 +2776,7 @@ impl Codegen {
 /// address.
 pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
     match cpu {
-        "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" => match interrupt_name {
+        "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
             "reset" => Some(0xFFFC),
             "nmi" => Some(0xFFFA),
             "irq" => Some(0xFFFE),

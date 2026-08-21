@@ -970,6 +970,137 @@ pub const ENCODING_65SC02: &[EncodingEntry] = &[
     },
 ];
 
+// --- VL65NC02 opcodes (exact copy of 65SC02) --------------------------------
+
+pub const ENCODING_VL65NC02: &[EncodingEntry] = &[
+    // BRA
+    EncodingEntry {
+        mnemonic: "bra",
+        mode: AddrMode::Relative,
+        opcode: 0x80,
+    },
+    // PHX/PHY/PLX/PLY
+    EncodingEntry {
+        mnemonic: "phx",
+        mode: AddrMode::Implied,
+        opcode: 0xDA,
+    },
+    EncodingEntry {
+        mnemonic: "phy",
+        mode: AddrMode::Implied,
+        opcode: 0x5A,
+    },
+    EncodingEntry {
+        mnemonic: "plx",
+        mode: AddrMode::Implied,
+        opcode: 0xFA,
+    },
+    EncodingEntry {
+        mnemonic: "ply",
+        mode: AddrMode::Implied,
+        opcode: 0x7A,
+    },
+    // STZ
+    EncodingEntry {
+        mnemonic: "stz",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x64,
+    },
+    EncodingEntry {
+        mnemonic: "stz",
+        mode: AddrMode::ZeroPageX,
+        opcode: 0x74,
+    },
+    EncodingEntry {
+        mnemonic: "stz",
+        mode: AddrMode::Absolute,
+        opcode: 0x9C,
+    },
+    EncodingEntry {
+        mnemonic: "stz",
+        mode: AddrMode::AbsoluteX,
+        opcode: 0x9E,
+    },
+    // TSB/TRB
+    EncodingEntry {
+        mnemonic: "tsb",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x04,
+    },
+    EncodingEntry {
+        mnemonic: "tsb",
+        mode: AddrMode::Absolute,
+        opcode: 0x0C,
+    },
+    EncodingEntry {
+        mnemonic: "trb",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x14,
+    },
+    EncodingEntry {
+        mnemonic: "trb",
+        mode: AddrMode::Absolute,
+        opcode: 0x1C,
+    },
+    // INA/DEA
+    EncodingEntry {
+        mnemonic: "ina",
+        mode: AddrMode::Implied,
+        opcode: 0x1A,
+    },
+    EncodingEntry {
+        mnemonic: "dea",
+        mode: AddrMode::Implied,
+        opcode: 0x3A,
+    },
+    // Additional addressing modes for existing opcodes
+    EncodingEntry {
+        mnemonic: "adc",
+        mode: AddrMode::Indirect,
+        opcode: 0x72,
+    },
+    EncodingEntry {
+        mnemonic: "and",
+        mode: AddrMode::Indirect,
+        opcode: 0x32,
+    },
+    EncodingEntry {
+        mnemonic: "cmp",
+        mode: AddrMode::Indirect,
+        opcode: 0xD2,
+    },
+    EncodingEntry {
+        mnemonic: "eor",
+        mode: AddrMode::Indirect,
+        opcode: 0x52,
+    },
+    EncodingEntry {
+        mnemonic: "ora",
+        mode: AddrMode::Indirect,
+        opcode: 0x12,
+    },
+    EncodingEntry {
+        mnemonic: "sbc",
+        mode: AddrMode::Indirect,
+        opcode: 0xF2,
+    },
+    EncodingEntry {
+        mnemonic: "bit",
+        mode: AddrMode::Immediate,
+        opcode: 0x89,
+    },
+    EncodingEntry {
+        mnemonic: "bit",
+        mode: AddrMode::ZeroPageX,
+        opcode: 0x34,
+    },
+    EncodingEntry {
+        mnemonic: "bit",
+        mode: AddrMode::AbsoluteX,
+        opcode: 0x3C,
+    },
+];
+
 // --- 65C816 additional opcodes ---------------------------------------------
 
 pub const ENCODING_65C816: &[EncodingEntry] = &[
@@ -1642,6 +1773,7 @@ pub fn get_encoding_table(cpu: &str) -> &'static [EncodingEntry] {
         "m68000" => ENCODING_68000,
         "rp2A03" => ENCODING_6502,
         "rp2A07" => ENCODING_6502,
+        "vl65NC02" => ENCODING_VL65NC02,
         _ => &[],
     }
 }
@@ -1674,6 +1806,10 @@ pub fn get_full_encoding_table(cpu: &str) -> Vec<&'static EncodingEntry> {
         }
         "rp2A07" => {
             table.extend(ENCODING_6502.iter());
+        }
+        "vl65NC02" => {
+            table.extend(ENCODING_6502.iter());
+            table.extend(ENCODING_VL65NC02.iter());
         }
         _ => {}
     }

@@ -679,8 +679,9 @@ fn std_resolves_cpu_glob() {
         eprintln!("skipping: std library not found (set OP_STD_PATH)");
         return;
     };
-    // The cpu module exports no inline fns.
-    assert!(tables.inline_fn_names.is_empty());
+    // The cpu module now exports inline fns from the 6502 macros.
+    assert!(tables.inline_fn_names.contains(&"assign".to_string()));
+    assert!(tables.inline_fn_names.contains(&"pusha".to_string()));
     // Enum variants land in the flat const namespace under qualified keys.
     assert_eq!(tables.const_values.get("STATUS::N"), Some(&0x80));
     assert_eq!(tables.const_values.get("STATUS::C"), Some(&0x01));
