@@ -654,18 +654,20 @@ impl Codegen {
 
         for item in items {
             match item {
-                Item::FnDecl {
-                    name, attributes, ..
-                } => {
-                    // #[interrupt] on a fn definition makes it a root.
-                    let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
-                    if has_interrupt {
-                        roots.push(PlacementRoot {
-                            name: name.clone(),
-                            section_idx: first_rom,
-                        });
-                    }
+            Item::FnDecl {
+                name, attributes, ..
+            } => {
+                // #[interrupt] on a fn definition makes it a root.
+                let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
+                // A function named `main` is always a root (entry point
+                // for platforms without an interrupt-based reset vector).
+                if has_interrupt || name == "main" {
+                    roots.push(PlacementRoot {
+                        name: name.clone(),
+                        section_idx: first_rom,
+                    });
                 }
+            }
                 Item::BlockAttribute {
                     attr,
                     items: block_items,
@@ -3809,8 +3811,15 @@ mod tests {
             "fn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
              const HELLO: [u8; 11] = \"Hello, NES!\";\n",
         );
-        assert_eq!(codegen.sections[0].data, vec![0xA9, 0x0B, 0x60]);
-        assert!(codegen.sections[0].relocations.is_empty());
+        // main is a root, so it is placed first: LDA #11, RTS.
+        // The HELLO const is referenced by len!(HELLO), so it is
+        // placed after main in the same section.
+        assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x0B, 0x60]);
+        // The const data follows: "Hello, NES!" (11 bytes).
+        assert_eq!(
+            &codegen.sections[0].data[3..14],
+            b"Hello, NES!"
+        );
     }
 
     /// `sizeof!(ptr)` resolves to the byte size of the pointer type.

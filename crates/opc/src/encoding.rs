@@ -2011,11 +2011,16 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
         mode: AddrMode::Implied,
         opcode: 0x10,
     },
-    // LDH (load from high memory)
+    // LDH (load from/to high memory)
     EncodingEntry {
         mnemonic: "ldh",
         mode: AddrMode::Immediate,
         opcode: 0xF0,
+    },
+    EncodingEntry {
+        mnemonic: "ldh",
+        mode: AddrMode::Absolute,
+        opcode: 0xE0,
     },
 ];
 

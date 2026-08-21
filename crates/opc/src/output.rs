@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use op_ir::{ObjectFile, Section, SectionKind};
+use std::collections::HashMap;
 
 use crate::cli::OpcArgs;
 
@@ -130,6 +131,18 @@ fn header_field<'a>(obj: &'a ObjectFile, key: &str) -> Option<&'a str> {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     })
+}
+
+/// Build a symbol table from section symbols (name -> absolute address).
+fn build_symbol_table_from_sections(sections: &[&Section]) -> HashMap<String, u32> {
+    let mut table = HashMap::new();
+    for section in sections {
+        for sym in &section.symbols {
+            let addr = section.org + sym.offset;
+            table.insert(sym.name.clone(), addr);
+        }
+    }
+    table
 }
 
 /// Parse a header field as u32 (decimal or hex).
@@ -523,10 +536,19 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     let roms = rom_sections(obj);
     let mut rom_bytes: Vec<u8> = roms.iter().flat_map(|s| s.data.iter().copied()).collect();
 
-    // Ensure the ROM is large enough to hold the header.
+    // Build a symbol table to look up the `main` function address.
+    let symbol_table = build_symbol_table_from_sections(&roms);
+
+    // Entry point: write a JP instruction at 0x0100 that jumps to
+    // `main`. The Game Boy starts execution at 0x0100.
     let header_min = 0x150usize;
     if rom_bytes.len() < header_min {
         rom_bytes.resize(header_min, 0);
+    }
+    if let Some(&main_addr) = symbol_table.get("main") {
+        rom_bytes[0x100] = 0xC3; // JP
+        rom_bytes[0x101] = (main_addr & 0xFF) as u8;
+        rom_bytes[0x102] = ((main_addr >> 8) & 0xFF) as u8;
     }
 
     // Nintendo logo at 0x104, 48 bytes.
