@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0]
+
+### Added
+- `ENCODING_VL65NC02` encoding table in `encoding.rs`. The table is an
+  exact copy of `ENCODING_65SC02`. The VL65NC02 is a 65SC02 core.
+- `ENCODING_SM83` encoding table in `encoding.rs`. The table holds
+  accurate SM83 opcodes for the Sharp CPU used in the Game Boy.
+- `vl65NC02` and `sm83` arms in `get_encoding_table` and
+  `get_full_encoding_table`.
+- `vl65NC02` arm in `interrupt_vector_address` with the 6502-family
+  vector addresses.
+- `sm83` arm in `interrupt_vector_address` with fixed Game Boy vector
+  addresses: vblank at 0x0040, lcdc at 0x0048, timer at 0x0050, serial
+  at 0x0058, joypad at 0x0060.
+- Known limitation note for the `all`, `any`, and `not` cfg
+  combinators in `language-specification.md`.
+
+### Changed
+- Updated `crates/opc/tests/integration.rs` to reference
+  `mos6502/mod.op` instead of the deleted `mos6502.op` flat file.
+- Updated `crates/opc/tests/codegen.rs` `std_resolves_cpu_glob` test
+  to check for inline fns from the 6502 macro re-export.
+
 ## [0.9.0]
 
 ### Added

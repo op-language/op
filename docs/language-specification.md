@@ -34,7 +34,7 @@ tool, the intermediate file formats, or the linker output formats. The document
 - WDC 65C816 Instruction Set Reference
 - Motorola 68000 Instruction Set Reference
 - Zilog Z80 Instruction Set Reference
-- Sharp LR35902 Instruction Set Reference
+- Sharp SM83 Instruction Set Reference
 
 ## Terms and definitions
 
@@ -1176,7 +1176,7 @@ The following table lists the normative triplets.
 | `mos6502-atari-2600` | MOS 6502 | Atari 2600 |
 | `mos6502-atari-5200` | MOS 6502 | Atari 5200 |
 | `mos6502-atari-7800` | MOS 6502 | Atari 7800 |
-| `mos65sc02-atari-lynx` | MOS 65SC02 | Atari Lynx |
+| `vl65nc02-atari-lynx` | VLSI VL65NC02 | Atari Lynx |
 | `mos6502-commodore-64` | MOS 6502 | Commodore 64 |
 | `mos6502-nec-pcengine` | MOS 6502 | NEC PC Engine |
 | `rp2A03-nintendo-nes-ntsc` | Ricoh RP2A03 | NES NTSC |
@@ -1186,8 +1186,8 @@ The following table lists the normative triplets.
 | `wdc65c816-apple-iigs` | WDC 65C816 | Apple IIgs |
 | `wdc65c816-nintendo-snes` | WDC 65C816 | SNES |
 | `z80-neogeo-aes` | Zilog Z80 | Neo Geo AES |
-| `z80-nintendo-gameboy` | Sharp LR35902 | Game Boy |
-| `z80-nintendo-gameboy-color` | Sharp LR35902 | Game Boy Color |
+| `sm83-nintendo-gameboy` | Sharp SM83 | Game Boy |
+| `sm83-nintendo-gameboy-color` | Sharp SM83 | Game Boy Color |
 | `z80-sega-gamegear` | Zilog Z80 | Sega Game Gear |
 | `z80-sega-genesis` | Zilog Z80 | Sega Genesis |
 | `z80-sega-mastersystem` | Zilog Z80 | Sega Master System |
@@ -1371,6 +1371,15 @@ The Atari Lynx uses the 65SC02. The Lynx does not directly address cartridge
 ROM. All code runs from RAM. The Lynx supports the plain `interrupt` keyword
 form. The lib defines `irq` for `#[interrupt(...)]`. The programmer sets the
 interrupt vector registers at run time.
+
+### VLSI VL65NC02
+
+The VLSI VL65NC02 is the custom CPU in the Atari Lynx. It implements the
+65SC02 instruction set. The opcode set and the addressing modes match the
+MOS 65SC02. The lib defines `CLOCK_HZ` as 4000000.
+
+The Atari Lynx does not directly address cartridge ROM. All code runs from
+RAM. The lib defines `reset`, `nmi`, and `irq` for `#[interrupt(...)]`.
 
 ### Ricoh RP2A03 / RP2A07
 
@@ -1643,9 +1652,9 @@ The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
 | SLL | Shift left logical (bit 0 set to 1) |
 | IN (C) | Input to all registers when B is not used as operand |
 
-### Sharp LR35902
+### Sharp SM83
 
-The Sharp LR35902 is a Z80 variant used in the Nintendo Game Boy and Game Boy
+The Sharp SM83 is a Z80 variant used in the Nintendo Game Boy and Game Boy
 Color. The CPU removes the alternate register set, the I and R registers, and
 several Z80 opcodes. The CPU adds the `STOP` and `LDI A, (HL)` opcodes.
 
@@ -1657,10 +1666,10 @@ The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
 
 #### Opcodes
 
-The LR35902 opcode set is a subset of the Z80 set. The lib defines the legal
+The SM83 opcode set is a subset of the Z80 set. The lib defines the legal
 opcodes. Additional opcodes: `STOP`, `LDI A`, `LDD A`, `LDH A`, `LDH (n)`.
 
-The LR35902 does **not** support the alternate register set, the `EXX`
+The SM83 does **not** support the alternate register set, the `EXX`
 instruction, the `RLD` and `RRD` instructions, and the interrupt mode
 selection is simplified.
 
