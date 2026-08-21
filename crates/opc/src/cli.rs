@@ -36,7 +36,7 @@ pub struct OpcArgs {
     #[arg(long)]
     pub format: Option<String>,
 
-    /// Target triplet, e.g. mos6502-nintendo-nes-ntsc.
+    /// Target triplet, e.g. rp2A03-nintendo-nes-ntsc.
     #[arg(long)]
     pub target: Option<String>,
 

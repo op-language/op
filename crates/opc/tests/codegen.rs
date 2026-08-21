@@ -10,14 +10,14 @@ use opc::parser::parse_source;
 
 /// Helper: parse and compile a source string with the 6502 target.
 fn compile(src: &str) -> ObjectFile {
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
     obj
 }
 
 /// Helper: parse and compile with a specific opt level.
 fn compile_with_opt(src: &str, opt_level: u8) -> ObjectFile {
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let (obj, _) = compile_source(&ast, opt_level, &[], &[]);
     obj
 }
@@ -610,7 +610,7 @@ fn codegen_65c816_target() {
 
 #[test]
 fn codegen_empty_source() {
-    let (ast, _) = parse_source("test.op", "", "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _) = parse_source("test.op", "", "rp2A03-nintendo-nes-ntsc", &[]);
     let (obj, _) = compile_source(&ast, 1, &[], &[]);
     assert_eq!(obj.sections.len(), 0);
 }
@@ -657,7 +657,7 @@ fn std_root() -> Option<std::path::PathBuf> {
 /// the object file and the codegen name tables.
 fn compile_std(src: &str) -> Option<(ObjectFile, NameTables)> {
     let root = std_root()?;
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let includes = vec![root.to_string_lossy().into_owned()];
     let (obj, _diags, tables) = compile_source_with_tables(&ast, 0, &includes, &[]);
     Some((obj, tables))
@@ -668,7 +668,7 @@ fn compile_std(src: &str) -> Option<(ObjectFile, NameTables)> {
 fn compile_std_file(path: &std::path::Path) -> Option<(ObjectFile, NameTables)> {
     let source = std::fs::read_to_string(path).ok()?;
     let file = path.to_string_lossy().into_owned();
-    let (ast, _diags) = parse_source(&file, &source, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source(&file, &source, "rp2A03-nintendo-nes-ntsc", &[]);
     let (obj, _diags, tables) = compile_source_with_tables(&ast, 0, &[], &[]);
     Some((obj, tables))
 }
@@ -679,8 +679,9 @@ fn std_resolves_cpu_glob() {
         eprintln!("skipping: std library not found (set OP_STD_PATH)");
         return;
     };
-    // The cpu module exports no inline fns.
-    assert!(tables.inline_fn_names.is_empty());
+    // The cpu module now exports inline fns from the 6502 macros.
+    assert!(tables.inline_fn_names.contains(&"assign".to_string()));
+    assert!(tables.inline_fn_names.contains(&"pusha".to_string()));
     // Enum variants land in the flat const namespace under qualified keys.
     assert_eq!(tables.const_values.get("STATUS::N"), Some(&0x80));
     assert_eq!(tables.const_values.get("STATUS::C"), Some(&0x01));
@@ -754,4 +755,74 @@ fn std_super_resolution() {
     // macros.op's `use super::types::*;` resolves against its own
     // directory and imports the PPU register enum.
     assert_eq!(tables.const_values.get("PPU::CNT0"), Some(&0x2000));
+}
+
+// --- rp2A03 / rp2A07 CPU tests -----------------------------------------------
+
+#[test]
+fn rp2a03_encoding_table_is_6502() {
+    use opc::encoding::get_encoding_table;
+    let table = get_encoding_table("rp2A03");
+    assert!(!table.is_empty());
+    assert_eq!(table.len(), opc::encoding::ENCODING_6502.len());
+}
+
+#[test]
+fn rp2a07_encoding_table_is_6502() {
+    use opc::encoding::get_encoding_table;
+    let table = get_encoding_table("rp2A07");
+    assert!(!table.is_empty());
+    assert_eq!(table.len(), opc::encoding::ENCODING_6502.len());
+}
+
+#[test]
+fn rp2a03_full_encoding_table_has_lda_immediate() {
+    use opc::encoding::get_full_encoding_table;
+    let table = get_full_encoding_table("rp2A03");
+    assert!(table.iter().any(|e| e.mnemonic.eq_ignore_ascii_case("lda")
+        && matches!(e.mode, opc::encoding::AddrMode::Immediate)));
+}
+
+#[test]
+fn rp2a07_full_encoding_table_has_lda_immediate() {
+    use opc::encoding::get_full_encoding_table;
+    let table = get_full_encoding_table("rp2A07");
+    assert!(table.iter().any(|e| e.mnemonic.eq_ignore_ascii_case("lda")
+        && matches!(e.mode, opc::encoding::AddrMode::Immediate)));
+}
+
+#[test]
+fn rp2a03_interrupt_vector_reset() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A03", "reset"), Some(0xFFFC));
+}
+
+#[test]
+fn rp2a03_interrupt_vector_nmi() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A03", "nmi"), Some(0xFFFA));
+}
+
+#[test]
+fn rp2a03_interrupt_vector_irq() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFFE));
+}
+
+#[test]
+fn rp2a07_interrupt_vector_reset() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A07", "reset"), Some(0xFFFC));
+}
+
+#[test]
+fn rp2a07_interrupt_vector_nmi() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A07", "nmi"), Some(0xFFFA));
+}
+
+#[test]
+fn rp2a07_interrupt_vector_irq() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFFE));
 }

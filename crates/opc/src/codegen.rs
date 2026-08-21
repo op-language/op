@@ -2774,9 +2774,9 @@ impl Codegen {
 /// Look up the vector table address for an interrupt name on a given CPU family.
 /// Returns the address where the linker should write the 2-byte target function
 /// address.
-fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
+pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
     match cpu {
-        "mos6502" | "mos65sc02" | "ricoh2a03" | "ricoh2a07" => match interrupt_name {
+        "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
             "reset" => Some(0xFFFC),
             "nmi" => Some(0xFFFA),
             "irq" => Some(0xFFFE),
@@ -2792,6 +2792,14 @@ fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
             _ => None,
         },
         // Other CPU families: no vector table support yet.
+        "sm83" => match interrupt_name {
+            "vblank" => Some(0x0040),
+            "lcdc" => Some(0x0048),
+            "timer" => Some(0x0050),
+            "serial" => Some(0x0058),
+            "joypad" => Some(0x0060),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -3233,7 +3241,7 @@ mod tests {
         let tmp = tmp.canonicalize().unwrap();
         let file = tmp.join("cache-test.op");
         std::fs::write(&file, "const ANSWER: u8 = 42;\n").unwrap();
-        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        let target = TargetTriplet::parse("rp2A03-nintendo-nes-ntsc").unwrap();
 
         let mut cache = ModuleCache::default();
         let first = cache.load_module(&file, &target, &[]).unwrap();
@@ -3247,7 +3255,7 @@ mod tests {
 
     #[test]
     fn load_module_errors_when_file_missing() {
-        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        let target = TargetTriplet::parse("rp2A03-nintendo-nes-ntsc").unwrap();
         let mut cache = ModuleCache::default();
         let missing = std::path::Path::new("/nonexistent-opc-test/missing.op");
         assert!(cache.load_module(missing, &target, &[]).is_err());
@@ -3255,11 +3263,11 @@ mod tests {
 
     /// Build a minimal Codegen for unit tests.
     fn test_codegen() -> Codegen {
-        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        let target = TargetTriplet::parse("rp2A03-nintendo-nes-ntsc").unwrap();
         Codegen {
             target,
             opt_level: 0,
-            encoding_table: get_full_encoding_table("mos6502"),
+            encoding_table: get_full_encoding_table("rp2A03"),
             sections: Vec::new(),
             current_section: None,
             inline_fns: HashMap::new(),
@@ -3849,7 +3857,7 @@ mod tests {
     /// Parse `source` and run the two-pass module walk on it.
     fn walk_parsed_source(source: &str) -> (Codegen, Vec<op_diagnostics::Diagnostic>) {
         let (ast, diags) =
-            crate::parser::parse_source("multi-pass.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+            crate::parser::parse_source("multi-pass.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
         assert!(diags.is_empty(), "parse diagnostics: {diags:?}");
         let mut codegen = test_codegen_with_rom_section();
         codegen.walk_module(&ast.root);
@@ -3956,7 +3964,7 @@ mod tests {
         let tmp = tmp.canonicalize().unwrap();
         let file = tmp.join("dirtest.op");
         std::fs::write(&file, "const X: u8 = 1;\n").unwrap();
-        let target = TargetTriplet::parse("mos6502-nintendo-nes-ntsc").unwrap();
+        let target = TargetTriplet::parse("rp2A03-nintendo-nes-ntsc").unwrap();
 
         let mut cache = ModuleCache::default();
         cache.load_module(&file, &target, &[]).unwrap();

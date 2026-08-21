@@ -14,7 +14,7 @@ use opc::linker::link_source;
 fn obj_with(sections: Vec<Section>) -> ObjectFile {
     ObjectFile {
         version: 1,
-        target: "mos6502-nintendo-nes-ntsc".to_string(),
+        target: "rp2A03-nintendo-nes-ntsc".to_string(),
         sections,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -26,7 +26,7 @@ fn obj_with(sections: Vec<Section>) -> ObjectFile {
 fn obj_with_pad(sections: Vec<Section>, pad_byte: u8) -> ObjectFile {
     ObjectFile {
         version: 1,
-        target: "mos6502-nintendo-nes-ntsc".to_string(),
+        target: "rp2A03-nintendo-nes-ntsc".to_string(),
         sections,
         interrupt_vectors: Vec::new(),
         header: None,
@@ -38,7 +38,7 @@ fn obj_with_pad(sections: Vec<Section>, pad_byte: u8) -> ObjectFile {
 fn obj_with_vectors(sections: Vec<Section>, vectors: Vec<InterruptVector>) -> ObjectFile {
     ObjectFile {
         version: 1,
-        target: "mos6502-nintendo-nes-ntsc".to_string(),
+        target: "rp2A03-nintendo-nes-ntsc".to_string(),
         sections,
         interrupt_vectors: vectors,
         header: None,
@@ -462,7 +462,7 @@ fn link_full_object_from_codegen() {
             }
         }
     "#;
-    let (ast, parse_diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, parse_diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let errors: Vec<_> = parse_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)

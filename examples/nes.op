@@ -2,10 +2,10 @@
 //!
 //! This file demonstrates the Op language as specified in
 //! docs/language-specification.md. It targets the NTSC NES
-//! (mos6502-nintendo-nes-ntsc).
+//! (rp2A03-nintendo-nes-ntsc).
 //!
 //! Build with:
-//!   opc --target mos6502-nintendo-nes-ntsc --format ines -o nes.nes nes-game.op
+//!   opc --target rp2A03-nintendo-nes-ntsc --format ines -o nes.nes nes-game.op
 //!
 //! This example uses the `std` lib. The `std::cpu` module provides
 //! CPU register references, opcodes, and condition keywords. The

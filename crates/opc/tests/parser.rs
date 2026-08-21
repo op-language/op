@@ -9,7 +9,7 @@ use opc::parser::parse_source;
 /// Helper: parse a source string with a default target and return the
 /// root module's items.
 fn parse_items(src: &str) -> Vec<Item> {
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     ast.root.items
 }
 
@@ -466,7 +466,7 @@ fn parse_asm_stmt_stops_at_line_break() {
     // wait_for_func bug: before the fix, the parser folded wait_for_func()
     // into ldx's operands because the lexer discards newlines.
     let src = "inline fn wait_for(amount) { ldx amount\nwait_for_func() }\ninline fn wait_for_func() { dex }";
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     // Find the wait_for inline fn.
     let inline = ast
         .root
@@ -721,15 +721,15 @@ fn parse_expr_all_operators() {
 
 #[test]
 fn parse_cfg_attribute() {
-    let items = parse_items("#[cfg(cpu = \"mos6502\")] const X: u8 = 0;");
-    // With target mos6502-nintendo-nes-ntsc, cpu matches.
+    let items = parse_items("#[cfg(cpu = \"rp2A03\")] const X: u8 = 0;");
+    // With target rp2A03-nintendo-nes-ntsc, cpu matches.
     assert_eq!(items.len(), 1);
 }
 
 #[test]
 fn parse_cfg_attribute_dropped() {
     let items = parse_items("#[cfg(cpu = \"z80\")] const X: u8 = 0;");
-    // With target mos6502-nintendo-nes-ntsc, cpu does not match.
+    // With target rp2A03-nintendo-nes-ntsc, cpu does not match.
     assert_eq!(items.len(), 0);
 }
 

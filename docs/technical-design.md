@@ -118,7 +118,7 @@ Output:
                   Default: the format for the target.
 
 Target:
-  --target <triplet>  Target triplet, e.g. mos6502-nintendo-nes-ntsc.
+  --target <triplet>  Target triplet, e.g. rp2A03-nintendo-nes-ntsc.
   --cpu <name>        CPU family name (overrides triplet CPU).
   --feature <name>    Enable a feature flag.
 
@@ -178,7 +178,7 @@ complete token type reference table.
 ```json
 {
   "version": 1,
-  "target": "mos6502-nintendo-nes-ntsc",
+  "target": "rp2A03-nintendo-nes-ntsc",
   "root": {
     "kind": "Module",
     "name": "game",
@@ -210,7 +210,7 @@ Post-compile (.opl):
 ```json
 {
   "version": 1,
-  "target": "mos6502-nintendo-nes-ntsc",
+  "target": "rp2A03-nintendo-nes-ntsc",
   "sections": [
     {
       "name": "rom_bank0",
@@ -653,7 +653,7 @@ the symbol table entry layout.
 
 ### Lib names
 
-Example lib names: `mos6502`, `mos65sc02`, `ricoh2a03`,
+Example lib names: `mos6502`, `mos65sc02`, `rp2A03`, `rp2A07`,
 `wdc65c816`, `m68000`, `z80`, `lr35902`, `nes`,
 `lynx`, `gameboy`, `snes`, `genesis`.
 
@@ -840,14 +840,14 @@ path = "src/lib.op"
 [[rom]]
 name = "nes-demo"
 path = "src/cart.op"
-target = "mos6502-nintendo-nes-ntsc"
+target = "rp2A03-nintendo-nes-ntsc"
 
 [dependencies]
 mos6502 = "1.0"
 nes = "1.0"
 
 [target]
-default = "mos6502-nintendo-nes-ntsc"
+default = "rp2A03-nintendo-nes-ntsc"
 
 [features]
 debug = []
@@ -940,7 +940,7 @@ configuration.
 default = "https://github.com/wookie/op-lib-registry"
 
 [build]
-target = "mos6502-nintendo-nes-ntsc"
+target = "rp2A03-nintendo-nes-ntsc"
 opt-level = 1
 ```
 
@@ -1027,22 +1027,22 @@ build time.
 ### Full pipeline with opc
 
 ```
-opc --target mos6502-nintendo-nes-ntsc -o nes.nes game.op
+opc --target rp2A03-nintendo-nes-ntsc -o nes.nes game.op
 ```
 
 ### Stage-by-stage with opc
 
 ```
-opc --target mos6502-nintendo-nes-ntsc --lex -o game.opx game.op
-opc --target mos6502-nintendo-nes-ntsc --parse -o game.opa game.opx
-opc --target mos6502-nintendo-nes-ntsc --compile -o game.opl game.opa
-opc --target mos6502-nintendo-nes-ntsc --link -o game.opl game.opl
+opc --target rp2A03-nintendo-nes-ntsc --lex -o game.opx game.op
+opc --target rp2A03-nintendo-nes-ntsc --parse -o game.opa game.opx
+opc --target rp2A03-nintendo-nes-ntsc --compile -o game.opl game.opa
+opc --target rp2A03-nintendo-nes-ntsc --link -o game.opl game.opl
 ```
 
 ### With cart
 
 ```
-cart init --target mos6502-nintendo-nes-ntsc nes-demo
+cart init --target rp2A03-nintendo-nes-ntsc nes-demo
 cd nes-demo
 cart build
 cart run

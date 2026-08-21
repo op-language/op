@@ -30,11 +30,11 @@ tool, the intermediate file formats, or the linker output formats. The document
 - Rust Programming Language (syntax for attributes, modules, types, constants)
 - MOS 6502 Instruction Set Reference
 - MOS 65SC02 Instruction Set Reference
-- Ricoh 2A03 / 2A07 Instruction Set Reference
+- Ricoh RP2A03 / RP2A07 Instruction Set Reference
 - WDC 65C816 Instruction Set Reference
 - Motorola 68000 Instruction Set Reference
 - Zilog Z80 Instruction Set Reference
-- Sharp LR35902 Instruction Set Reference
+- Sharp SM83 Instruction Set Reference
 
 ## Terms and definitions
 
@@ -44,11 +44,11 @@ the compiler which opcodes, registers, conditionals, and memory model apply.
 
 **triplet**
 The target identifier string in the form `cpu-manufacturer-machine-variant`.
-Example: `mos6502-nintendo-nes-ntsc`.
+Example: `rp2A03-nintendo-nes-ntsc`.
 
 **CPU family**
 A group of CPU cores that share a base instruction set. Example: the MOS 6502
-family includes the 6502, 65SC02, Ricoh 2A03, and Ricoh 2A07.
+family includes the 6502, 65SC02, Ricoh RP2A03, and Ricoh RP2A07.
 
 **platform**
 The machine and variant portion of a triplet. Example: `nintendo-nes-ntsc`.
@@ -680,10 +680,10 @@ target and the feature flags. The compiler evaluates the predicate before it
 parses the item body.
 
 ```
-#[cfg(target = "mos6502-nintendo-nes-ntsc")]
+#[cfg(target = "rp2A03-nintendo-nes-ntsc")]
 const VIDEO_STANDARD: u8 = 0;
 
-#[cfg(target = "mos6502-nintendo-nes-pal")]
+#[cfg(target = "rp2A07-nintendo-nes-pal")]
 const VIDEO_STANDARD: u8 = 1;
 ```
 
@@ -691,8 +691,8 @@ The cfg predicate supports the following keys.
 
 | Key | Value | Example |
 |-----|-------|---------|
-| `target` | Full triplet string | `mos6502-nintendo-nes-ntsc` |
-| `cpu` | CPU family name | `mos6502` |
+| `target` | Full triplet string | `rp2A03-nintendo-nes-ntsc` |
+| `cpu` | CPU family name | `rp2A03` |
 | `manufacturer` | Manufacturer name | `nintendo` |
 | `machine` | Machine name | `nes` |
 | `variant` | Variant name | `ntsc` |
@@ -701,12 +701,17 @@ The cfg predicate supports the following keys.
 The cfg predicate supports the boolean combinators `all`, `any`, and `not`.
 
 ```
-#[cfg(all(cpu = "mos6502", not(variant = "pal")))]
+#[cfg(all(cpu = "rp2A03", not(variant = "pal")))]
 const REFRESH_HZ: u8 = 60;
 
-#[cfg(any(target = "mos6502-nintendo-nes-ntsc", target = "mos6502-nintendo-nes-pal"))]
+#[cfg(any(target = "rp2A03-nintendo-nes-ntsc", target = "rp2A07-nintendo-nes-pal"))]
 const IS_NES: bool = true;
 ```
+
+**Known limitation:** The `all`, `any`, and `not` combinators are not
+implemented in the current compiler. The compiler evaluates them to
+`true`. This means the item is always included regardless of the
+condition. This will be fixed in a future release.
 
 A program passes feature flags on the `opc` command line or in the
 `Cart.toml` `[features]` section. The compiler defines the `target`, `cpu`,
@@ -1171,18 +1176,18 @@ The following table lists the normative triplets.
 | `mos6502-atari-2600` | MOS 6502 | Atari 2600 |
 | `mos6502-atari-5200` | MOS 6502 | Atari 5200 |
 | `mos6502-atari-7800` | MOS 6502 | Atari 7800 |
-| `mos65sc02-atari-lynx` | MOS 65SC02 | Atari Lynx |
+| `vl65nc02-atari-lynx` | VLSI VL65NC02 | Atari Lynx |
 | `mos6502-commodore-64` | MOS 6502 | Commodore 64 |
 | `mos6502-nec-pcengine` | MOS 6502 | NEC PC Engine |
-| `mos6502-nintendo-nes-ntsc` | Ricoh 2A03 | NES NTSC |
-| `mos6502-nintendo-nes-pal` | Ricoh 2A07 | NES PAL |
+| `rp2A03-nintendo-nes-ntsc` | Ricoh RP2A03 | NES NTSC |
+| `rp2A07-nintendo-nes-pal` | Ricoh RP2A07 | NES PAL |
 | `m68000-neogeo-aes` | Motorola 68000 | Neo Geo AES |
 | `m68000-sega-genesis` | Motorola 68000 | Sega Genesis |
 | `wdc65c816-apple-iigs` | WDC 65C816 | Apple IIgs |
 | `wdc65c816-nintendo-snes` | WDC 65C816 | SNES |
 | `z80-neogeo-aes` | Zilog Z80 | Neo Geo AES |
-| `z80-nintendo-gameboy` | Sharp LR35902 | Game Boy |
-| `z80-nintendo-gameboy-color` | Sharp LR35902 | Game Boy Color |
+| `sm83-nintendo-gameboy` | Sharp SM83 | Game Boy |
+| `sm83-nintendo-gameboy-color` | Sharp SM83 | Game Boy Color |
 | `z80-sega-gamegear` | Zilog Z80 | Sega Game Gear |
 | `z80-sega-genesis` | Zilog Z80 | Sega Genesis |
 | `z80-sega-mastersystem` | Zilog Z80 | Sega Master System |
@@ -1367,17 +1372,29 @@ ROM. All code runs from RAM. The Lynx supports the plain `interrupt` keyword
 form. The lib defines `irq` for `#[interrupt(...)]`. The programmer sets the
 interrupt vector registers at run time.
 
-### Ricoh 2A03 / 2A07
+### VLSI VL65NC02
 
-The Ricoh 2A03 (NTSC) and 2A07 (PAL) are NMOS 6502 cores without binary-coded
+The VLSI VL65NC02 is the custom CPU in the Atari Lynx. It implements the
+65SC02 instruction set. The opcode set and the addressing modes match the
+MOS 65SC02. The lib defines `CLOCK_HZ` as 4000000.
+
+The Atari Lynx does not directly address cartridge ROM. All code runs from
+RAM. The lib defines `reset`, `nmi`, and `irq` for `#[interrupt(...)]`.
+
+### Ricoh RP2A03 / RP2A07
+
+The Ricoh RP2A03 (NTSC) and RP2A07 (PAL) are NMOS 6502 cores without binary-coded
 decimal mode. The opcode set and the addressing modes match the MOS 6502. The
-undocumented opcodes match the MOS 6502.
+undocumented opcodes match the MOS 6502. The `CLD` and `SED` opcodes and the `D`
+status flag are removed from the lib because the chips lack decimal-mode
+circuitry.
 
-The 2A03 includes on-die audio and DMA hardware. The lib defines the
+The RP2A03 includes on-die audio and DMA hardware. The lib defines the
 memory-mapped IO addresses for the audio and DMA registers.
 
-The 2A07 differs from the 2A03 in the clock divider. The lib defines the
-`REFRESH_HZ` constant as 60 for the 2A03 and 50 for the 2A07.
+The RP2A07 differs from the RP2A03 in the clock divider. The lib defines the
+`CLOCK_HZ` constant as 1789773 for the RP2A03 (NTSC) and 1662607 for the RP2A07
+(PAL). The `REFRESH_HZ` constant is 60 for the RP2A03 and 50 for the RP2A07.
 
 ### WDC 65C816
 
@@ -1635,9 +1652,9 @@ The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
 | SLL | Shift left logical (bit 0 set to 1) |
 | IN (C) | Input to all registers when B is not used as operand |
 
-### Sharp LR35902
+### Sharp SM83
 
-The Sharp LR35902 is a Z80 variant used in the Nintendo Game Boy and Game Boy
+The Sharp SM83 is a Z80 variant used in the Nintendo Game Boy and Game Boy
 Color. The CPU removes the alternate register set, the I and R registers, and
 several Z80 opcodes. The CPU adds the `STOP` and `LDI A, (HL)` opcodes.
 
@@ -1649,10 +1666,10 @@ The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
 
 #### Opcodes
 
-The LR35902 opcode set is a subset of the Z80 set. The lib defines the legal
+The SM83 opcode set is a subset of the Z80 set. The lib defines the legal
 opcodes. Additional opcodes: `STOP`, `LDI A`, `LDD A`, `LDH A`, `LDH (n)`.
 
-The LR35902 does **not** support the alternate register set, the `EXX`
+The SM83 does **not** support the alternate register set, the `EXX`
 instruction, the `RLD` and `RRD` instructions, and the interrupt mode
 selection is simplified.
 
