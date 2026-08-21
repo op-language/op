@@ -7,8 +7,8 @@ use opc::parser::parse_source;
 
 #[test]
 fn lex_then_parse_nes_code() {
-    let source = include_str!("../../../examples/nes.op");
-    let (ast, diags) = parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let source = include_str!("data/nes.op");
+    let (ast, diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     // No error diagnostics.
     let errors: Vec<_> = diags
@@ -71,8 +71,8 @@ fn lex_then_parse_nes_code() {
 
 #[test]
 fn lex_then_parse_nes_game() {
-    let source = include_str!("../../../examples/nes.op");
-    let (ast, diags) = parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let source = include_str!("data/nes.op");
+    let (ast, diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = diags
         .iter()
@@ -309,9 +309,8 @@ use opc::codegen::compile_source;
 
 #[test]
 fn lex_parse_compile_nes_code() {
-    let source = include_str!("../../../examples/nes.op");
-    let (ast, parse_diags) =
-        parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let source = include_str!("data/nes.op");
+    let (ast, parse_diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
@@ -331,9 +330,8 @@ fn lex_parse_compile_nes_code() {
 
 #[test]
 fn lex_parse_compile_nes_game() {
-    let source = include_str!("../../../examples/nes.op");
-    let (ast, parse_diags) =
-        parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let source = include_str!("data/nes.op");
+    let (ast, parse_diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
@@ -625,8 +623,8 @@ fn full_pipeline_std_nes_game() {
         return;
     };
 
-    let source = include_str!("../../../examples/nes.op");
-    let font = include_bytes!("../../../examples/font.chr");
+    let source = include_str!("data/nes.op");
+    let font = include_bytes!("data/font.chr");
 
     // Write the source and font into a temp dir so locate_bytes! can
     // find font.chr regardless of the test's working directory.
