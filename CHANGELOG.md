@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.0]
 
+### Changed
+- Integration test data moved from `examples/` to
+  `crates/opc/tests/data/`. The `include_str!` and `include_bytes!`
+  paths in `integration.rs` now reference `data/nes.op` and
+  `data/font.chr` instead of `../../../examples/nes.op` and
+  `../../../examples/font.chr`. The `examples/` directory is deleted.
+
 ### Added
 - `ENCODING_VL65NC02` encoding table in `encoding.rs`. The table is an
   exact copy of `ENCODING_65SC02`. The VL65NC02 is a 65SC02 core.
