@@ -654,20 +654,20 @@ impl Codegen {
 
         for item in items {
             match item {
-            Item::FnDecl {
-                name, attributes, ..
-            } => {
-                // #[interrupt] on a fn definition makes it a root.
-                let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
-                // A function named `main` is always a root (entry point
-                // for platforms without an interrupt-based reset vector).
-                if has_interrupt || name == "main" {
-                    roots.push(PlacementRoot {
-                        name: name.clone(),
-                        section_idx: first_rom,
-                    });
+                Item::FnDecl {
+                    name, attributes, ..
+                } => {
+                    // #[interrupt] on a fn definition makes it a root.
+                    let has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
+                    // A function named `main` is always a root (entry point
+                    // for platforms without an interrupt-based reset vector).
+                    if has_interrupt || name == "main" {
+                        roots.push(PlacementRoot {
+                            name: name.clone(),
+                            section_idx: first_rom,
+                        });
+                    }
                 }
-            }
                 Item::BlockAttribute {
                     attr,
                     items: block_items,
@@ -3816,10 +3816,7 @@ mod tests {
         // placed after main in the same section.
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x0B, 0x60]);
         // The const data follows: "Hello, NES!" (11 bytes).
-        assert_eq!(
-            &codegen.sections[0].data[3..14],
-            b"Hello, NES!"
-        );
+        assert_eq!(&codegen.sections[0].data[3..14], b"Hello, NES!");
     }
 
     /// `sizeof!(ptr)` resolves to the byte size of the pointer type.
