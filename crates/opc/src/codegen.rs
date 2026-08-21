@@ -2792,6 +2792,14 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             _ => None,
         },
         // Other CPU families: no vector table support yet.
+        "sm83" => match interrupt_name {
+            "vblank" => Some(0x0040),
+            "lcdc" => Some(0x0048),
+            "timer" => Some(0x0050),
+            "serial" => Some(0x0058),
+            "joypad" => Some(0x0060),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -1761,6 +1761,264 @@ pub const ENCODING_68000: &[EncodingEntry] = &[
     },
 ];
 
+// --- SM83 encoding table ----------------------------------------------------
+// The Sharp SM83 is a Z80 derivative used in the Game Boy. The opcode
+// encoding differs from the Z80. This table covers the core SM83
+// instructions.
+
+pub const ENCODING_SM83: &[EncodingEntry] = &[
+    // LD
+    EncodingEntry {
+        mnemonic: "ld",
+        mode: AddrMode::Immediate,
+        opcode: 0x3E,
+    },
+    EncodingEntry {
+        mnemonic: "ld",
+        mode: AddrMode::Absolute,
+        opcode: 0x32,
+    },
+    // PUSH/POP
+    EncodingEntry {
+        mnemonic: "push",
+        mode: AddrMode::Implied,
+        opcode: 0xC5,
+    },
+    EncodingEntry {
+        mnemonic: "pop",
+        mode: AddrMode::Implied,
+        opcode: 0xC1,
+    },
+    // EX
+    EncodingEntry {
+        mnemonic: "ex",
+        mode: AddrMode::Implied,
+        opcode: 0x08,
+    },
+    // LDI/LDD
+    EncodingEntry {
+        mnemonic: "ldi",
+        mode: AddrMode::Implied,
+        opcode: 0x22,
+    },
+    EncodingEntry {
+        mnemonic: "ldd",
+        mode: AddrMode::Implied,
+        opcode: 0x3A,
+    },
+    // ADD/ADC/SUB/SBC
+    EncodingEntry {
+        mnemonic: "add",
+        mode: AddrMode::Immediate,
+        opcode: 0xC6,
+    },
+    EncodingEntry {
+        mnemonic: "adc",
+        mode: AddrMode::Immediate,
+        opcode: 0xCE,
+    },
+    EncodingEntry {
+        mnemonic: "sub",
+        mode: AddrMode::Immediate,
+        opcode: 0xD6,
+    },
+    EncodingEntry {
+        mnemonic: "sbc",
+        mode: AddrMode::Immediate,
+        opcode: 0xDE,
+    },
+    // AND/OR/XOR/CP
+    EncodingEntry {
+        mnemonic: "and",
+        mode: AddrMode::Immediate,
+        opcode: 0xE6,
+    },
+    EncodingEntry {
+        mnemonic: "or",
+        mode: AddrMode::Immediate,
+        opcode: 0xF6,
+    },
+    EncodingEntry {
+        mnemonic: "xor",
+        mode: AddrMode::Immediate,
+        opcode: 0xEE,
+    },
+    EncodingEntry {
+        mnemonic: "cp",
+        mode: AddrMode::Immediate,
+        opcode: 0xFE,
+    },
+    // INC/DEC
+    EncodingEntry {
+        mnemonic: "inc",
+        mode: AddrMode::Implied,
+        opcode: 0x3C,
+    },
+    EncodingEntry {
+        mnemonic: "dec",
+        mode: AddrMode::Implied,
+        opcode: 0x3D,
+    },
+    // DAA/CPL/CCF/SCF
+    EncodingEntry {
+        mnemonic: "daa",
+        mode: AddrMode::Implied,
+        opcode: 0x27,
+    },
+    EncodingEntry {
+        mnemonic: "cpl",
+        mode: AddrMode::Implied,
+        opcode: 0x2F,
+    },
+    EncodingEntry {
+        mnemonic: "ccf",
+        mode: AddrMode::Implied,
+        opcode: 0x3F,
+    },
+    EncodingEntry {
+        mnemonic: "scf",
+        mode: AddrMode::Implied,
+        opcode: 0x37,
+    },
+    // NOP/HALT/DI/EI
+    EncodingEntry {
+        mnemonic: "nop",
+        mode: AddrMode::Implied,
+        opcode: 0x00,
+    },
+    EncodingEntry {
+        mnemonic: "halt",
+        mode: AddrMode::Implied,
+        opcode: 0x76,
+    },
+    EncodingEntry {
+        mnemonic: "di",
+        mode: AddrMode::Implied,
+        opcode: 0xF3,
+    },
+    EncodingEntry {
+        mnemonic: "ei",
+        mode: AddrMode::Implied,
+        opcode: 0xFB,
+    },
+    // RLC/RL/RRC/RR/SLA/SRA/SRL (CB prefix)
+    EncodingEntry {
+        mnemonic: "rlc",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "rl",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "rrc",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "rr",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "sla",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "sra",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "srl",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    // RLCA/RRCA/RLA/RRA
+    EncodingEntry {
+        mnemonic: "rlca",
+        mode: AddrMode::Implied,
+        opcode: 0x07,
+    },
+    EncodingEntry {
+        mnemonic: "rrca",
+        mode: AddrMode::Implied,
+        opcode: 0x0F,
+    },
+    EncodingEntry {
+        mnemonic: "rla",
+        mode: AddrMode::Implied,
+        opcode: 0x17,
+    },
+    EncodingEntry {
+        mnemonic: "rra",
+        mode: AddrMode::Implied,
+        opcode: 0x1F,
+    },
+    // JP/JR/CALL/RET/RETI/RST
+    EncodingEntry {
+        mnemonic: "jp",
+        mode: AddrMode::Absolute,
+        opcode: 0xC3,
+    },
+    EncodingEntry {
+        mnemonic: "jr",
+        mode: AddrMode::Relative,
+        opcode: 0x18,
+    },
+    EncodingEntry {
+        mnemonic: "call",
+        mode: AddrMode::Absolute,
+        opcode: 0xCD,
+    },
+    EncodingEntry {
+        mnemonic: "ret",
+        mode: AddrMode::Implied,
+        opcode: 0xC9,
+    },
+    EncodingEntry {
+        mnemonic: "reti",
+        mode: AddrMode::Implied,
+        opcode: 0xD9,
+    },
+    EncodingEntry {
+        mnemonic: "rst",
+        mode: AddrMode::Implied,
+        opcode: 0xC7,
+    },
+    // BIT/SET/RES (CB prefix)
+    EncodingEntry {
+        mnemonic: "bit",
+        mode: AddrMode::Immediate,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "set",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "res",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    // STOP
+    EncodingEntry {
+        mnemonic: "stop",
+        mode: AddrMode::Implied,
+        opcode: 0x10,
+    },
+    // LDH (load from high memory)
+    EncodingEntry {
+        mnemonic: "ldh",
+        mode: AddrMode::Immediate,
+        opcode: 0xF0,
+    },
+];
+
 // --- CPU family selection ---------------------------------------------------
 
 /// Get the encoding table for a given CPU family name.
@@ -1774,6 +2032,7 @@ pub fn get_encoding_table(cpu: &str) -> &'static [EncodingEntry] {
         "rp2A03" => ENCODING_6502,
         "rp2A07" => ENCODING_6502,
         "vl65NC02" => ENCODING_VL65NC02,
+        "sm83" => ENCODING_SM83,
         _ => &[],
     }
 }
@@ -1810,6 +2069,9 @@ pub fn get_full_encoding_table(cpu: &str) -> Vec<&'static EncodingEntry> {
         "vl65NC02" => {
             table.extend(ENCODING_6502.iter());
             table.extend(ENCODING_VL65NC02.iter());
+        }
+        "sm83" => {
+            table.extend(ENCODING_SM83.iter());
         }
         _ => {}
     }
