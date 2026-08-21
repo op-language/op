@@ -8,7 +8,7 @@ use opc::parser::parse_source;
 #[test]
 fn lex_then_parse_nes_code() {
     let source = include_str!("../../../examples/nes.op");
-    let (ast, diags) = parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, diags) = parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     // No error diagnostics.
     let errors: Vec<_> = diags
@@ -72,7 +72,7 @@ fn lex_then_parse_nes_code() {
 #[test]
 fn lex_then_parse_nes_game() {
     let source = include_str!("../../../examples/nes.op");
-    let (ast, diags) = parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, diags) = parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = diags
         .iter()
@@ -111,7 +111,7 @@ fn lex_then_parse_std_mos6502() {
     let (ast, diags) = parse_source(
         "std/src/cpu/mos6502.op",
         source,
-        "mos6502-nintendo-nes-ntsc",
+        "rp2A03-nintendo-nes-ntsc",
         &[],
     );
 
@@ -157,7 +157,7 @@ fn lex_then_parse_std_nes_macros() {
     let (ast, diags) = parse_source(
         "std/src/machine/nes/macros.op",
         source,
-        "mos6502-nintendo-nes-ntsc",
+        "rp2A03-nintendo-nes-ntsc",
         &[],
     );
 
@@ -234,7 +234,7 @@ fn full_pipeline_lex_then_parse() {
         }
     "#;
 
-    let (ast, diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = diags
         .iter()
@@ -253,8 +253,8 @@ fn full_pipeline_lex_then_parse() {
 #[test]
 fn parse_with_cfg_filtering() {
     let src = r#"
-        #[cfg(cpu = "mos6502")]
-        const ON_6502: u8 = 1;
+        #[cfg(cpu = "rp2A03")]
+        const ON_2A03: u8 = 1;
 
         #[cfg(cpu = "z80")]
         const ON_Z80: u8 = 2;
@@ -262,10 +262,10 @@ fn parse_with_cfg_filtering() {
         const ALWAYS: u8 = 3;
     "#;
 
-    let (ast, _diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let items = &ast.root.items;
 
-    // ON_6502 and ALWAYS should be present; ON_Z80 should be dropped.
+    // ON_2A03 and ALWAYS should be present; ON_Z80 should be dropped.
     assert_eq!(items.len(), 2);
 
     let names: Vec<&str> = items
@@ -275,7 +275,7 @@ fn parse_with_cfg_filtering() {
             _ => None,
         })
         .collect();
-    assert!(names.contains(&"ON_6502"));
+    assert!(names.contains(&"ON_2A03"));
     assert!(names.contains(&"ALWAYS"));
     assert!(!names.contains(&"ON_Z80"));
 }
@@ -290,14 +290,14 @@ fn parse_with_feature_flag() {
     "#;
 
     // Without the feature flag, HAS_UNDOC should be dropped.
-    let (ast, _) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, _) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     assert_eq!(ast.root.items.len(), 1);
 
     // With the feature flag, HAS_UNDOC should be present.
     let (ast, _) = parse_source(
         "test.op",
         src,
-        "mos6502-nintendo-nes-ntsc",
+        "rp2A03-nintendo-nes-ntsc",
         &["undocumented".to_string()],
     );
     assert_eq!(ast.root.items.len(), 2);
@@ -311,7 +311,7 @@ use opc::codegen::compile_source;
 fn lex_parse_compile_nes_code() {
     let source = include_str!("../../../examples/nes.op");
     let (ast, parse_diags) =
-        parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+        parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
@@ -325,7 +325,7 @@ fn lex_parse_compile_nes_code() {
     // The codegen should not crash. The font.chr locate_bytes may
     // produce an error if the CWD doesn't contain font.chr, but the
     // codegen should still produce sections.
-    assert_eq!(obj.target, "mos6502-nintendo-nes-ntsc");
+    assert_eq!(obj.target, "rp2A03-nintendo-nes-ntsc");
     assert!(!obj.sections.is_empty(), "expected sections from nes.op");
 }
 
@@ -333,7 +333,7 @@ fn lex_parse_compile_nes_code() {
 fn lex_parse_compile_nes_game() {
     let source = include_str!("../../../examples/nes.op");
     let (ast, parse_diags) =
-        parse_source("examples/nes.op", source, "mos6502-nintendo-nes-ntsc", &[]);
+        parse_source("examples/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
@@ -381,7 +381,7 @@ fn full_pipeline_lex_parse_compile() {
         }
     "#;
 
-    let (ast, parse_diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, parse_diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let errors: Vec<_> = parse_diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
@@ -473,14 +473,14 @@ const HELLO_NES_SRC: &str = r#"
 #[test]
 fn full_pipeline_end_to_end() {
     let (_obj, _linked, bytes) =
-        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+        run_full_pipeline("test.op", HELLO_NES_SRC, "rp2A03-nintendo-nes-ntsc");
     assert!(!bytes.is_empty(), "output binary should not be empty");
 }
 
 #[test]
 fn full_pipeline_ines_output() {
     let (_obj, _linked, bytes) =
-        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+        run_full_pipeline("test.op", HELLO_NES_SRC, "rp2A03-nintendo-nes-ntsc");
     assert!(
         bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
         "iNES output should start with NES magic"
@@ -506,7 +506,7 @@ fn full_pipeline_raw_output() {
 #[test]
 fn full_pipeline_link_resolved() {
     let (_obj, linked, _bytes) =
-        run_full_pipeline("test.op", HELLO_NES_SRC, "mos6502-nintendo-nes-ntsc");
+        run_full_pipeline("test.op", HELLO_NES_SRC, "rp2A03-nintendo-nes-ntsc");
     for s in &linked.sections {
         assert!(
             s.relocations.is_empty(),
@@ -571,7 +571,7 @@ fn run_std_pipeline(dir: &std::path::Path, std_root: &std::path::Path) -> Vec<u8
     let (_obj, _linked, bytes) = run_full_pipeline_with_includes(
         src_path.to_str().unwrap(),
         STD_NES_SRC,
-        "mos6502-nintendo-nes-ntsc",
+        "rp2A03-nintendo-nes-ntsc",
         &[std_root.to_string_lossy().into_owned()],
     );
     bytes
@@ -639,7 +639,7 @@ fn full_pipeline_std_nes_game() {
     let (ast, parse_diags) = parse_source(
         src_path.to_str().unwrap(),
         source,
-        "mos6502-nintendo-nes-ntsc",
+        "rp2A03-nintendo-nes-ntsc",
         &[],
     );
     let errors: Vec<_> = parse_diags
@@ -695,7 +695,7 @@ fn full_pipeline_std_nes_game() {
         .collect();
     assert!(errors.is_empty(), "linker errors: {:?}", errors);
 
-    let format = default_format_for_target("mos6502-nintendo-nes-ntsc");
+    let format = default_format_for_target("rp2A03-nintendo-nes-ntsc");
     let bytes = emit_linked(&linked, format).expect("emit_linked failed");
     assert!(
         bytes.starts_with(&[b'N', b'E', b'S', 0x1A]),
@@ -722,7 +722,7 @@ fn parser_inline_call_new_line() {
     use op_common::ast::{FnStmt, Item};
 
     let src = "inline fn caller() {\n lda #0\n callee()\n}\ninline fn callee() {\n inx\n}\n";
-    let (ast, diags) = parse_source("test.op", src, "mos6502-nintendo-nes-ntsc", &[]);
+    let (ast, diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == op_diagnostics::Severity::Error)
@@ -771,7 +771,7 @@ fn stage_chaining() {
     let opa = dir.join("test.opa");
     let opl = dir.join("test.opl");
     let linked_opl = dir.join("test.linked.opl");
-    let target = "mos6502-nintendo-nes-ntsc";
+    let target = "rp2A03-nintendo-nes-ntsc";
 
     // 1. --lex: source -> .opx
     let args_lex = opc::cli::OpcArgs::parse_from([
@@ -848,7 +848,7 @@ fn output_stages_flag() {
     let src_path = dir.join("test.op");
     std::fs::write(&src_path, HELLO_NES_SRC).unwrap();
     let nes_path = dir.join("out.nes");
-    let target = "mos6502-nintendo-nes-ntsc";
+    let target = "rp2A03-nintendo-nes-ntsc";
 
     // Run the pipeline with --output-stages via the public stage fns so the
     // test does not depend on the private `run_pipeline` helper.

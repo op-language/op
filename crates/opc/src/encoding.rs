@@ -1640,6 +1640,8 @@ pub fn get_encoding_table(cpu: &str) -> &'static [EncodingEntry] {
         "wdc65c816" => ENCODING_65C816,
         "z80" => ENCODING_Z80,
         "m68000" => ENCODING_68000,
+        "rp2A03" => ENCODING_6502,
+        "rp2A07" => ENCODING_6502,
         _ => &[],
     }
 }
@@ -1666,6 +1668,12 @@ pub fn get_full_encoding_table(cpu: &str) -> Vec<&'static EncodingEntry> {
         }
         "m68000" => {
             table.extend(ENCODING_68000.iter());
+        }
+        "rp2A03" => {
+            table.extend(ENCODING_6502.iter());
+        }
+        "rp2A07" => {
+            table.extend(ENCODING_6502.iter());
         }
         _ => {}
     }

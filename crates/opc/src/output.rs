@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn raw_format_concatenates_rom_banks() {
         let obj = make_obj(
-            "mos6502-nintendo-nes-ntsc",
+            "rp2A03-nintendo-nes-ntsc",
             vec![
                 rom_section(0, 0xC000, vec![0xAA; 4]),
                 rom_section(1, 0x0000, vec![0xBB; 4]),
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn ines_format_writes_magic_header() {
         let obj = make_obj(
-            "mos6502-nintendo-nes-ntsc",
+            "rp2A03-nintendo-nes-ntsc",
             vec![
                 rom_section(0, 0xC000, vec![0x00; 16 * 1024]),
                 Section {
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn ines_format_records_mapper_and_flags() {
         let mut obj = make_obj(
-            "mos6502-nintendo-nes-ntsc",
+            "rp2A03-nintendo-nes-ntsc",
             vec![rom_section(0, 0xC000, vec![0x00; 16 * 1024])],
         );
         obj.header = Some(HeaderFields {
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn default_format_for_nes_is_ines() {
         assert_eq!(
-            default_format_for_target("mos6502-nintendo-nes-ntsc"),
+            default_format_for_target("rp2A03-nintendo-nes-ntsc"),
             "ines"
         );
     }

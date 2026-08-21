@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0]
+
+### Added
+- `rp2A03` and `rp2A07` CPU arms in `get_encoding_table` and
+  `get_full_encoding_table` (`encoding.rs`). Both reuse `ENCODING_6502`.
+  The Ricoh chips execute the full 6502 opcode set. CLD and SED run
+  as no-ops.
+- `rp2A03` and `rp2A07` arms in `interrupt_vector_address`
+  (`codegen.rs`). Both map reset to 0xFFFC, nmi to 0xFFFA, and irq to
+  0xFFFE.
+- New codegen tests verify the encoding-table lookup and the
+  interrupt-vector resolution for the new CPUs.
+
+### Changed
+- The `--target` help example shows
+  `rp2A03-nintendo-nes-ntsc`.
+- All compiler tests use `rp2A03-nintendo-nes-ntsc` as the fixture
+  target. The `mos6502` CPU stays valid for the other targets.
+- The `examples/nes.op` header comment references
+  `rp2A03-nintendo-nes-ntsc`.
+
+### Removed
+- Dead `ricoh2a03` and `ricoh2a07` arms in
+  `interrupt_vector_address`.
+
 ## [0.8.0]
 
 ### Added
