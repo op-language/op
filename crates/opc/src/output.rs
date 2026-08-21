@@ -580,16 +580,16 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     // Cartridge type at 0x147. Controls the MBC and extra hardware.
     if let Some(mbc) = header_field(obj, "mbc") {
         rom_bytes[0x147] = match mbc {
-            "rom" | "none" => 0x00,       // ROM only
-            "mbc1" => 0x01,               // MBC1
-            "mbc1_ram" => 0x02,          // MBC1 + RAM
-            "mbc1_ram_battery" => 0x03,  // MBC1 + RAM + Battery
-            "mbc3" => 0x11,               // MBC3
-            "mbc3_ram" => 0x12,          // MBC3 + RAM
-            "mbc3_ram_battery" => 0x13,  // MBC3 + RAM + Battery
-            "mbc5" => 0x19,               // MBC5
-            "mbc5_ram" => 0x1A,          // MBC5 + RAM
-            "mbc5_ram_battery" => 0x1B,  // MBC5 + RAM + Battery
+            "rom" | "none" => 0x00,     // ROM only
+            "mbc1" => 0x01,             // MBC1
+            "mbc1_ram" => 0x02,         // MBC1 + RAM
+            "mbc1_ram_battery" => 0x03, // MBC1 + RAM + Battery
+            "mbc3" => 0x11,             // MBC3
+            "mbc3_ram" => 0x12,         // MBC3 + RAM
+            "mbc3_ram_battery" => 0x13, // MBC3 + RAM + Battery
+            "mbc5" => 0x19,             // MBC5
+            "mbc5_ram" => 0x1A,         // MBC5 + RAM
+            "mbc5_ram_battery" => 0x1B, // MBC5 + RAM + Battery
             _ => 0x00,
         };
     }

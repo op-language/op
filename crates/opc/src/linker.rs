@@ -7,7 +7,8 @@
 use anyhow::Result;
 use op_diagnostics::{Diagnostic, Severity};
 use op_ir::{
-    InterruptVector, ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol, VectorEncoding,
+    InterruptVector, ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol,
+    VectorEncoding,
 };
 use std::collections::HashMap;
 
