@@ -577,6 +577,40 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
         rom_bytes[0x144..0x144 + n].copy_from_slice(&bytes[..n]);
     }
 
+    // Cartridge type at 0x147. Controls the MBC and extra hardware.
+    if let Some(mbc) = header_field(obj, "mbc") {
+        rom_bytes[0x147] = match mbc {
+            "rom" | "none" => 0x00,       // ROM only
+            "mbc1" => 0x01,               // MBC1
+            "mbc1_ram" => 0x02,          // MBC1 + RAM
+            "mbc1_ram_battery" => 0x03,  // MBC1 + RAM + Battery
+            "mbc3" => 0x11,               // MBC3
+            "mbc3_ram" => 0x12,          // MBC3 + RAM
+            "mbc3_ram_battery" => 0x13,  // MBC3 + RAM + Battery
+            "mbc5" => 0x19,               // MBC5
+            "mbc5_ram" => 0x1A,          // MBC5 + RAM
+            "mbc5_ram_battery" => 0x1B,  // MBC5 + RAM + Battery
+            _ => 0x00,
+        };
+    }
+
+    // ROM size at 0x148. Encoded as a power-of-2 value.
+    // 0x00 = 32KB, 0x01 = 64KB, 0x02 = 128KB, etc.
+    // Round up to the next power of 2.
+    let rom_kb = rom_bytes.len().next_power_of_two() / 1024;
+    rom_bytes[0x148] = match rom_kb {
+        32 => 0x00,
+        64 => 0x01,
+        128 => 0x02,
+        256 => 0x03,
+        512 => 0x04,
+        1024 => 0x05,
+        2048 => 0x06,
+        4096 => 0x07,
+        8192 => 0x08,
+        _ => 0x00,
+    };
+
     // Mask ROM version at 0x14C.
     if let Some(version) = header_field_u32(obj, "version") {
         rom_bytes[0x14C] = version as u8;
@@ -585,6 +619,11 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     // Header checksum at 0x14D.
     let cksum = gb_header_checksum(&rom_bytes);
     rom_bytes[0x14D] = cksum;
+
+    // Pad the ROM to the next power-of-2 size (minimum 32KB).
+    // The GB requires power-of-2 ROM sizes.
+    let padded_size = rom_bytes.len().next_power_of_two().max(32768);
+    rom_bytes.resize(padded_size, 0);
 
     rom_bytes
 }
