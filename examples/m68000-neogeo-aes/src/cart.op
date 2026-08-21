@@ -1,0 +1,25 @@
+//! m68000-neogeo-aes example
+//!
+//! Minimal cart with reset and level-2 interrupt handlers.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[interrupt(level2)]
+fn level2() {
+    rte
+}
+
+#[ram(org = 0x00FF0000, maxsize = 0x10000)] {
+}
+
+#[rom(org = 0x0000, bank = 0, maxsize = 0x100000)] {
+}
+
+#[setpad(0xFF)]

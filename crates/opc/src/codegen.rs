@@ -1611,6 +1611,66 @@ impl Codegen {
                     });
                     return;
                 }
+                "gb" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "gb".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "sega" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "sega".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "snes" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "snes".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "sms" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "sms".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "a78" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "a78".to_string(),
+                        fields,
+                    });
+                    return;
+                }
                 "setpad" => {
                     if let Some(arg) = attr.args.first() {
                         let val = arg.value.trim_matches('"');

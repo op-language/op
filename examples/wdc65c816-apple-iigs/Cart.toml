@@ -1,0 +1,16 @@
+[package]
+name = "wdc65c816_apple_iigs_example"
+version = "0.1.0"
+edition = "1"
+
+[[rom]]
+name = "example"
+path = "src/cart.op"
+target = "wdc65c816-apple-iigs"
+format = "raw"
+
+[dependencies]
+std = { version = "0.5.0", git = "https://github.com/op-language/std" }
+
+[target]
+default = "wdc65c816-apple-iigs"

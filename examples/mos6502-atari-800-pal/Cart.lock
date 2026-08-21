@@ -1,0 +1,11 @@
+version = 1
+
+[[package]]
+name = "std"
+version = "0.5.0"
+checksum = "b799150eed7c8560389e3c804357982b23e876f26bb844974d735458d81a2498"
+
+[package.source]
+type = "git"
+url = "https://github.com/op-language/std"
+sha = ""
