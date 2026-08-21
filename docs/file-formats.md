@@ -890,9 +890,10 @@ fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | The interrupt name. Valid values: `reset`, `nmi`, `irq`. |
-| `address` | integer | The vector table address where the linker writes the 2-byte target. For the 6502, `reset` is `0xFFFC`, `nmi` is `0xFFFA`, `irq` is `0xFFFE`. |
-| `target` | string | The symbol name of the target function. |
+| `name` | string | The interrupt name. Valid values: `reset`, `nmi`, `irq`, `vblank`, `lcdc`, `timer`, `serial`, `joypad`, `rst8` through `rst38`, `reset_pc`, `bus_error`, `address_error`, `illegal`, `zero_divide`, `chk`, `trapv`, `privilege`, `trace`, `line_a`, `line_f`, `spurious`, `level1` through `level7`, `trap0` through `trap15`. |
+| `address` | integer | The vector table address where the linker writes the entry. For the 6502, `reset` is `0xFFFC`, `nmi` is `0xFFFA`, `irq` is `0xFFFE`. For the Z80, `reset` is `0x0000`, `nmi` is `0x0066`. For the SM83, `vblank` is `0x0040`. For the 68000, `reset` is `0x0000`, `reset_pc` is `0x0004`. |
+| `target` | string | The symbol name of the target function. For the 68000 `reset` vector, the target is `_stack_top` and the linker computes the address from the first RAM section. |
+| `encoding` | string | How the linker encodes the vector entry. Valid values: `pointer2` (2-byte LE address, 6502 family and 65C816), `pointer4` (4-byte BE address, 68000), `jumpz80` (3-byte JP instruction, Z80), `jumpsm83` (3-byte JP instruction, SM83). Defaults to `pointer2`. |
 
 ### HeaderFields fields
 

@@ -1455,15 +1455,7 @@ impl Codegen {
                     if attr.path == "interrupt" {
                         if let Some(int_name) = attr.args.first().map(|a| a.name.as_str()) {
                             if !int_name.is_empty() {
-                                if let Some(vec_addr) =
-                                    interrupt_vector_address(&self.target.cpu, int_name)
-                                {
-                                    self.interrupt_vectors.push(op_ir::InterruptVector {
-                                        name: int_name.to_string(),
-                                        address: vec_addr,
-                                        target: name.clone(),
-                                    });
-                                }
+                                self.add_interrupt_vector(int_name, name);
                             }
                         }
                     }
@@ -1544,15 +1536,7 @@ impl Codegen {
                                     String::new()
                                 };
                                 if !target_name.is_empty() {
-                                    if let Some(vec_addr) =
-                                        interrupt_vector_address(&self.target.cpu, int_name)
-                                    {
-                                        self.interrupt_vectors.push(op_ir::InterruptVector {
-                                            name: int_name.to_string(),
-                                            address: vec_addr,
-                                            target: target_name,
-                                        });
-                                    }
+                                    self.add_interrupt_vector(int_name, &target_name);
                                 }
                             }
                         }
@@ -1560,6 +1544,42 @@ impl Codegen {
                 }
                 self.handle_placement(macro_name, argument);
             }
+        }
+    }
+
+    /// Add an interrupt vector entry for the given interrupt name and
+    /// target function. On the 68000, a `reset` interrupt emits two
+    /// vectors: the initial stack pointer at address 0x0000 (target
+    /// `_stack_top`, resolved by the linker from the first RAM section)
+    /// and the initial program counter at address 0x0004 (the handler).
+    fn add_interrupt_vector(&mut self, int_name: &str, target: &str) {
+        let encoding = vector_encoding_for(&self.target.cpu);
+
+        // 68000 reset: emit SSP vector (address 0x0000) and PC vector
+        // (address 0x0004) as a pair.
+        if self.target.cpu == "m68000" && int_name == "reset" {
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: "reset".to_string(),
+                address: 0x0000,
+                target: "_stack_top".to_string(),
+                encoding,
+            });
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: "reset_pc".to_string(),
+                address: 0x0004,
+                target: target.to_string(),
+                encoding,
+            });
+            return;
+        }
+
+        if let Some(vec_addr) = interrupt_vector_address(&self.target.cpu, int_name) {
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: int_name.to_string(),
+                address: vec_addr,
+                target: target.to_string(),
+                encoding,
+            });
         }
     }
 
@@ -2772,8 +2792,7 @@ impl Codegen {
 // --- Helper functions -------------------------------------------------------
 
 /// Look up the vector table address for an interrupt name on a given CPU family.
-/// Returns the address where the linker should write the 2-byte target function
-/// address.
+/// Returns the address where the linker should write the vector entry.
 pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
     match cpu {
         "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
@@ -2791,7 +2810,6 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             "brk" => Some(0xFFE6),
             _ => None,
         },
-        // Other CPU families: no vector table support yet.
         "sm83" => match interrupt_name {
             "vblank" => Some(0x0040),
             "lcdc" => Some(0x0048),
@@ -2800,7 +2818,64 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             "joypad" => Some(0x0060),
             _ => None,
         },
+        "z80" => match interrupt_name {
+            "reset" => Some(0x0000),
+            "rst8" => Some(0x0008),
+            "rst10" => Some(0x0010),
+            "rst18" => Some(0x0018),
+            "rst20" => Some(0x0020),
+            "rst28" => Some(0x0028),
+            "rst30" => Some(0x0030),
+            "rst38" | "irq" => Some(0x0038),
+            "nmi" => Some(0x0066),
+            _ => None,
+        },
+        "m68000" => {
+            // Explicit exception vectors first.
+            match interrupt_name {
+                "reset" => return Some(0x0000),
+                "reset_pc" => return Some(0x0004),
+                "bus_error" => return Some(0x0008),
+                "address_error" => return Some(0x000C),
+                "illegal" => return Some(0x0010),
+                "zero_divide" => return Some(0x0014),
+                "chk" => return Some(0x0018),
+                "trapv" => return Some(0x001C),
+                "privilege" => return Some(0x0020),
+                "trace" => return Some(0x0024),
+                "line_a" => return Some(0x0028),
+                "line_f" => return Some(0x002C),
+                "spurious" => return Some(0x0060),
+                "level1" => return Some(0x0064),
+                "level2" => return Some(0x0068),
+                "level3" => return Some(0x006C),
+                "level4" => return Some(0x0070),
+                "level5" => return Some(0x0074),
+                "level6" => return Some(0x0078),
+                "level7" => return Some(0x007C),
+                _ => {}
+            }
+            // Trap vectors are 0x0080 + n*4 for trap0 through trap15.
+            if let Some(rest) = interrupt_name.strip_prefix("trap") {
+                if let Ok(n) = rest.parse::<u32>() {
+                    if n <= 15 {
+                        return Some(0x0080 + n * 4);
+                    }
+                }
+            }
+            None
+        }
         _ => None,
+    }
+}
+
+/// Get the vector encoding for a CPU family.
+pub fn vector_encoding_for(cpu: &str) -> op_ir::VectorEncoding {
+    match cpu {
+        "m68000" => op_ir::VectorEncoding::Pointer4,
+        "z80" => op_ir::VectorEncoding::JumpZ80,
+        "sm83" => op_ir::VectorEncoding::JumpSm83,
+        _ => op_ir::VectorEncoding::Pointer2,
     }
 }
 

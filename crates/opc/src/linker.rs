@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use op_diagnostics::{Diagnostic, Severity};
-use op_ir::{InterruptVector, ObjectFile, RelocKind, Section, SectionKind};
+use op_ir::{InterruptVector, ObjectFile, RelocKind, Section, SectionKind, VectorEncoding};
 use std::collections::HashMap;
 
 use crate::cli::OpcArgs;
@@ -278,19 +278,33 @@ impl Linker {
         vectors: &[InterruptVector],
         symbol_table: &HashMap<String, u32>,
     ) {
+        // If the _stack_top symbol is not in the symbol table, compute it
+        // from the first RAM section (org + maxsize = top of RAM).
+        let stack_top = symbol_table.get("_stack_top").copied().unwrap_or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.kind == SectionKind::Ram)
+                .map(|s| s.org + s.maxsize)
+                .unwrap_or(0)
+        });
+
         for vector in vectors {
             // Look up the target function address.
-            let target_addr = match symbol_table.get(&vector.target) {
-                Some(addr) => *addr,
-                None => {
-                    self.diags.push(Diagnostic::error(
-                        402,
-                        "",
-                        0,
-                        0,
-                        format!("interrupt vector target not found: '{}'", vector.target),
-                    ));
-                    continue;
+            let target_addr = if vector.target == "_stack_top" {
+                stack_top
+            } else {
+                match symbol_table.get(&vector.target) {
+                    Some(addr) => *addr,
+                    None => {
+                        self.diags.push(Diagnostic::error(
+                            402,
+                            "",
+                            0,
+                            0,
+                            format!("interrupt vector target not found: '{}'", vector.target),
+                        ));
+                        continue;
+                    }
                 }
             };
 
@@ -303,15 +317,38 @@ impl Linker {
             if let Some(section) = rom_section {
                 let offset = (vec_addr - section.org) as usize;
 
-                // Ensure the section data is large enough.
-                let needed = offset + 2;
-                if section.data.len() < needed {
-                    section.data.resize(needed, 0);
+                match vector.encoding {
+                    VectorEncoding::Pointer2 => {
+                        // 2-byte little-endian address.
+                        let needed = offset + 2;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = (target_addr & 0xFF) as u8;
+                        section.data[offset + 1] = ((target_addr >> 8) & 0xFF) as u8;
+                    }
+                    VectorEncoding::Pointer4 => {
+                        // 4-byte big-endian address (68000 is big-endian).
+                        let needed = offset + 4;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = ((target_addr >> 24) & 0xFF) as u8;
+                        section.data[offset + 1] = ((target_addr >> 16) & 0xFF) as u8;
+                        section.data[offset + 2] = ((target_addr >> 8) & 0xFF) as u8;
+                        section.data[offset + 3] = (target_addr & 0xFF) as u8;
+                    }
+                    VectorEncoding::JumpZ80 | VectorEncoding::JumpSm83 => {
+                        // 3-byte JP instruction: 0xC3 + 2-byte LE address.
+                        let needed = offset + 3;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = 0xC3;
+                        section.data[offset + 1] = (target_addr & 0xFF) as u8;
+                        section.data[offset + 2] = ((target_addr >> 8) & 0xFF) as u8;
+                    }
                 }
-
-                // Write the 2-byte address in little-endian order.
-                section.data[offset] = (target_addr & 0xFF) as u8;
-                section.data[offset + 1] = ((target_addr >> 8) & 0xFF) as u8;
             } else {
                 self.diags.push(Diagnostic::error(
                     403,

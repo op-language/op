@@ -120,6 +120,25 @@ pub enum RelocKind {
 
 // --- Interrupt vectors and header metadata ----------------------------------
 
+/// How the linker writes an interrupt vector entry into the output data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorEncoding {
+    /// 2-byte little-endian address at the vector slot. Used by the
+    /// 6502 family and the WDC 65C816.
+    #[default]
+    Pointer2,
+    /// 4-byte big-endian address at the vector slot. Used by the
+    /// Motorola 68000.
+    Pointer4,
+    /// 3-byte `JP nn` instruction (0xC3 + 2-byte LE address) at the
+    /// vector slot. Used by the Z80.
+    JumpZ80,
+    /// 3-byte `JP nn` instruction (0xC3 + 2-byte LE address) at the
+    /// vector slot. Used by the Sharp SM83 (Game Boy).
+    JumpSm83,
+}
+
 /// An interrupt vector entry recorded by the codegen.
 ///
 /// The linker writes the target function address into the vector table
@@ -129,10 +148,13 @@ pub enum RelocKind {
 pub struct InterruptVector {
     /// The interrupt name: "reset", "nmi", or "irq".
     pub name: String,
-    /// The vector table address where the linker writes the 2-byte target.
+    /// The vector table address where the linker writes the entry.
     pub address: u32,
     /// The symbol name of the target function.
     pub target: String,
+    /// How to encode the vector entry in the output data.
+    #[serde(default)]
+    pub encoding: VectorEncoding,
 }
 
 /// Header fields from `#[ines(...)]` or `#[lnx(...)]` attributes.

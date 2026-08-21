@@ -615,6 +615,104 @@ fn codegen_empty_source() {
     assert_eq!(obj.sections.len(), 0);
 }
 
+// === Interrupt vector address lookup ======================================
+
+#[test]
+fn vector_address_6502_family() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("mos6502", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("mos6502", "nmi"), Some(0xFFFA));
+    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("rp2A03", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFFE));
+}
+
+#[test]
+fn vector_address_65c816() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("wdc65c816", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("wdc65c816", "nmi"), Some(0xFFEA));
+    assert_eq!(interrupt_vector_address("wdc65c816", "irq"), Some(0xFFEE));
+    assert_eq!(interrupt_vector_address("wdc65c816", "abort"), Some(0xFFE8));
+    assert_eq!(interrupt_vector_address("wdc65c816", "cop"), Some(0xFFE4));
+}
+
+#[test]
+fn vector_address_sm83() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("sm83", "vblank"), Some(0x0040));
+    assert_eq!(interrupt_vector_address("sm83", "lcdc"), Some(0x0048));
+    assert_eq!(interrupt_vector_address("sm83", "timer"), Some(0x0050));
+    assert_eq!(interrupt_vector_address("sm83", "serial"), Some(0x0058));
+    assert_eq!(interrupt_vector_address("sm83", "joypad"), Some(0x0060));
+}
+
+#[test]
+fn vector_address_z80() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("z80", "reset"), Some(0x0000));
+    assert_eq!(interrupt_vector_address("z80", "rst8"), Some(0x0008));
+    assert_eq!(interrupt_vector_address("z80", "rst10"), Some(0x0010));
+    assert_eq!(interrupt_vector_address("z80", "rst18"), Some(0x0018));
+    assert_eq!(interrupt_vector_address("z80", "rst20"), Some(0x0020));
+    assert_eq!(interrupt_vector_address("z80", "rst28"), Some(0x0028));
+    assert_eq!(interrupt_vector_address("z80", "rst30"), Some(0x0030));
+    assert_eq!(interrupt_vector_address("z80", "rst38"), Some(0x0038));
+    assert_eq!(interrupt_vector_address("z80", "irq"), Some(0x0038));
+    assert_eq!(interrupt_vector_address("z80", "nmi"), Some(0x0066));
+}
+
+#[test]
+fn vector_address_68000() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("m68000", "reset"), Some(0x0000));
+    assert_eq!(interrupt_vector_address("m68000", "reset_pc"), Some(0x0004));
+    assert_eq!(
+        interrupt_vector_address("m68000", "bus_error"),
+        Some(0x0008)
+    );
+    assert_eq!(
+        interrupt_vector_address("m68000", "address_error"),
+        Some(0x000C)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "illegal"), Some(0x0010));
+    assert_eq!(
+        interrupt_vector_address("m68000", "zero_divide"),
+        Some(0x0014)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "chk"), Some(0x0018));
+    assert_eq!(interrupt_vector_address("m68000", "trapv"), Some(0x001C));
+    assert_eq!(
+        interrupt_vector_address("m68000", "privilege"),
+        Some(0x0020)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "trace"), Some(0x0024));
+    assert_eq!(interrupt_vector_address("m68000", "line_a"), Some(0x0028));
+    assert_eq!(interrupt_vector_address("m68000", "line_f"), Some(0x002C));
+    assert_eq!(interrupt_vector_address("m68000", "spurious"), Some(0x0060));
+    assert_eq!(interrupt_vector_address("m68000", "level1"), Some(0x0064));
+    assert_eq!(interrupt_vector_address("m68000", "level2"), Some(0x0068));
+    assert_eq!(interrupt_vector_address("m68000", "level3"), Some(0x006C));
+    assert_eq!(interrupt_vector_address("m68000", "level4"), Some(0x0070));
+    assert_eq!(interrupt_vector_address("m68000", "level5"), Some(0x0074));
+    assert_eq!(interrupt_vector_address("m68000", "level6"), Some(0x0078));
+    assert_eq!(interrupt_vector_address("m68000", "level7"), Some(0x007C));
+    assert_eq!(interrupt_vector_address("m68000", "trap0"), Some(0x0080));
+    assert_eq!(interrupt_vector_address("m68000", "trap15"), Some(0x00BC));
+}
+
+#[test]
+fn vector_encoding_for_cpu() {
+    use op_ir::VectorEncoding;
+    use opc::codegen::vector_encoding_for;
+    assert_eq!(vector_encoding_for("mos6502"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("rp2A03"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("wdc65c816"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("sm83"), VectorEncoding::JumpSm83);
+    assert_eq!(vector_encoding_for("z80"), VectorEncoding::JumpZ80);
+    assert_eq!(vector_encoding_for("m68000"), VectorEncoding::Pointer4);
+}
+
 #[test]
 fn codegen_no_block_attributes() {
     // Functions without a #[rom] block produce no sections.

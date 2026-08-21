@@ -1546,6 +1546,39 @@ The 68000 uses an interrupt priority level system. The lib defines
 `#[interrupt(level)]` where level is 1 to 7. The lib also defines
 `#[interrupt(trap)]` for trap vectors.
 
+The 68000 exception vector table lives at address 0x0000 in ROM. Each
+entry is 4 bytes, big-endian. The `#[interrupt(reset)]` attribute emits
+two entries: the initial stack pointer at address 0x0000 (the linker
+computes this from the first RAM section) and the initial program
+counter at address 0x0004. The full exception vector table:
+
+| Interrupt | Address | Description |
+|-----------|---------|-------------|
+| `reset` | 0x0000 | Initial SSP (auto from RAM top) |
+| `reset_pc` | 0x0004 | Initial PC |
+| `bus_error` | 0x0008 | Bus error |
+| `address_error` | 0x000C | Address error |
+| `illegal` | 0x0010 | Illegal instruction |
+| `zero_divide` | 0x0014 | Divide by zero |
+| `chk` | 0x0018 | CHK instruction |
+| `trapv` | 0x001C | TRAPV instruction |
+| `privilege` | 0x0020 | Privilege violation |
+| `trace` | 0x0024 | Trace |
+| `line_a` | 0x0028 | Line A emulator |
+| `line_f` | 0x002C | Line F emulator |
+| `spurious` | 0x0060 | Spurious interrupt |
+| `level1` | 0x0064 | Autovector level 1 |
+| `level2` | 0x0068 | Autovector level 2 |
+| `level3` | 0x006C | Autovector level 3 |
+| `level4` | 0x0070 | Autovector level 4 |
+| `level5` | 0x0074 | Autovector level 5 |
+| `level6` | 0x0078 | Autovector level 6 |
+| `level7` | 0x007C | Autovector level 7 |
+| `trap0` | 0x0080 | Trap 0 |
+| `trap1` | 0x0084 | Trap 1 |
+| ... | ... | ... |
+| `trap15` | 0x00BC | Trap 15 |
+
 ### Zilog Z80
 
 The Zilog Z80 is an 8-bit CPU. The CPU extends the Intel 8080 instruction set.
@@ -1652,6 +1685,25 @@ The lib defines `cpu::a`, `cpu::b`, `cpu::c`, `cpu::d`, `cpu::e`, `cpu::h`,
 | SLL | Shift left logical (bit 0 set to 1) |
 | IN (C) | Input to all registers when B is not used as operand |
 
+#### Interrupts
+
+The Z80 supports RST vectors, NMI, and IM1 IRQ. The linker writes a
+3-byte `JP` instruction (opcode 0xC3 + 2-byte little-endian address) at
+each vector slot so the handler runs on entry.
+
+| Interrupt | Address | Description |
+|-----------|---------|-------------|
+| `reset` | 0x0000 | Power-on / reset (RST 0) |
+| `rst8` | 0x0008 | RST 08h |
+| `rst10` | 0x0010 | RST 10h |
+| `rst18` | 0x0018 | RST 18h |
+| `rst20` | 0x0020 | RST 20h |
+| `rst28` | 0x0028 | RST 28h |
+| `rst30` | 0x0030 | RST 30h |
+| `rst38` | 0x0038 | RST 38h / IM1 IRQ |
+| `irq` | 0x0038 | Alias for `rst38` |
+| `nmi` | 0x0066 | Non-maskable interrupt |
+
 ### Sharp SM83
 
 The Sharp SM83 is a Z80 variant used in the Nintendo Game Boy and Game Boy
@@ -1672,6 +1724,22 @@ opcodes. Additional opcodes: `STOP`, `LDI A`, `LDD A`, `LDH A`, `LDH (n)`.
 The SM83 does **not** support the alternate register set, the `EXX`
 instruction, the `RLD` and `RRD` instructions, and the interrupt mode
 selection is simplified.
+
+#### Interrupts
+
+The SM83 uses fixed vector addresses. The hardware jumps to the vector
+address and executes code there. The linker writes a 3-byte `JP`
+instruction (opcode 0xC3 + 2-byte little-endian address) at each vector
+slot so the handler can live anywhere in ROM. Each vector slot is 8
+bytes, so the 3-byte `JP` fits with room to spare.
+
+| Interrupt | Address | Description |
+|-----------|---------|-------------|
+| `vblank` | 0x0040 | VBlank interrupt |
+| `lcdc` | 0x0048 | LCD status interrupt |
+| `timer` | 0x0050 | Timer overflow interrupt |
+| `serial` | 0x0058 | Serial transfer interrupt |
+| `joypad` | 0x0060 | Joypad interrupt |
 
 ## Grammar
 

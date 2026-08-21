@@ -544,10 +544,15 @@ output file header. The file output stage writes the header in Stage 5.
    present. The linker clears the `relocations` array after all patches.
 5. **Lay out.** The linker places the sections in the target memory map.
 6. **Vector table.** The linker writes the interrupt vector entries into the
-   ROM section data at the target-defined addresses. The linker writes each
-   entry as a 2-byte little-endian address. The linker extends the ROM section
-   with the padding byte when the section is too small to hold the vector
-   table.
+   ROM section data at the target-defined addresses. The encoding depends on
+   the CPU family: `pointer2` writes a 2-byte little-endian address (6502
+   family and 65C816), `pointer4` writes a 4-byte big-endian address (68000),
+   `jumpz80` writes a 3-byte JP instruction (0xC3 + 2-byte LE address, Z80),
+   and `jumpsm83` writes a 3-byte JP instruction (SM83). For the 68000
+   `reset` vector, the linker writes the initial stack pointer (computed
+   from the first RAM section) at address 0x0000 and the initial program
+   counter at address 0x0004. The linker extends the ROM section with the
+   padding byte when the section is too small to hold the vector table.
 7. **Header.** The linker passes the `header` and `interrupt_vectors` fields
    through to the file output stage. The file output stage writes the header.
 8. **Pad.** The linker pads each ROM and CHR section to its `maxsize` with the
