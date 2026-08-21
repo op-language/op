@@ -310,8 +310,7 @@ use opc::codegen::compile_source;
 #[test]
 fn lex_parse_compile_nes_code() {
     let source = include_str!("data/nes.op");
-    let (ast, parse_diags) =
-        parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let (ast, parse_diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
@@ -332,8 +331,7 @@ fn lex_parse_compile_nes_code() {
 #[test]
 fn lex_parse_compile_nes_game() {
     let source = include_str!("data/nes.op");
-    let (ast, parse_diags) =
-        parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
+    let (ast, parse_diags) = parse_source("data/nes.op", source, "rp2A03-nintendo-nes-ntsc", &[]);
 
     let errors: Vec<_> = parse_diags
         .iter()
