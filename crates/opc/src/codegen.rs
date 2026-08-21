@@ -1906,7 +1906,12 @@ impl Codegen {
         // explicit `return` falls through into whatever follows it in the
         // section.
         if !Self::body_ends_control_flow(body) {
-            self.emit_byte(0x60); // RTS
+            // Emit the CPU-family-specific return instruction.
+            let ret_opcode = match self.target.cpu.as_str() {
+                "sm83" | "z80" => 0xC9, // RET
+                _ => 0x60,              // RTS (6502)
+            };
+            self.emit_byte(ret_opcode);
         }
 
         let end_offset = if let Some(idx) = self.current_section {
@@ -2084,23 +2089,47 @@ impl Codegen {
                 if let Some(op_byte) = self.lookup(opcode, AddrMode::Immediate) {
                     self.emit_byte(op_byte);
                     let val = eval_expr(value, &self.const_values, &self.symbol_types);
+                    // SM83 16-bit register pair loads (LD HL/DE/BC, nn)
+                    // use a 2-byte immediate, not 1-byte.
+                    let is_16bit_imm = matches!(opcode, "ld_hl" | "ld_de" | "ld_bc");
                     match val {
                         Some(v) => {
-                            self.emit_byte((v & 0xFF) as u8);
+                            if is_16bit_imm {
+                                self.emit_byte((v & 0xFF) as u8);
+                                self.emit_byte(((v >> 8) & 0xFF) as u8);
+                            } else {
+                                self.emit_byte((v & 0xFF) as u8);
+                            }
                         }
                         None => {
                             // Symbol reference — classify and emit a
-                            // one-byte relocation, or report an error.
-                            self.emit_byte(0);
-                            match self.classify_immediate(value) {
-                                Some((sym, kind, addend)) => {
-                                    self.add_relocation(1, kind, &sym, addend);
+                            // relocation, or report an error.
+                            if is_16bit_imm {
+                                self.emit_byte(0);
+                                self.emit_byte(0);
+                                match self.classify_immediate(value) {
+                                    Some((sym, _kind, addend)) => {
+                                        self.add_relocation(2, RelocKind::Abs16, &sym, addend);
+                                    }
+                                    None => {
+                                        self.error(
+                                            305,
+                                            "immediate operand is neither a constant nor a symbol",
+                                        );
+                                    }
                                 }
-                                None => {
-                                    self.error(
-                                        305,
-                                        "immediate operand is neither a constant nor a symbol",
-                                    );
+                            } else {
+                                self.emit_byte(0);
+                                match self.classify_immediate(value) {
+                                    Some((sym, kind, addend)) => {
+                                        self.add_relocation(1, kind, &sym, addend);
+                                    }
+                                    None => {
+                                        self.error(
+                                            305,
+                                            "immediate operand is neither a constant nor a symbol",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2251,9 +2280,13 @@ impl Codegen {
 
         if let Some(op_byte) = op_byte {
             self.emit_byte(op_byte);
+            // LDH instructions use a 1-byte high-page address, not a
+            // 2-byte absolute address.
+            let is_one_byte_addr = opcode == "ldh";
             match val {
                 Some(v) => {
-                    if mode == AddrMode::ZeroPage
+                    if is_one_byte_addr
+                        || mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
                         || mode == AddrMode::IndirectX
@@ -2271,7 +2304,8 @@ impl Codegen {
                     // Symbol reference, or an error if the expression is
                     // neither a constant nor a symbol.
                     let addend = selector_addend(expr, &self.const_values, &self.symbol_types);
-                    let zp = mode == AddrMode::ZeroPage
+                    let zp = is_one_byte_addr
+                        || mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
                         || mode == AddrMode::IndirectX
@@ -2409,8 +2443,13 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP back to loop_start (absolute address = offset + org).
-        self.emit_byte(0x4C); // JMP absolute
+        // Emit JMP/JP back to loop_start (absolute address = offset + org).
+        // Use the CPU-family-specific jump opcode.
+        let jmp_opcode = match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC3, // JP nn
+            _ => 0x4C,              // JMP absolute (6502)
+        };
+        self.emit_byte(jmp_opcode);
         self.emit_byte((loop_abs & 0xFF) as u8);
         self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
     }
@@ -2474,19 +2513,27 @@ impl Codegen {
                     self.compile_stmt(stmt);
                 }
             } else {
-                // Non-inline fn call: emit JSR plus an Abs16 relocation
-                // against the fn name. The fn body is placed exactly once
-                // (in a section block or via locate_fn!), so calls jump to
-                // it rather than inlining.
-                self.emit_byte(0x20); // JSR absolute
+                // Non-inline fn call: emit CALL/JSR plus an Abs16
+                // relocation against the fn name. The fn body is placed
+                // exactly once (in a section block or via locate_fn!),
+                // so calls jump to it rather than inlining.
+                let call_opcode = match self.target.cpu.as_str() {
+                    "sm83" | "z80" => 0xCD, // CALL nn
+                    _ => 0x20,              // JSR absolute (6502)
+                };
+                self.emit_byte(call_opcode);
                 self.emit_byte(0);
                 self.emit_byte(0);
                 self.add_relocation(2, RelocKind::Abs16, name, 0);
             }
         } else {
-            // Unknown fn call — emit JSR with a relocation; the linker
-            // reports an unresolved symbol if nothing defines it.
-            self.emit_byte(0x20); // JSR absolute
+            // Unknown fn call — emit CALL/JSR with a relocation; the
+            // linker reports an unresolved symbol if nothing defines it.
+            let call_opcode = match self.target.cpu.as_str() {
+                "sm83" | "z80" => 0xCD, // CALL nn
+                _ => 0x20,              // JSR absolute (6502)
+            };
+            self.emit_byte(call_opcode);
             self.emit_byte(0);
             self.emit_byte(0);
             self.add_relocation(2, RelocKind::Abs16, name, 0);
@@ -2830,15 +2877,26 @@ impl Codegen {
     /// If `invert` is true, return the branch-if-condition opcode.
     /// If `invert` is false, return the branch-if-not-condition opcode.
     fn condition_to_branch_op(&self, condition: &Condition, invert: bool) -> u8 {
-        // 6502 condition keywords to branch opcodes.
-        let (branch_if_true, branch_if_false) = match condition.keyword.as_str() {
-            "plus" | "positive" | "greater" => (0x10, 0x30), // BPL, BMI
-            "minus" | "negative" | "less" => (0x30, 0x10),   // BMI, BPL
-            "overflow" => (0x70, 0x50),                      // BVS, BVC
-            "carry" => (0xB0, 0x90),                         // BCS, BCC
-            "nonzero" | "set" | "true" => (0xD0, 0xF0),      // BNE, BEQ
-            "zero" | "unset" | "false" | "clear" | "equal" => (0xF0, 0xD0), // BEQ, BNE
-            _ => (0xD0, 0xF0),                               // default: BNE, BEQ
+        // Condition keywords to branch opcodes. The opcode depends on
+        // the CPU family.
+        let (branch_if_true, branch_if_false) = match self.target.cpu.as_str() {
+            // SM83 / Z80: JR NZ=0x20, JR Z=0x28, JR NC=0x30, JR C=0x38
+            "sm83" | "z80" => match condition.keyword.as_str() {
+                "carry" => (0x38, 0x30),                    // JR C, JR NC
+                "nonzero" | "set" | "true" => (0x20, 0x28), // JR NZ, JR Z
+                "zero" | "unset" | "false" | "clear" | "equal" => (0x28, 0x20), // JR Z, JR NZ
+                _ => (0x20, 0x28),                          // default: JR NZ, JR Z
+            },
+            // 6502 family: BPL=0x10, BMI=0x30, BVS=0x70, BVC=0x50, etc.
+            _ => match condition.keyword.as_str() {
+                "plus" | "positive" | "greater" => (0x10, 0x30), // BPL, BMI
+                "minus" | "negative" | "less" => (0x30, 0x10),   // BMI, BPL
+                "overflow" => (0x70, 0x50),                      // BVS, BVC
+                "carry" => (0xB0, 0x90),                         // BCS, BCC
+                "nonzero" | "set" | "true" => (0xD0, 0xF0),      // BNE, BEQ
+                "zero" | "unset" | "false" | "clear" | "equal" => (0xF0, 0xD0), // BEQ, BNE
+                _ => (0xD0, 0xF0),                               // default: BNE, BEQ
+            },
         };
         // The "not" modifier inverts the condition sense.
         let inverted_by_mod = condition.modifiers.iter().any(|m| m == "not");

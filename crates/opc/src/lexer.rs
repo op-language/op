@@ -157,7 +157,9 @@ const OPCODES: &[&str] = &[
     "rrc", "rr", "sla", "sra", "sll", "srl", "rld", "rrd", "rlca", "rrca", "rra", "jp", "jr",
     "djnz", "call", "ret", "reti", "retn", "rst", "in", "out", "ini", "inir", "ind", "indr",
     "outi", "otir", "outd", "otdr", "bit", "set", "res", // LR35902
-    "stop", "ldh",
+    "stop", "ldh", // SM83 register-pair pseudo-instructions
+    "inc_hl", "inc_de", "inc_bc", "ld_hl", "ld_de", "ld_bc", "ld_a_hl", "ld_a_bc", "ld_a_de",
+    "ld_a", "ld_addr",
 ];
 
 /// Multi-character operators, sorted longest-first for longest-match.
