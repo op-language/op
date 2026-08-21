@@ -753,7 +753,7 @@ fn main() {
 ```json
 {
   "version": 1,
-  "target": "mos6502-nintendo-nes-ntsc",
+  "target": "rp2A03-nintendo-nes-ntsc",
   "root": {
     "kind": "Module",
     "name": "main",
@@ -941,7 +941,7 @@ Post-compile `.opl` output:
 ```json
 {
   "version": 1,
-  "target": "mos6502-nintendo-nes-ntsc",
+  "target": "rp2A03-nintendo-nes-ntsc",
   "sections": [
     {
       "name": "rom_bank0",
@@ -972,7 +972,7 @@ pass through to the file output stage.
 ```json
 {
   "version": 1,
-  "target": "mos6502-nintendo-nes-ntsc",
+  "target": "rp2A03-nintendo-nes-ntsc",
   "sections": [
     {
       "name": "rom_bank0",
