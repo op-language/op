@@ -708,6 +708,11 @@ const REFRESH_HZ: u8 = 60;
 const IS_NES: bool = true;
 ```
 
+**Known limitation:** The `all`, `any`, and `not` combinators are not
+implemented in the current compiler. The compiler evaluates them to
+`true`. This means the item is always included regardless of the
+condition. This will be fixed in a future release.
+
 A program passes feature flags on the `opc` command line or in the
 `Cart.toml` `[features]` section. The compiler defines the `target`, `cpu`,
 `manufacturer`, `machine`, and `variant` keys from the target triplet.
