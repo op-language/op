@@ -180,6 +180,7 @@ fn build_codegen(
         const_values: HashMap::new(),
         const_arrays: HashMap::new(),
         struct_consts: HashMap::new(),
+        collected_vars: Vec::new(),
         symbol_types: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
@@ -307,6 +308,10 @@ struct Codegen {
     /// Struct const field expressions, keyed by const name.
     /// Each entry is a list of (field_name, field_expr) pairs.
     struct_consts: HashMap<String, Vec<(String, Expr)>>,
+    /// All var declarations collected from all modules (including
+    /// sub-modules), stored for placement in the first RAM section.
+    /// Each entry is (name, ty, addr_binding, init).
+    collected_vars: Vec<(String, Type, Option<Expr>, Option<InitValue>)>,
     /// Types of top-level const and var declarations, keyed by name.
     /// Populated during the collect pass before values are evaluated,
     /// so that `len!` and `sizeof!` of a later declaration resolve.
@@ -491,6 +496,20 @@ impl Codegen {
                     },
                 );
             }
+            Item::VarDecl {
+                name,
+                ty,
+                addr_binding,
+                init,
+                ..
+            } => {
+                self.collected_vars.push((
+                    name.clone(),
+                    ty.clone(),
+                    addr_binding.clone(),
+                    init.clone(),
+                ));
+            }
             _ => {}
         }
     }
@@ -502,8 +521,31 @@ impl Codegen {
     fn create_sections(&mut self, items: &[Item]) {
         for item in items {
             if let Item::BlockAttribute { attr, .. } = item {
+                // Capture header fields from #[ines], #[gb], etc. before
+                // the placement pass so the mapper guard can use them.
+                self.capture_header(attr);
                 self.create_section_from_attr(attr);
             }
+        }
+    }
+
+    /// Capture header fields from a standalone attribute like `#[ines(...)]`
+    /// into `self.header`.
+    fn capture_header(&mut self, attr: &Attribute) {
+        match attr.path.as_str() {
+            "ines" | "gb" | "lnx" | "snes" | "sega" | "sms" | "a78" => {
+                let format = attr.path.as_str();
+                let fields: Vec<(String, String)> = attr
+                    .args
+                    .iter()
+                    .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                    .collect();
+                self.header = Some(op_ir::HeaderFields {
+                    format: format.to_string(),
+                    fields,
+                });
+            }
+            _ => {}
         }
     }
 
@@ -633,6 +675,17 @@ impl Codegen {
                         self.current_section = None;
                         self.placed_items.insert(name.clone());
                     }
+                }
+            }
+
+            // Place vars collected from sub-modules (e.g. std::font::ram).
+            let collected = self.collected_vars.clone();
+            for (name, ty, addr_binding, init) in &collected {
+                if !self.placed_items.contains(name) {
+                    self.current_section = Some(ram_idx);
+                    self.alloc_variable(name, ty, addr_binding, init);
+                    self.current_section = None;
+                    self.placed_items.insert(name.clone());
                 }
             }
         }
@@ -1448,6 +1501,36 @@ impl Codegen {
                 } if self.current_section.is_some() => {
                     self.handle_placement(macro_name, argument);
                 }
+                Item::ModDecl {
+                    name,
+                    resolved,
+                    body,
+                    ..
+                } => {
+                    // Recurse into sub-modules to collect their vars
+                    // and other items for placement.
+                    self.module_path.push(name.clone());
+                    if let Some(sub_module) = resolved {
+                        self.collect_module_items(&sub_module.items);
+                    } else if let Some(items) = body {
+                        self.collect_module_items(items);
+                    }
+                    self.module_path.pop();
+                }
+                Item::VarDecl {
+                    name,
+                    ty,
+                    addr_binding,
+                    init,
+                    ..
+                } => {
+                    self.collected_vars.push((
+                        name.clone(),
+                        ty.clone(),
+                        addr_binding.clone(),
+                        init.clone(),
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1982,6 +2065,109 @@ impl Codegen {
                             &[],
                         );
                         self.walk_module(&ast.root);
+                    }
+                }
+            }
+            "font_load" => {
+                // NES-only compile-time placement macro. Expands 1bpp
+                // font data to 2-plane NES CHR data and emits it into the
+                // current CHR section.
+                if self.target.machine != "nes" {
+                    self.error(
+                        307,
+                        "font_load! is only supported on NES targets",
+                    );
+                    return;
+                }
+                if let PlacementArg::Path { segments } = argument {
+                    if let Some(font_name) = segments.last() {
+                        // Look up the font_t const in struct_consts.
+                        if let Some(fields) = self.struct_consts.get(font_name).cloned() {
+                            // Find the `data` field expression.
+                            let data_expr = fields.iter()
+                                .find(|(n, _)| n == "data")
+                                .map(|(_, e)| e.clone());
+                            // Find the `tile_count` field value.
+                            let tile_count = self.const_values
+                                .get(&format!("{}::tile_count", font_name))
+                                .copied();
+
+                            if let (Some(expr), Some(count)) = (data_expr, tile_count) {
+                                // Extract the array symbol name from the
+                                // data field expression.
+                                let array_name = match &expr {
+                                    Expr::Ident { name } => name.clone(),
+                                    _ => {
+                                        self.error(
+                                            307,
+                                            format!(
+                                                "font_load!: data field of `{}` is not a symbol reference",
+                                                font_name
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                // Look up the array bytes.
+                                if let Some(bytes) = self.const_arrays.get(&array_name).cloned() {
+                                    // Expand 1bpp to 2-plane NES CHR.
+                                    // The font blob is: [flags][tile_count][enc_table][1bpp_tiles]
+                                    // We need to skip the header + encoding table to get to the tile data.
+                                    let flags = if bytes.len() > 0 { bytes[0] } else { 0 };
+                                    let enc_type = flags & 3;
+                                    let enc_size: usize = match enc_type {
+                                        0 => 256,
+                                        1 => 128,
+                                        _ => 0,
+                                    };
+                                    let tile_data_start = 2 + enc_size;
+                                    let tile_count = count as usize;
+                                    let tile_h = 8; // All current fonts are 8x8
+
+                                    // Expand each 1bpp tile to 2-plane CHR.
+                                    for tile_idx in 0..tile_count {
+                                        let tile_start = tile_data_start + tile_idx * tile_h;
+                                        if tile_start + tile_h > bytes.len() {
+                                            break;
+                                        }
+                                        // Write plane 0: the raw 1bpp bytes.
+                                        for row in 0..tile_h {
+                                            self.emit_byte(bytes[tile_start + row]);
+                                        }
+                                        // Write plane 1: all zeros (simplified
+                                        // expansion for fg=1, bg=0).
+                                        for _ in 0..tile_h {
+                                            self.emit_byte(0);
+                                        }
+                                    }
+                                } else {
+                                    self.error(
+                                        307,
+                                        format!(
+                                            "font_load!: array `{}` not found in const_arrays",
+                                            array_name
+                                        ),
+                                    );
+                                }
+                            } else {
+                                self.error(
+                                    307,
+                                    format!(
+                                        "font_load!: font `{}` missing data or tile_count field",
+                                        font_name
+                                    ),
+                                );
+                            }
+                        } else {
+                            self.error(
+                                307,
+                                format!(
+                                    "font_load!: font `{}` not found in struct_consts",
+                                    font_name
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -2734,6 +2920,24 @@ impl Codegen {
     }
 
     fn compile_fn_call(&mut self, name: &str, args: &[Expr]) {
+        // NES runtime font load mapper guard: check that the mapper
+        // supports CHR-RAM before expanding _font_load_tiles.
+        if name == "_font_load_tiles" && self.target.machine == "nes" {
+            if let Some(ref header) = self.header {
+                if let Some(mapper_str) = header.fields.iter().find(|(k, _)| k == "mapper").map(|(_, v)| v.clone()) {
+                    let mapper_num: u32 = mapper_str.parse().unwrap_or(0);
+                    const NON_CHR_RAM_MAPPERS: &[u32] = &[0, 2, 3, 6, 9, 10, 71];
+                    if NON_CHR_RAM_MAPPERS.contains(&mapper_num) {
+                        self.error(
+                            307,
+                            "runtime font_load() requires a CHR-RAM mapper on NES; \
+                             use font_load! in a #[chr] block for CHR-ROM mappers",
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         // Check if it's an inline fn.
         if let Some(inline_fn) = self.inline_fns.get(name).cloned() {
             if inline_fn.is_inline {
@@ -3486,6 +3690,7 @@ fn expr_to_symbol(expr: &Expr) -> Option<String> {
 
 /// Convert a value to a byte array of the given size (little-endian).
 fn val_to_bytes(val: i64, size: usize) -> Vec<u8> {
+    let size = size.min(8); // Cap at 8 bytes (i64 max)
     let mut bytes = Vec::with_capacity(size);
     for i in 0..size {
         bytes.push(((val >> (i * 8)) & 0xFF) as u8);
@@ -3718,6 +3923,7 @@ mod tests {
             const_values: HashMap::new(),
             const_arrays: HashMap::new(),
             struct_consts: HashMap::new(),
+            collected_vars: Vec::new(),
             symbol_types: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),
