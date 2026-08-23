@@ -64,9 +64,21 @@ pub fn compile_file(
     include_paths: &[String],
     features: &[String],
 ) -> Result<ObjectFile> {
+    compile_file_full(path, target, opt_level, include_paths, features, &[])
+}
+
+/// Compile a source file with defined features for `debug_assert!` warnings.
+pub fn compile_file_full(
+    path: &str,
+    target: &str,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+    defined_features: &[String],
+) -> Result<ObjectFile> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path))?;
-    let (ast, parse_diags) = parser::parse_source(path, &source, target, features);
+    let (ast, parse_diags) = parser::parse_source_full(path, &source, target, features, defined_features);
     let has_errors = parse_diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &parse_diags {
@@ -166,6 +178,8 @@ fn build_codegen(
         current_section: None,
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
+        const_arrays: HashMap::new(),
+        struct_consts: HashMap::new(),
         symbol_types: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
@@ -288,6 +302,11 @@ struct Codegen {
     current_section: Option<usize>,
     inline_fns: HashMap<String, InlineFn>,
     const_values: HashMap<String, i64>,
+    /// Byte arrays for `const [u8; N] = [...]` declarations, keyed by name.
+    const_arrays: HashMap<String, Vec<u8>>,
+    /// Struct const field expressions, keyed by const name.
+    /// Each entry is a list of (field_name, field_expr) pairs.
+    struct_consts: HashMap<String, Vec<(String, Expr)>>,
     /// Types of top-level const and var declarations, keyed by name.
     /// Populated during the collect pass before values are evaluated,
     /// so that `len!` and `sizeof!` of a later declaration resolve.
@@ -382,10 +401,49 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
-                let val = (*evaluated_value)
-                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                if let Some(val) = val {
-                    self.const_values.insert(name.clone(), val);
+                match value {
+                    // Array literal const: collect byte values.
+                    Expr::ArrayLit { elements } => {
+                        let mut bytes = Vec::new();
+                        for elem in elements {
+                            if let Some(val) =
+                                eval_expr(elem, &self.const_values, &self.symbol_types)
+                            {
+                                bytes.push(val as u8);
+                            } else {
+                                bytes.push(0);
+                            }
+                        }
+                        self.const_arrays.insert(name.clone(), bytes);
+                        // Store the length in const_values for len!/sizeof!.
+                        self.const_values
+                            .insert(name.clone(), elements.len() as i64);
+                    }
+                    // Struct literal const: store field expressions.
+                    Expr::StructLit { fields, .. } => {
+                        let field_exprs: Vec<(String, Expr)> = fields.clone();
+                        // Evaluate scalar fields into const_values as
+                        // CONST::field = value.
+                        for (field_name, field_expr) in fields {
+                            if let Some(val) = eval_expr(
+                                field_expr,
+                                &self.const_values,
+                                &self.symbol_types,
+                            ) {
+                                self.const_values
+                                    .insert(format!("{}::{}", name, field_name), val);
+                            }
+                        }
+                        self.struct_consts.insert(name.clone(), field_exprs);
+                    }
+                    // Scalar const: use evaluated value.
+                    _ => {
+                        let val = (*evaluated_value)
+                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                        if let Some(val) = val {
+                            self.const_values.insert(name.clone(), val);
+                        }
+                    }
                 }
             }
             Item::EnumDecl { name, variants, .. } => {
@@ -1056,6 +1114,68 @@ impl Codegen {
                     self.sections[section_idx].data.push(b);
                 }
             }
+            Expr::ArrayLit { .. } => {
+                // Array const: emit the bytes from const_arrays.
+                if let Some(bytes) = self.const_arrays.get(name) {
+                    for b in bytes {
+                        self.sections[section_idx].data.push(*b);
+                    }
+                } else {
+                    // Can't find the array — emit zero bytes.
+                    for _ in 0..type_size(ty) {
+                        self.sections[section_idx].data.push(0);
+                    }
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                // Struct const: emit each field in order.
+                // Scalar fields emit their value bytes.
+                // Pointer fields emit Lo8/Hi8 relocations.
+                for (_field_name, field_expr) in fields {
+                    if let Some(val) = eval_expr(
+                        field_expr,
+                        &self.const_values,
+                        &self.symbol_types,
+                    ) {
+                        // Scalar field: emit value bytes.
+                        let field_ty_size = match field_expr {
+                            Expr::Ident { name: sym } => {
+                                self.symbol_types.get(sym).map(|t| type_size(t)).unwrap_or(1)
+                            }
+                            _ => 1,
+                        };
+                        let bytes = val_to_bytes(val, field_ty_size);
+                        for b in &bytes {
+                            self.sections[section_idx].data.push(*b);
+                        }
+                    } else {
+                        // Pointer field: emit a relocation.
+                        // Try to resolve as a symbol reference.
+                        if let Some((sym, reloc_kind, addend)) =
+                            self.classify_immediate(field_expr)
+                        {
+                            let field_size = match field_expr {
+                                Expr::Ident { .. } => 2, // pointer is 2 bytes
+                                _ => 1,
+                            };
+                            let field_offset = self.sections[section_idx].data.len() as u32;
+                            for _ in 0..field_size {
+                                self.sections[section_idx].data.push(0);
+                            }
+                            self.sections[section_idx].relocations.push(Relocation {
+                                offset: field_offset,
+                                kind: reloc_kind,
+                                symbol: sym,
+                                addend,
+                            });
+                        } else {
+                            // Can't resolve — emit zeros.
+                            self.sections[section_idx].data.push(0);
+                            self.sections[section_idx].data.push(0);
+                        }
+                    }
+                }
+            }
             _ => {
                 // Scalar or array const: use evaluated value.
                 let val = evaluated_value
@@ -1274,20 +1394,49 @@ impl Codegen {
                     evaluated_value,
                     ..
                 } => {
-                    let val = (*evaluated_value)
-                        .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                    if let Some(val) = val {
-                        self.import_const(name, val);
+                    match value {
+                        Expr::ArrayLit { elements } => {
+                            let mut bytes = Vec::new();
+                            for elem in elements {
+                                if let Some(val) =
+                                    eval_expr(elem, &self.const_values, &self.symbol_types)
+                                {
+                                    bytes.push(val as u8);
+                                } else {
+                                    bytes.push(0);
+                                }
+                            }
+                            self.const_arrays.insert(name.clone(), bytes);
+                            self.const_values
+                                .insert(name.clone(), elements.len() as i64);
+                        }
+                        Expr::StructLit { fields, .. } => {
+                            let field_exprs: Vec<(String, Expr)> = fields.clone();
+                            for (field_name, field_expr) in fields {
+                                if let Some(val) = eval_expr(
+                                    field_expr,
+                                    &self.const_values,
+                                    &self.symbol_types,
+                                ) {
+                                    self.const_values
+                                        .insert(format!("{}::{}", name, field_name), val);
+                                }
+                            }
+                            self.struct_consts.insert(name.clone(), field_exprs);
+                        }
+                        _ => {
+                            let val = (*evaluated_value)
+                                .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                            if let Some(val) = val {
+                                self.import_const(name, val);
+                            }
+                        }
                     }
                 }
                 Item::EnumDecl { name, variants, .. } => {
                     self.collect_enum(name, variants, false);
                 }
                 Item::UseDecl { trees, .. } => {
-                    // Public uses re-export names; private uses (such
-                    // as `use super::constants::*;` inside a std
-                    // module) bind the names that module's own items
-                    // reference.
                     for tree in trees {
                         self.resolve_use_tree(tree, visited);
                     }
@@ -1297,13 +1446,8 @@ impl Codegen {
                     argument,
                     ..
                 } if self.current_section.is_some() => {
-                    // Placement macros inside a std module emit into
-                    // the active section, resolving paths relative to
-                    // the std module's own directory. They are skipped
-                    // while collecting (no active section).
                     self.handle_placement(macro_name, argument);
                 }
-                // Other item kinds produce no flat-namespace bindings.
                 _ => {}
             }
         }
@@ -1320,10 +1464,43 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
-                let val = (*evaluated_value)
-                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                if let Some(val) = val {
-                    self.import_const(name, val);
+                match value {
+                    Expr::ArrayLit { elements } => {
+                        let mut bytes = Vec::new();
+                        for elem in elements {
+                            if let Some(val) =
+                                eval_expr(elem, &self.const_values, &self.symbol_types)
+                            {
+                                bytes.push(val as u8);
+                            } else {
+                                bytes.push(0);
+                            }
+                        }
+                        self.const_arrays.insert(name.to_string(), bytes);
+                        self.const_values
+                            .insert(name.to_string(), elements.len() as i64);
+                    }
+                    Expr::StructLit { fields, .. } => {
+                        let field_exprs: Vec<(String, Expr)> = fields.clone();
+                        for (field_name, field_expr) in fields {
+                            if let Some(val) = eval_expr(
+                                field_expr,
+                                &self.const_values,
+                                &self.symbol_types,
+                            ) {
+                                self.const_values
+                                    .insert(format!("{}::{}", name, field_name), val);
+                            }
+                        }
+                        self.struct_consts.insert(name.to_string(), field_exprs);
+                    }
+                    _ => {
+                        let val = (*evaluated_value)
+                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                        if let Some(val) = val {
+                            self.import_const(name, val);
+                        }
+                    }
                 }
             }
             Item::EnumDecl { variants, .. } => {
@@ -1981,6 +2158,42 @@ impl Codegen {
                 self.compile_switch(register, cases);
             }
             FnStmt::FnCall { name, args } => {
+                // Check for compile-time macros that appear as FnCall
+                // statements (compile_error!, assert!, assert_eq!,
+                // debug_assert!, debug_assert_eq!, panic!).
+                match name.as_str() {
+                    "compile_error" => {
+                        let msg = args.first()
+                            .and_then(|e| if let Expr::String_ { value } = e {
+                                Some(value.trim_matches('"'))
+                            } else { None })
+                            .unwrap_or("compile_error!");
+                        self.error(
+                            307,
+                            msg.to_string(),
+                        );
+                        return;
+                    }
+                    "panic" => {
+                        // For now, panic! emits an error. In a future
+                        // phase this will stash info and jump to a crash
+                        // handler. For now, emit a BRK/HLT/RST.
+                        let msg = args.first()
+                            .and_then(|e| if let Expr::String_ { value } = e {
+                                Some(value.trim_matches('"'))
+                            } else { None })
+                            .unwrap_or("panic!");
+                        // Emit a software interrupt as a placeholder.
+                        // The full crash handler is Phase 7.
+                        let _ = msg;
+                        match self.target.cpu.as_str() {
+                            "sm83" | "z80" => { self.emit_byte(0x00); } // RST 0
+                            _ => { self.emit_byte(0x00); } // BRK
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
                 self.compile_fn_call(name, args);
             }
             FnStmt::ReturnStmt => {
@@ -2031,14 +2244,36 @@ impl Codegen {
             Expr::Ident { name } => Some((name.clone(), RelocKind::Abs8, 0)),
             Expr::Selector { path, accesses } => {
                 if path.is_empty() {
-                    None
-                } else {
-                    Some((
-                        path.join("::"),
-                        RelocKind::Abs8,
-                        selector_offset(accesses, &self.const_values, &self.symbol_types),
-                    ))
+                    return None;
                 }
+
+                // Check if this is a struct field access (CONST::field).
+                // If the const is in struct_consts, resolve the field
+                // expression to a relocation against the target symbol.
+                if !accesses.is_empty() && path.len() == 1 {
+                    let const_name = &path[0];
+                    // Look for a FieldAccess in the accesses.
+                    if let Some(Access::FieldAccess { name: field_name }) = accesses.first() {
+                        // Clone the field expression out of struct_consts
+                        // to avoid the borrow conflict.
+                        let field_expr = self.struct_consts.get(const_name).and_then(|fields| {
+                            fields.iter().find(|(n, _)| n == field_name).map(|(_, e)| e.clone())
+                        });
+                        if let Some(expr) = field_expr {
+                            // The field expression is typically a bare
+                            // Ident pointing to the array symbol.
+                            // Recurse to classify it.
+                            return self.classify_immediate(&expr);
+                        }
+                    }
+                }
+
+                // Fall back to existing behavior.
+                Some((
+                    path.join("::"),
+                    RelocKind::Abs8,
+                    selector_offset(accesses, &self.const_values, &self.symbol_types),
+                ))
             }
             Expr::MacroCall { name, arg } => match name.as_str() {
                 "lo" => {
@@ -2803,6 +3038,19 @@ impl Codegen {
                 inner: Box::new(self.substitute_expr(inner, params, args)),
             },
             Expr::Number { .. } | Expr::String_ { .. } | Expr::Boolean { .. } => expr.clone(),
+            Expr::ArrayLit { elements } => Expr::ArrayLit {
+                elements: elements
+                    .iter()
+                    .map(|e| self.substitute_expr(e, params, args))
+                    .collect(),
+            },
+            Expr::StructLit { type_name, fields } => Expr::StructLit {
+                type_name: type_name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, e)| (n.clone(), self.substitute_expr(e, params, args)))
+                    .collect(),
+            },
         }
     }
 
@@ -3196,6 +3444,8 @@ fn eval_expr(
         Expr::Selector { path, accesses } => {
             resolve_selector(path, accesses, const_values, symbol_types)
         }
+        Expr::ArrayLit { .. } => None,
+        Expr::StructLit { .. } => None,
         _ => None,
     }
 }
@@ -3466,6 +3716,8 @@ mod tests {
             current_section: None,
             inline_fns: HashMap::new(),
             const_values: HashMap::new(),
+            const_arrays: HashMap::new(),
+            struct_consts: HashMap::new(),
             symbol_types: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),

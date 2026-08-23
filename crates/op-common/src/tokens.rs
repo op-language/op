@@ -118,11 +118,18 @@ pub enum TokenType {
     Macro_nyhi,
     Macro_len,
     Macro_sizeof,
+    Macro_compile_error,
+    Macro_assert,
+    Macro_assert_eq,
+    Macro_debug_assert,
+    Macro_debug_assert_eq,
+    Macro_panic,
 
     // --- Include macros -------------------------------------------------
     Include_locate_bytes,
     Include_locate_str,
     Include_locate_fn,
+    Include_font_load,
 
     // --- Condition keywords ---------------------------------------------
     Cond_plus,
@@ -270,11 +277,18 @@ impl TokenType {
             Self::Macro_nyhi => "Macro_nyhi",
             Self::Macro_len => "Macro_len",
             Self::Macro_sizeof => "Macro_sizeof",
+            Self::Macro_compile_error => "Macro_compile_error",
+            Self::Macro_assert => "Macro_assert",
+            Self::Macro_assert_eq => "Macro_assert_eq",
+            Self::Macro_debug_assert => "Macro_debug_assert",
+            Self::Macro_debug_assert_eq => "Macro_debug_assert_eq",
+            Self::Macro_panic => "Macro_panic",
 
             // Include macros
             Self::Include_locate_bytes => "Include_locate_bytes",
             Self::Include_locate_str => "Include_locate_str",
             Self::Include_locate_fn => "Include_locate_fn",
+            Self::Include_font_load => "Include_font_load",
 
             // Condition keywords
             Self::Cond_plus => "Cond_plus",

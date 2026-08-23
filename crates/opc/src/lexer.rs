@@ -123,6 +123,12 @@ const COMPILE_MACROS: &[(&str, TokenType)] = &[
     ("nyhi", TokenType::Macro_nyhi),
     ("len", TokenType::Macro_len),
     ("sizeof", TokenType::Macro_sizeof),
+    ("compile_error", TokenType::Macro_compile_error),
+    ("assert", TokenType::Macro_assert),
+    ("assert_eq", TokenType::Macro_assert_eq),
+    ("debug_assert", TokenType::Macro_debug_assert),
+    ("debug_assert_eq", TokenType::Macro_debug_assert_eq),
+    ("panic", TokenType::Macro_panic),
 ];
 
 /// Include macro names and their corresponding token types.
@@ -130,6 +136,7 @@ const INCLUDE_MACROS: &[(&str, TokenType)] = &[
     ("locate_bytes", TokenType::Include_locate_bytes),
     ("locate_str", TokenType::Include_locate_str),
     ("locate_fn", TokenType::Include_locate_fn),
+    ("font_load", TokenType::Include_font_load),
 ];
 
 /// All CPU opcode mnemonics in lowercase. The lexer matches opcodes

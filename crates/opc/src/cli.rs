@@ -48,6 +48,11 @@ pub struct OpcArgs {
     #[arg(long = "feature", action = ArgAction::Append)]
     pub features: Vec<String>,
 
+    /// Declare a feature name defined in Cart.toml (for debug_assert!
+    /// warnings). Passed by the cart build tool.
+    #[arg(long = "defined-feature", action = ArgAction::Append)]
+    pub defined_features: Vec<String>,
+
     /// Add a directory to the include search path.
     #[arg(short = 'I', action = ArgAction::Append)]
     pub include: Vec<String>,
@@ -125,7 +130,7 @@ fn run_pipeline(args: &OpcArgs) -> Result<()> {
 
     // 3. Parse.
     let (ast, parse_diags) =
-        crate::parser::parse_token_stream(input_path, token_stream, target, &args.features);
+        crate::parser::parse_token_stream_full(input_path, token_stream, target, &args.features, &args.defined_features);
     print_diags(&parse_diags, input_path, &source);
     if has_errors(&parse_diags) {
         anyhow::bail!("parser errors in {input_path}");

@@ -924,3 +924,62 @@ fn rp2a07_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
     assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFFE));
 }
+
+// === Phase 0: array const placement ========================================
+
+#[test]
+fn array_const_placed_in_rom() {
+    let obj = compile(
+        "#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+            fn main() { lda DATA }
+        }
+         const DATA: [u8; 4] = [0x01, 0x02, 0x03, 0x04];",
+    );
+    // The rom section should exist and contain data.
+    let rom = obj.sections.iter().find(|s| s.kind == SectionKind::Rom);
+    assert!(rom.is_some());
+    let rom = rom.unwrap();
+    // Find the DATA symbol.
+    let sym = rom.symbols.iter().find(|s| s.name == "DATA");
+    assert!(sym.is_some(), "DATA symbol not found in symbols: {:?}", rom.symbols);
+    let sym = sym.unwrap();
+    let start = sym.offset as usize;
+    let end = start + 4;
+    let bytes = &rom.data[start..end];
+    assert_eq!(bytes, &[0x01, 0x02, 0x03, 0x04]);
+}
+
+#[test]
+fn array_const_len_resolves() {
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "const DATA: [u8; 4] = [10, 20, 30, 40];",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 1, &[], &[]);
+    // len!(DATA) should resolve to 4 via const_values.
+    // We verify via the NameTables.
+    let data_len = tables.const_values.get("DATA");
+    assert_eq!(data_len, Some(&4));
+    let _ = obj;
+}
+
+// === Phase 0: struct const field resolution ================================
+
+#[test]
+fn struct_const_scalar_field_in_const_values() {
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] { }
+         const MYFONT: font_t = font_t { tile_count: 102, data: SOMEDATA };",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 1, &[], &[]);
+    // The scalar field tile_count should be in const_values as
+    // MYFONT::tile_count = 102.
+    let tile_count = tables.const_values.get("MYFONT::tile_count");
+    assert_eq!(tile_count, Some(&102));
+    let _ = obj;
+}

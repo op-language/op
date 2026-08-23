@@ -163,10 +163,19 @@ pub struct Attribute {
 }
 
 /// A single argument inside an attribute.
+///
+/// For simple key=value predicates (`cpu = "rp2A03"`), `name` is the key
+/// and `value` is the string literal. When the argument is a combinator
+/// (`all(...)`, `any(...)`, `not(...)`), `name` holds the combinator name
+/// and `sub_args` holds the nested predicate arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttrArg {
     pub name: String,
     pub value: String,
+    /// Nested arguments for combinator predicates (`all`, `any`, `not`).
+    /// Empty for simple key=value predicates.
+    #[serde(default)]
+    pub sub_args: Vec<AttrArg>,
 }
 
 // --- Function body statements ----------------------------------------------
@@ -308,6 +317,15 @@ pub enum Expr {
     },
     ParenExpr {
         inner: Box<Expr>,
+    },
+    /// A bracket array literal `[ expr, expr, ... ]`.
+    ArrayLit {
+        elements: Vec<Expr>,
+    },
+    /// A struct literal `TypeName { field: value, ... }`.
+    StructLit {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
     },
 }
 

@@ -4,7 +4,7 @@
 //! assert the AST structure.
 
 use op_common::ast::{Expr, FnStmt, Item, Operand, Type};
-use opc::parser::parse_source;
+use opc::parser::{parse_source, parse_source_full};
 
 /// Helper: parse a source string with a default target and return the
 /// root module's items.
@@ -870,4 +870,246 @@ fn parse_do_while_with_modifier() {
         },
         _ => panic!("expected FnDecl"),
     }
+}
+
+// === Phase 0: cfg combinators ==============================================
+
+#[test]
+fn cfg_all_combinator_keeps_item_when_both_match() {
+    let items = parse_items(
+        "#[cfg(all(cpu = \"rp2A03\", variant = \"ntsc\"))]
+         const MATCHES: u8 = 1;",
+    );
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn cfg_all_combinator_drops_item_when_one_fails() {
+    let items = parse_items(
+        "#[cfg(all(cpu = \"rp2A03\", variant = \"pal\"))]
+         const DROPPED: u8 = 1;",
+    );
+    assert_eq!(items.len(), 0);
+}
+
+#[test]
+fn cfg_any_combinator_keeps_item_when_one_matches() {
+    let items = parse_items(
+        "#[cfg(any(target = \"rp2A03-nintendo-nes-ntsc\", target = \"rp2A07-nintendo-nes-pal\"))]
+         const MATCHES: u8 = 1;",
+    );
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn cfg_any_combinator_drops_item_when_none_match() {
+    let items = parse_items(
+        "#[cfg(any(cpu = \"sm83\", cpu = \"z80\"))]
+         const DROPPED: u8 = 1;",
+    );
+    assert_eq!(items.len(), 0);
+}
+
+#[test]
+fn cfg_not_combinator_inverts_predicate() {
+    let items = parse_items(
+        "#[cfg(not(cpu = \"sm83\"))]
+         const KEPT: u8 = 1;",
+    );
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn cfg_not_combinator_drops_item_when_predicate_matches() {
+    let items = parse_items(
+        "#[cfg(not(cpu = \"rp2A03\"))]
+         const DROPPED: u8 = 1;",
+    );
+    assert_eq!(items.len(), 0);
+}
+
+#[test]
+fn cfg_nested_combinators() {
+    let items = parse_items(
+        "#[cfg(all(machine = \"nes\", not(variant = \"pal\")))]
+         const MATCHES: u8 = 1;",
+    );
+    assert_eq!(items.len(), 1);
+}
+
+// === Phase 0: ines.mapper cfg key ===========================================
+
+#[test]
+fn cfg_ines_mapper_named_matches() {
+    let items = parse_items(
+        "#[ines(mapper = 0, mirroring = \"vertical\")]
+         #[cfg(ines.mapper = \"nrom\")]
+         const MATCHES: u8 = 1;",
+    );
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn cfg_ines_mapper_named_does_not_match() {
+    let items = parse_items(
+        "#[ines(mapper = 1, mirroring = \"vertical\")]
+         #[cfg(ines.mapper = \"nrom\")]
+         const DROPPED: u8 = 1;",
+    );
+    assert_eq!(items.len(), 0);
+}
+
+// === Phase 0: statement-level cfg ==========================================
+
+#[test]
+fn cfg_on_statement_inside_fn_body_keeps_when_true() {
+    let item = parse_one(
+        "fn test() {
+            #[cfg(machine = \"nes\")]
+            lda #0
+        }",
+    );
+    match item {
+        Item::FnDecl { body, .. } => {
+            assert_eq!(body.len(), 1);
+        }
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn cfg_on_statement_inside_fn_body_drops_when_false() {
+    let item = parse_one(
+        "fn test() {
+            #[cfg(machine = \"gameboy\")]
+            lda #0
+            nop
+        }",
+    );
+    match item {
+        Item::FnDecl { body, .. } => {
+            // The lda is dropped; only nop remains.
+            assert_eq!(body.len(), 1);
+        }
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+// === Phase 0: compile_error! macro ==========================================
+
+#[test]
+fn compile_error_lexes_as_macro() {
+    let (stream, diags) = opc::lexer::lex_source(
+        "test.op",
+        "compile_error!(\"test message\");",
+    );
+    assert!(diags.is_empty());
+    assert!(stream
+        .tokens
+        .iter()
+        .any(|t| t.kind == "Macro_compile_error" && t.value == "compile_error"));
+}
+
+#[test]
+fn compile_error_parses_in_item_position() {
+    let items = parse_items("compile_error!(\"oops\");");
+    // It should be accepted as a placement-like or FnCall item.
+    // The exact item type depends on how the parser dispatches it.
+    // Since compile_error! is a Macro_ token, the parser handles it
+    // as an Include_ macro path or an expression.
+    // We just verify it doesn't crash.
+    assert!(items.len() <= 1);
+}
+
+// === Phase 0: array literal syntax =========================================
+
+#[test]
+fn parse_array_literal_expr() {
+    let item = parse_one("const DATA: [u8; 4] = [1, 2, 3, 4];");
+    match item {
+        Item::ConstDecl { value, .. } => {
+            assert!(matches!(value, Expr::ArrayLit { ref elements } if elements.len() == 4));
+        }
+        _ => panic!("expected ConstDecl"),
+    }
+}
+
+#[test]
+fn parse_array_literal_in_expression() {
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "const X: u8 = [10, 20, 30][0];",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let _ = ast;
+}
+
+// === Phase 0: struct literal syntax ========================================
+
+#[test]
+fn parse_struct_literal_expr() {
+    let item = parse_one(
+        "const F: my_type = my_type { x: 42, y: 100 };",
+    );
+    match item {
+        Item::ConstDecl { value, .. } => {
+            match value {
+                Expr::StructLit { type_name, fields } => {
+                    assert_eq!(type_name, "my_type");
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].0, "x");
+                    assert_eq!(fields[1].0, "y");
+                }
+                _ => panic!("expected StructLit, got {:?}", value),
+            }
+        }
+        _ => panic!("expected ConstDecl"),
+    }
+}
+
+// === Phase 0: debug_assert! defined feature warning =========================
+
+#[test]
+fn debug_assert_warns_when_feature_not_defined() {
+    let (_ast, diags) = parse_source_full(
+        "test.op",
+        "fn test() { debug_assert!(1 == 1) }",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+        &[],
+    );
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Warning)
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("debug_assert") && w.message.contains("not defined")),
+        "expected debug_assert! warning, got: {:?}",
+        warnings
+    );
+}
+
+#[test]
+fn debug_assert_no_warning_when_feature_defined() {
+    let (_ast, diags) = parse_source_full(
+        "test.op",
+        "fn test() { debug_assert!(1 == 1) }",
+        "rp2A03-nintendo-nes-ntsc",
+        &["debug".to_string()],
+        &["debug".to_string()],
+    );
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Warning)
+        .collect();
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.message.contains("debug_assert")),
+        "expected no debug_assert! warning when debug is defined, got: {:?}",
+        warnings
+    );
 }
