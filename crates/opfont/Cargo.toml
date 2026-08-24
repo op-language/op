@@ -1,0 +1,18 @@
+[package]
+name = "opfont"
+description = "TTF to Op font cart rasterizer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opfont"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+fontdue.workspace = true
+glob.workspace = true

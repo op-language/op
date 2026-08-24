@@ -39,7 +39,13 @@ pub fn run(args: &OpcArgs) -> Result<()> {
     // so the AST carries the source path forward to the codegen, which needs
     // it to resolve `locate_bytes!`/`locate_str!` paths and the standard
     // library relative to the source directory.
-    let (ast, diags) = parse_token_stream_full(&stream.file.clone(), stream, target, &args.features, &args.defined_features);
+    let (ast, diags) = parse_token_stream_full(
+        &stream.file.clone(),
+        stream,
+        target,
+        &args.features,
+        &args.defined_features,
+    );
     let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &diags {
@@ -89,7 +95,14 @@ pub fn parse_source_full(
     defined_features: &[String],
 ) -> (AstFile, Vec<Diagnostic>) {
     let (token_stream, lex_diags) = lexer::lex_source(file, source);
-    parse_token_stream_with_diags_full(file, token_stream, lex_diags, target, features, defined_features)
+    parse_token_stream_with_diags_full(
+        file,
+        token_stream,
+        lex_diags,
+        target,
+        features,
+        defined_features,
+    )
 }
 
 /// Parse a serialized [`TokenStream`] into an [`AstFile`] and a list of
@@ -664,8 +677,7 @@ impl Parser {
         let (name, has_eq) = if let Some(ref t) = tok {
             match t.kind.as_str() {
                 "IDENT" | "OPCODE" | "Type_u8" | "Type_i8" | "Type_u16" | "Type_i16"
-                | "Type_u32" | "Type_i32" | "Type_bool" | "Type_pointer"
-                | "Mod_not" => {
+                | "Type_u32" | "Type_i32" | "Type_bool" | "Type_pointer" | "Mod_not" => {
                     // Mod_not is the keyword `not` used as a cfg combinator.
                     let mut name = t.value.clone();
                     self.advance();
@@ -2115,14 +2127,7 @@ impl Parser {
             match arg.name.as_str() {
                 "all" => arg.sub_args.iter().all(|sub| self.eval_cfg_arg(sub)),
                 "any" => arg.sub_args.iter().any(|sub| self.eval_cfg_arg(sub)),
-                "not" => {
-                    if arg.sub_args.len() == 1 {
-                        !self.eval_cfg_arg(&arg.sub_args[0])
-                    } else {
-                        // `not` expects exactly one child.
-                        true
-                    }
-                }
+                "not" if arg.sub_args.len() == 1 => !self.eval_cfg_arg(&arg.sub_args[0]),
                 _ => true,
             }
         } else if !arg.name.is_empty() && !arg.value.is_empty() {
@@ -2141,8 +2146,12 @@ impl Parser {
                     if let Some(dot_pos) = key.find('.') {
                         let prefix = &key[..dot_pos];
                         let field = &key[dot_pos + 1..];
-                        if prefix == "ines" || prefix == "gb" || prefix == "lnx"
-                            || prefix == "snes" || prefix == "sega" || prefix == "sms"
+                        if prefix == "ines"
+                            || prefix == "gb"
+                            || prefix == "lnx"
+                            || prefix == "snes"
+                            || prefix == "sega"
+                            || prefix == "sms"
                             || prefix == "a78"
                         {
                             if let Some(raw) = self.header_fields.get(field) {

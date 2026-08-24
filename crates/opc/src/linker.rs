@@ -143,7 +143,7 @@ impl Linker {
 
                     // Adjust symbol offsets: they are relative to the
                     // new section's org, so add (section.org - existing.org).
-                    let org_diff = (section.org - existing.org) as u32;
+                    let org_diff = section.org - existing.org;
                     for sym in &section.symbols {
                         existing.symbols.push(Symbol {
                             name: sym.name.clone(),

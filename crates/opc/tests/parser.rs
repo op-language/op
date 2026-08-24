@@ -999,10 +999,7 @@ fn cfg_on_statement_inside_fn_body_drops_when_false() {
 
 #[test]
 fn compile_error_lexes_as_macro() {
-    let (stream, diags) = opc::lexer::lex_source(
-        "test.op",
-        "compile_error!(\"test message\");",
-    );
+    let (stream, diags) = opc::lexer::lex_source("test.op", "compile_error!(\"test message\");");
     assert!(diags.is_empty());
     assert!(stream
         .tokens
@@ -1049,21 +1046,17 @@ fn parse_array_literal_in_expression() {
 
 #[test]
 fn parse_struct_literal_expr() {
-    let item = parse_one(
-        "const F: my_type = my_type { x: 42, y: 100 };",
-    );
+    let item = parse_one("const F: my_type = my_type { x: 42, y: 100 };");
     match item {
-        Item::ConstDecl { value, .. } => {
-            match value {
-                Expr::StructLit { type_name, fields } => {
-                    assert_eq!(type_name, "my_type");
-                    assert_eq!(fields.len(), 2);
-                    assert_eq!(fields[0].0, "x");
-                    assert_eq!(fields[1].0, "y");
-                }
-                _ => panic!("expected StructLit, got {:?}", value),
+        Item::ConstDecl { value, .. } => match value {
+            Expr::StructLit { type_name, fields } => {
+                assert_eq!(type_name, "my_type");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+                assert_eq!(fields[1].0, "y");
             }
-        }
+            _ => panic!("expected StructLit, got {:?}", value),
+        },
         _ => panic!("expected ConstDecl"),
     }
 }
@@ -1106,9 +1099,7 @@ fn debug_assert_no_warning_when_feature_defined() {
         .filter(|d| d.severity == op_diagnostics::Severity::Warning)
         .collect();
     assert!(
-        !warnings
-            .iter()
-            .any(|w| w.message.contains("debug_assert")),
+        !warnings.iter().any(|w| w.message.contains("debug_assert")),
         "expected no debug_assert! warning when debug is defined, got: {:?}",
         warnings
     );

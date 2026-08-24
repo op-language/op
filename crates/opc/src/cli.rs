@@ -129,8 +129,13 @@ fn run_pipeline(args: &OpcArgs) -> Result<()> {
     }
 
     // 3. Parse.
-    let (ast, parse_diags) =
-        crate::parser::parse_token_stream_full(input_path, token_stream, target, &args.features, &args.defined_features);
+    let (ast, parse_diags) = crate::parser::parse_token_stream_full(
+        input_path,
+        token_stream,
+        target,
+        &args.features,
+        &args.defined_features,
+    );
     print_diags(&parse_diags, input_path, &source);
     if has_errors(&parse_diags) {
         anyhow::bail!("parser errors in {input_path}");

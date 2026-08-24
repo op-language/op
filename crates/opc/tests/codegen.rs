@@ -941,7 +941,11 @@ fn array_const_placed_in_rom() {
     let rom = rom.unwrap();
     // Find the DATA symbol.
     let sym = rom.symbols.iter().find(|s| s.name == "DATA");
-    assert!(sym.is_some(), "DATA symbol not found in symbols: {:?}", rom.symbols);
+    assert!(
+        sym.is_some(),
+        "DATA symbol not found in symbols: {:?}",
+        rom.symbols
+    );
     let sym = sym.unwrap();
     let start = sym.offset as usize;
     let end = start + 4;

@@ -78,7 +78,8 @@ pub fn compile_file_full(
 ) -> Result<ObjectFile> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path))?;
-    let (ast, parse_diags) = parser::parse_source_full(path, &source, target, features, defined_features);
+    let (ast, parse_diags) =
+        parser::parse_source_full(path, &source, target, features, defined_features);
     let has_errors = parse_diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &parse_diags {
@@ -430,11 +431,9 @@ impl Codegen {
                         // Evaluate scalar fields into const_values as
                         // CONST::field = value.
                         for (field_name, field_expr) in fields {
-                            if let Some(val) = eval_expr(
-                                field_expr,
-                                &self.const_values,
-                                &self.symbol_types,
-                            ) {
+                            if let Some(val) =
+                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                            {
                                 self.const_values
                                     .insert(format!("{}::{}", name, field_name), val);
                             }
@@ -1185,15 +1184,12 @@ impl Codegen {
                 // Scalar fields emit their value bytes.
                 // Pointer fields emit Lo8/Hi8 relocations.
                 for (_field_name, field_expr) in fields {
-                    if let Some(val) = eval_expr(
-                        field_expr,
-                        &self.const_values,
-                        &self.symbol_types,
-                    ) {
+                    if let Some(val) = eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                    {
                         // Scalar field: emit value bytes.
                         let field_ty_size = match field_expr {
                             Expr::Ident { name: sym } => {
-                                self.symbol_types.get(sym).map(|t| type_size(t)).unwrap_or(1)
+                                self.symbol_types.get(sym).map(type_size).unwrap_or(1)
                             }
                             _ => 1,
                         };
@@ -1204,8 +1200,7 @@ impl Codegen {
                     } else {
                         // Pointer field: emit a relocation.
                         // Try to resolve as a symbol reference.
-                        if let Some((sym, reloc_kind, addend)) =
-                            self.classify_immediate(field_expr)
+                        if let Some((sym, reloc_kind, addend)) = self.classify_immediate(field_expr)
                         {
                             let field_size = match field_expr {
                                 Expr::Ident { .. } => 2, // pointer is 2 bytes
@@ -1446,46 +1441,42 @@ impl Codegen {
                     value,
                     evaluated_value,
                     ..
-                } => {
-                    match value {
-                        Expr::ArrayLit { elements } => {
-                            let mut bytes = Vec::new();
-                            for elem in elements {
-                                if let Some(val) =
-                                    eval_expr(elem, &self.const_values, &self.symbol_types)
-                                {
-                                    bytes.push(val as u8);
-                                } else {
-                                    bytes.push(0);
-                                }
+                } => match value {
+                    Expr::ArrayLit { elements } => {
+                        let mut bytes = Vec::new();
+                        for elem in elements {
+                            if let Some(val) =
+                                eval_expr(elem, &self.const_values, &self.symbol_types)
+                            {
+                                bytes.push(val as u8);
+                            } else {
+                                bytes.push(0);
                             }
-                            self.const_arrays.insert(name.clone(), bytes);
-                            self.const_values
-                                .insert(name.clone(), elements.len() as i64);
                         }
-                        Expr::StructLit { fields, .. } => {
-                            let field_exprs: Vec<(String, Expr)> = fields.clone();
-                            for (field_name, field_expr) in fields {
-                                if let Some(val) = eval_expr(
-                                    field_expr,
-                                    &self.const_values,
-                                    &self.symbol_types,
-                                ) {
-                                    self.const_values
-                                        .insert(format!("{}::{}", name, field_name), val);
-                                }
+                        self.const_arrays.insert(name.clone(), bytes);
+                        self.const_values
+                            .insert(name.clone(), elements.len() as i64);
+                    }
+                    Expr::StructLit { fields, .. } => {
+                        let field_exprs: Vec<(String, Expr)> = fields.clone();
+                        for (field_name, field_expr) in fields {
+                            if let Some(val) =
+                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                            {
+                                self.const_values
+                                    .insert(format!("{}::{}", name, field_name), val);
                             }
-                            self.struct_consts.insert(name.clone(), field_exprs);
                         }
-                        _ => {
-                            let val = (*evaluated_value)
-                                .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                            if let Some(val) = val {
-                                self.import_const(name, val);
-                            }
+                        self.struct_consts.insert(name.clone(), field_exprs);
+                    }
+                    _ => {
+                        let val = (*evaluated_value)
+                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                        if let Some(val) = val {
+                            self.import_const(name, val);
                         }
                     }
-                }
+                },
                 Item::EnumDecl { name, variants, .. } => {
                     self.collect_enum(name, variants, false);
                 }
@@ -1546,46 +1537,40 @@ impl Codegen {
                 value,
                 evaluated_value,
                 ..
-            } => {
-                match value {
-                    Expr::ArrayLit { elements } => {
-                        let mut bytes = Vec::new();
-                        for elem in elements {
-                            if let Some(val) =
-                                eval_expr(elem, &self.const_values, &self.symbol_types)
-                            {
-                                bytes.push(val as u8);
-                            } else {
-                                bytes.push(0);
-                            }
+            } => match value {
+                Expr::ArrayLit { elements } => {
+                    let mut bytes = Vec::new();
+                    for elem in elements {
+                        if let Some(val) = eval_expr(elem, &self.const_values, &self.symbol_types) {
+                            bytes.push(val as u8);
+                        } else {
+                            bytes.push(0);
                         }
-                        self.const_arrays.insert(name.to_string(), bytes);
-                        self.const_values
-                            .insert(name.to_string(), elements.len() as i64);
                     }
-                    Expr::StructLit { fields, .. } => {
-                        let field_exprs: Vec<(String, Expr)> = fields.clone();
-                        for (field_name, field_expr) in fields {
-                            if let Some(val) = eval_expr(
-                                field_expr,
-                                &self.const_values,
-                                &self.symbol_types,
-                            ) {
-                                self.const_values
-                                    .insert(format!("{}::{}", name, field_name), val);
-                            }
+                    self.const_arrays.insert(name.to_string(), bytes);
+                    self.const_values
+                        .insert(name.to_string(), elements.len() as i64);
+                }
+                Expr::StructLit { fields, .. } => {
+                    let field_exprs: Vec<(String, Expr)> = fields.clone();
+                    for (field_name, field_expr) in fields {
+                        if let Some(val) =
+                            eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                        {
+                            self.const_values
+                                .insert(format!("{}::{}", name, field_name), val);
                         }
-                        self.struct_consts.insert(name.to_string(), field_exprs);
                     }
-                    _ => {
-                        let val = (*evaluated_value)
-                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                        if let Some(val) = val {
-                            self.import_const(name, val);
-                        }
+                    self.struct_consts.insert(name.to_string(), field_exprs);
+                }
+                _ => {
+                    let val = (*evaluated_value)
+                        .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                    if let Some(val) = val {
+                        self.import_const(name, val);
                     }
                 }
-            }
+            },
             Item::EnumDecl { variants, .. } => {
                 self.collect_enum(name, variants, bare);
             }
@@ -2073,10 +2058,7 @@ impl Codegen {
                 // font data to 2-plane NES CHR data and emits it into the
                 // current CHR section.
                 if self.target.machine != "nes" {
-                    self.error(
-                        307,
-                        "font_load! is only supported on NES targets",
-                    );
+                    self.error(307, "font_load! is only supported on NES targets");
                     return;
                 }
                 if let PlacementArg::Path { segments } = argument {
@@ -2084,11 +2066,13 @@ impl Codegen {
                         // Look up the font_t const in struct_consts.
                         if let Some(fields) = self.struct_consts.get(font_name).cloned() {
                             // Find the `data` field expression.
-                            let data_expr = fields.iter()
+                            let data_expr = fields
+                                .iter()
                                 .find(|(n, _)| n == "data")
                                 .map(|(_, e)| e.clone());
                             // Find the `tile_count` field value.
-                            let tile_count = self.const_values
+                            let tile_count = self
+                                .const_values
                                 .get(&format!("{}::tile_count", font_name))
                                 .copied();
 
@@ -2114,7 +2098,7 @@ impl Codegen {
                                     // Expand 1bpp to 2-plane NES CHR.
                                     // The font blob is: [flags][tile_count][enc_table][1bpp_tiles]
                                     // We need to skip the header + encoding table to get to the tile data.
-                                    let flags = if bytes.len() > 0 { bytes[0] } else { 0 };
+                                    let flags = if !bytes.is_empty() { bytes[0] } else { 0 };
                                     let enc_type = flags & 3;
                                     let enc_size: usize = match enc_type {
                                         0 => 256,
@@ -2349,32 +2333,43 @@ impl Codegen {
                 // debug_assert!, debug_assert_eq!, panic!).
                 match name.as_str() {
                     "compile_error" => {
-                        let msg = args.first()
-                            .and_then(|e| if let Expr::String_ { value } = e {
-                                Some(value.trim_matches('"'))
-                            } else { None })
+                        let msg = args
+                            .first()
+                            .and_then(|e| {
+                                if let Expr::String_ { value } = e {
+                                    Some(value.trim_matches('"'))
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or("compile_error!");
-                        self.error(
-                            307,
-                            msg.to_string(),
-                        );
+                        self.error(307, msg.to_string());
                         return;
                     }
                     "panic" => {
                         // For now, panic! emits an error. In a future
                         // phase this will stash info and jump to a crash
                         // handler. For now, emit a BRK/HLT/RST.
-                        let msg = args.first()
-                            .and_then(|e| if let Expr::String_ { value } = e {
-                                Some(value.trim_matches('"'))
-                            } else { None })
+                        let msg = args
+                            .first()
+                            .and_then(|e| {
+                                if let Expr::String_ { value } = e {
+                                    Some(value.trim_matches('"'))
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or("panic!");
                         // Emit a software interrupt as a placeholder.
                         // The full crash handler is Phase 7.
                         let _ = msg;
                         match self.target.cpu.as_str() {
-                            "sm83" | "z80" => { self.emit_byte(0x00); } // RST 0
-                            _ => { self.emit_byte(0x00); } // BRK
+                            "sm83" | "z80" => {
+                                self.emit_byte(0x00);
+                            } // RST 0
+                            _ => {
+                                self.emit_byte(0x00);
+                            } // BRK
                         }
                         return;
                     }
@@ -2443,7 +2438,10 @@ impl Codegen {
                         // Clone the field expression out of struct_consts
                         // to avoid the borrow conflict.
                         let field_expr = self.struct_consts.get(const_name).and_then(|fields| {
-                            fields.iter().find(|(n, _)| n == field_name).map(|(_, e)| e.clone())
+                            fields
+                                .iter()
+                                .find(|(n, _)| n == field_name)
+                                .map(|(_, e)| e.clone())
                         });
                         if let Some(expr) = field_expr {
                             // The field expression is typically a bare
@@ -2924,7 +2922,12 @@ impl Codegen {
         // supports CHR-RAM before expanding _font_load_tiles.
         if name == "_font_load_tiles" && self.target.machine == "nes" {
             if let Some(ref header) = self.header {
-                if let Some(mapper_str) = header.fields.iter().find(|(k, _)| k == "mapper").map(|(_, v)| v.clone()) {
+                if let Some(mapper_str) = header
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == "mapper")
+                    .map(|(_, v)| v.clone())
+                {
                     let mapper_num: u32 = mapper_str.parse().unwrap_or(0);
                     const NON_CHR_RAM_MAPPERS: &[u32] = &[0, 2, 3, 6, 9, 10, 71];
                     if NON_CHR_RAM_MAPPERS.contains(&mapper_num) {
