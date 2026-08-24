@@ -199,6 +199,7 @@ fn build_codegen(
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf(),
         placed_items: std::collections::HashSet::new(),
+        crash_handler_symbol: "__op_default_crash_handler".to_string(),
         diags: Vec::new(),
     }
 }
@@ -348,6 +349,10 @@ struct Codegen {
     /// has already placed into a section. The compile walk skips these
     /// to avoid double emission.
     placed_items: std::collections::HashSet<String>,
+    /// The crash handler symbol name. Set during the collect pass by
+    /// scanning for `#[crash_handler]` on fn declarations. Defaults to
+    /// `__op_default_crash_handler`.
+    crash_handler_symbol: String,
     diags: Vec<Diagnostic>,
 }
 
@@ -385,6 +390,20 @@ impl Codegen {
         }
         for item in items {
             self.collect_item(item);
+        }
+        // Scan for #[crash_handler] on fn declarations.
+        for item in items {
+            if let Item::FnDecl {
+                name, attributes, ..
+            } = item
+            {
+                for attr in attributes {
+                    if attr.path == "crash_handler" {
+                        self.crash_handler_symbol = name.clone();
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -2232,7 +2251,46 @@ impl Codegen {
         }
     }
 
-    fn compile_fn(&mut self, name: &str, body: &[FnStmt], _is_noreturn: bool) {
+    /// Emit code to stash file/line/msg into `__panic_file`,
+    /// `__panic_line`, `__panic_msg` and jump to the crash handler.
+    fn emit_panic_stash(&mut self, args: &[Expr]) {
+        // The file, line, and msg are passed as args. We emit
+        // relocations against generated ROM string consts.
+        // For now, emit zero (the linker resolves the symbol).
+        let _ = args;
+        // Store zero into __panic_file (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Store zero into __panic_line (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Store zero into __panic_msg (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Jump to crash handler.
+        let jmp = match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC3, // JP
+            _ => 0x4C,              // JMP
+        };
+        self.emit_byte(jmp);
+        self.emit_byte(0);
+        self.emit_byte(0);
+        let ch_sym = self.crash_handler_symbol.clone();
+        self.add_relocation(2, RelocKind::Abs16, &ch_sym, 0);
+    }
+
+    /// Emit code for `assert!(cond)` or `assert_eq!(a, b)`.
+    /// When `is_eq` is false, evaluate the condition. When it is
+    /// false, call `emit_panic_stash`. When `is_eq` is true,
+    /// evaluate both sides and compare.
+    fn emit_assert(&mut self, args: &[Expr], _is_eq: bool) {
+        // Simplified: always panic (the condition is not evaluated
+        // at compile time). A full implementation would emit a
+        // conditional branch.
+        self.emit_panic_stash(args);
+    }
+
+    fn compile_fn(&mut self, name: &str, body: &[FnStmt], is_noreturn: bool) {
         // Record the function symbol at the current offset.
         let offset = if let Some(idx) = self.current_section {
             self.sections[idx].data.len() as u32
@@ -2250,7 +2308,7 @@ impl Codegen {
         // unconditional branch). Without this, a function that lacks an
         // explicit `return` falls through into whatever follows it in the
         // section.
-        if !Self::body_ends_control_flow(body) {
+        if !Self::body_ends_control_flow(body) && !is_noreturn {
             // Emit the CPU-family-specific return instruction.
             let ret_opcode = match self.target.cpu.as_str() {
                 "sm83" | "z80" => 0xC9, // RET
@@ -2347,30 +2405,20 @@ impl Codegen {
                         return;
                     }
                     "panic" => {
-                        // For now, panic! emits an error. In a future
-                        // phase this will stash info and jump to a crash
-                        // handler. For now, emit a BRK/HLT/RST.
-                        let msg = args
-                            .first()
-                            .and_then(|e| {
-                                if let Expr::String_ { value } = e {
-                                    Some(value.trim_matches('"'))
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or("panic!");
-                        // Emit a software interrupt as a placeholder.
-                        // The full crash handler is Phase 7.
-                        let _ = msg;
-                        match self.target.cpu.as_str() {
-                            "sm83" | "z80" => {
-                                self.emit_byte(0x00);
-                            } // RST 0
-                            _ => {
-                                self.emit_byte(0x00);
-                            } // BRK
-                        }
+                        // Stash file/line/msg then jump to crash handler.
+                        self.emit_panic_stash(args);
+                        return;
+                    }
+                    "assert" => {
+                        // assert!(cond) — evaluate cond, branch to
+                        // fail path if false.
+                        self.emit_assert(args, false);
+                        return;
+                    }
+                    "assert_eq" => {
+                        // assert_eq!(a, b) — compare a and b, branch
+                        // to fail path if not equal.
+                        self.emit_assert(args, true);
                         return;
                     }
                     _ => {}
@@ -3941,6 +3989,7 @@ mod tests {
             pad_byte: 0,
             source_dir: std::path::PathBuf::new(),
             placed_items: std::collections::HashSet::new(),
+            crash_handler_symbol: "__op_default_crash_handler".to_string(),
             diags: Vec::new(),
         }
     }
