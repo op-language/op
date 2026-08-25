@@ -9,7 +9,7 @@
 //!
 //! The optimizer runs only when the opt level is 1 or higher.
 
-use op_ir::{Relocation, Section, SectionKind};
+use op_ir::{Relocation, Section, SectionKind, SymbolKind};
 
 /// A decoded instruction for the optimizer to work with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +95,46 @@ pub fn optimize(sections: &mut [Section], opt_level: u8) {
 
 /// Run the peephole optimizer on a single section.
 fn optimize_section(section: &mut Section) {
-    // Decode the section data into a list of instructions.
-    let instructions = decode_instructions(&section.data, &section.relocations);
+    // Determine the code region. When function symbols are present,
+    // const data (array consts, string literals) is placed after all
+    // functions and must not be decoded as instructions — doing so
+    // corrupts the data bytes. Only optimize up to the end of the last
+    // function symbol, preserving the data suffix verbatim.
+    //
+    // When no function symbols are present (e.g. a raw byte test or a
+    // pure-code section), optimize the entire section as before.
+    let func_end = section
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Function)
+        .map(|s| (s.offset + s.size) as usize)
+        .max();
+
+    let (code_end, has_data_suffix) = match func_end {
+        Some(end) if end > 0 && end < section.data.len() => (end, true),
+        _ => (section.data.len(), false),
+    };
+
+    if code_end == 0 {
+        return;
+    }
+
+    let (code_bytes, data_suffix): (&[u8], Vec<u8>) = if has_data_suffix {
+        (&section.data[..code_end], section.data[code_end..].to_vec())
+    } else {
+        (&section.data[..], Vec::new())
+    };
+
+    // Filter relocations to those within the code region.
+    let code_relocs: Vec<Relocation> = section
+        .relocations
+        .iter()
+        .filter(|r| (r.offset as usize) < code_end)
+        .cloned()
+        .collect();
+
+    // Decode the code bytes into a list of instructions.
+    let instructions = decode_instructions(code_bytes, &code_relocs);
     if instructions.is_empty() {
         return;
     }
@@ -111,7 +149,7 @@ fn optimize_section(section: &mut Section) {
         changed = false;
         pass += 1;
 
-        let (result, did_change) = apply_transforms(&current, &section.relocations);
+        let (result, did_change) = apply_transforms(&current, &code_relocs);
         current = result;
         if did_change {
             changed = true;
@@ -119,9 +157,32 @@ fn optimize_section(section: &mut Section) {
     }
 
     // Re-encode the instructions back into section data.
-    let (new_data, new_relocs) = reencode(&current, &section.relocations);
+    let (new_code, new_relocs) = reencode(&current, &code_relocs);
+
+    // Reassemble: optimized code + preserved data suffix (if any).
+    let code_size_delta = new_code.len() as i64 - code_end as i64;
+    let mut new_data = new_code;
+    if has_data_suffix {
+        new_data.extend_from_slice(&data_suffix);
+    }
     section.data = new_data;
-    section.relocations = new_relocs;
+
+    // Reassemble relocations: code-region relocs from the optimizer,
+    // plus data-region relocs (shifted by the code size change).
+    let mut all_relocs = new_relocs;
+    if has_data_suffix {
+        for r in &section.relocations {
+            if (r.offset as usize) >= code_end {
+                all_relocs.push(Relocation {
+                    offset: ((r.offset as i64) + code_size_delta) as u32,
+                    kind: r.kind,
+                    symbol: r.symbol.clone(),
+                    addend: r.addend,
+                });
+            }
+        }
+    }
+    section.relocations = all_relocs;
 }
 
 /// Decode raw section data bytes into a list of instructions.
