@@ -195,10 +195,10 @@ fn emit_ines(obj: &ObjectFile) -> Result<Vec<u8>> {
     if header_field_bool(obj, "fourscreen") {
         flags6 |= 0x08;
     }
-    // Mirroring: "horizontal" sets bit 0; "vertical" clears it.
+    // Mirroring: per the iNES spec, bit 0 = 1 means vertical mirroring,
+    // bit 0 = 0 means horizontal mirroring.
     match header_field(obj, "mirroring") {
-        Some("horizontal") => flags6 |= 0x01,
-        Some("vertical") => {}
+        Some("vertical") => flags6 |= 0x01,
         _ => {}
     }
 
@@ -825,8 +825,9 @@ mod tests {
             ],
         });
         let bytes = emit_linked(&obj, "ines").unwrap();
-        // Flags 6: mapper_lo=7 << 4 | mirroring bit 0 (1) | battery (2) = 0x73.
-        assert_eq!(bytes[6], 0x73);
+        // Flags 6: mapper_lo=7 << 4 | battery (2). Horizontal mirroring
+        // leaves bit 0 clear: 0x72.
+        assert_eq!(bytes[6], 0x72);
         // Flags 7: mapper_hi = 0.
         assert_eq!(bytes[7], 0x00);
     }

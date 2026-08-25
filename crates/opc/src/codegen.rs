@@ -182,6 +182,7 @@ fn build_codegen(
         const_arrays: HashMap::new(),
         struct_consts: HashMap::new(),
         collected_vars: Vec::new(),
+        collected_consts: Vec::new(),
         symbol_types: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
@@ -200,6 +201,7 @@ fn build_codegen(
             .to_path_buf(),
         placed_items: std::collections::HashSet::new(),
         crash_handler_symbol: "__op_default_crash_handler".to_string(),
+        struct_sizes: HashMap::new(),
         diags: Vec::new(),
     }
 }
@@ -314,6 +316,10 @@ struct Codegen {
     /// sub-modules), stored for placement in the first RAM section.
     /// Each entry is (name, ty, addr_binding, init).
     collected_vars: Vec<(String, Type, Option<Expr>, Option<InitValue>)>,
+    /// All const declarations collected from all modules (including
+    /// sub-modules), stored for placement in the first ROM section.
+    /// Each entry is (name, ty, value, evaluated_value).
+    collected_consts: Vec<(String, Type, Expr, Option<i64>)>,
     /// Types of top-level const and var declarations, keyed by name.
     /// Populated during the collect pass before values are evaluated,
     /// so that `len!` and `sizeof!` of a later declaration resolve.
@@ -353,6 +359,11 @@ struct Codegen {
     /// scanning for `#[crash_handler]` on fn declarations. Defaults to
     /// `__op_default_crash_handler`.
     crash_handler_symbol: String,
+    /// Struct sizes keyed by struct name. Populated during the collect
+    /// pass from StructDecl items. Used by `self.type_size` to compute
+    /// the size of struct types (which the standalone `type_size` cannot
+    /// do because it has no access to struct definitions).
+    struct_sizes: HashMap<String, usize>,
     diags: Vec<Diagnostic>,
 }
 
@@ -407,12 +418,53 @@ impl Codegen {
         }
     }
 
+    /// Compute the size of a type, consulting `struct_sizes` for
+    /// struct types that the standalone `type_size` cannot handle.
+    fn type_size(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Named { name } => {
+                if let Some(size) = self.struct_sizes.get(name) {
+                    *size
+                } else {
+                    type_size(ty)
+                }
+            }
+            Type::Array { element, size } => {
+                let elem_size = self.type_size(element);
+                if let Some(size_expr) = size {
+                    if let Some(s) = eval_const_expr_simple(size_expr) {
+                        elem_size * s as usize
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
     /// Record the type of a top-level const or var declaration in
-    /// `symbol_types`. Other items are ignored.
+    /// `symbol_types`. Also register struct sizes from StructDecl items.
     fn register_type(&mut self, item: &Item) {
         match item {
             Item::ConstDecl { name, ty, .. } | Item::VarDecl { name, ty, .. } => {
                 self.symbol_types.insert(name.clone(), ty.clone());
+            }
+            Item::StructDecl { name, fields, .. } => {
+                let size: usize = fields.iter().map(|f| {
+                    let base = type_size(&f.ty);
+                    if let Some(dim) = &f.array_dim {
+                        if let Some(d) = eval_const_expr_simple(dim) {
+                            base * d as usize
+                        } else {
+                            base
+                        }
+                    } else {
+                        base
+                    }
+                }).sum();
+                self.struct_sizes.insert(name.clone(), size);
             }
             _ => {}
         }
@@ -725,6 +777,18 @@ impl Codegen {
                         self.place_const(name, ty, value, *evaluated_value, rom_idx);
                         self.placed_items.insert(name.clone());
                     }
+                }
+            }
+        }
+
+        // Place consts collected from sub-modules (e.g. std font data)
+        // that were referenced by live code.
+        let collected = self.collected_consts.clone();
+        for (name, ty, value, evaluated_value) in &collected {
+            if referenced_data.contains(name) && !self.placed_items.contains(name) {
+                if let Some(rom_idx) = first_rom {
+                    self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                    self.placed_items.insert(name.clone());
                 }
             }
         }
@@ -1112,6 +1176,24 @@ impl Codegen {
                     if self.symbol_types.contains_key(first) && !data_refs.contains(first) {
                         data_refs.push(first.clone());
                     }
+                    // If this is a struct field access (e.g.
+                    // FONT_X.data), also add the array symbol that
+                    // the field points to so it gets placed in ROM.
+                    if let Some(fields) = self.struct_consts.get(first) {
+                        for access in accesses {
+                            if let Access::FieldAccess { name: field_name } = access {
+                                if let Some((_, field_expr)) =
+                                    fields.iter().find(|(n, _)| n == field_name)
+                                {
+                                    if let Expr::Ident { name: array_name } = field_expr {
+                                        if !data_refs.contains(array_name) {
+                                            data_refs.push(array_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 for access in accesses {
                     if let Access::Offset { value, .. } = access {
@@ -1193,7 +1275,7 @@ impl Codegen {
                     }
                 } else {
                     // Can't find the array — emit zero bytes.
-                    for _ in 0..type_size(ty) {
+                    for _ in 0..self.type_size(ty) {
                         self.sections[section_idx].data.push(0);
                     }
                 }
@@ -1219,7 +1301,7 @@ impl Codegen {
                     } else {
                         // Pointer field: emit a relocation.
                         // Try to resolve as a symbol reference.
-                        if let Some((sym, reloc_kind, addend)) = self.classify_immediate(field_expr)
+                        if let Some((sym, _, addend)) = self.classify_immediate(field_expr)
                         {
                             let field_size = match field_expr {
                                 Expr::Ident { .. } => 2, // pointer is 2 bytes
@@ -1229,6 +1311,13 @@ impl Codegen {
                             for _ in 0..field_size {
                                 self.sections[section_idx].data.push(0);
                             }
+                            // Use Abs16 for pointer fields (2 bytes),
+                            // Abs8 for single-byte fields.
+                            let reloc_kind = if field_size == 2 {
+                                RelocKind::Abs16
+                            } else {
+                                RelocKind::Abs8
+                            };
                             self.sections[section_idx].relocations.push(Relocation {
                                 offset: field_offset,
                                 kind: reloc_kind,
@@ -1247,7 +1336,7 @@ impl Codegen {
                 // Scalar or array const: use evaluated value.
                 let val = evaluated_value
                     .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                let size = type_size(ty);
+                let size = self.type_size(ty);
                 if let Some(v) = val {
                     let bytes = val_to_bytes(v, size);
                     for b in &bytes {
@@ -1255,7 +1344,7 @@ impl Codegen {
                     }
                 } else {
                     // Can't evaluate — emit zero bytes for the type size.
-                    for _ in 0..type_size(ty) {
+                    for _ in 0..self.type_size(ty) {
                         self.sections[section_idx].data.push(0);
                     }
                 }
@@ -1457,47 +1546,57 @@ impl Codegen {
                 }
                 Item::ConstDecl {
                     name,
+                    ty,
                     value,
                     evaluated_value,
                     ..
-                } => match value {
-                    Expr::ArrayLit { elements } => {
-                        let mut bytes = Vec::new();
-                        for elem in elements {
-                            if let Some(val) =
-                                eval_expr(elem, &self.const_values, &self.symbol_types)
-                            {
-                                bytes.push(val as u8);
-                            } else {
-                                bytes.push(0);
+                } => {
+                    match value {
+                        Expr::ArrayLit { elements } => {
+                            let mut bytes = Vec::new();
+                            for elem in elements {
+                                if let Some(val) =
+                                    eval_expr(elem, &self.const_values, &self.symbol_types)
+                                {
+                                    bytes.push(val as u8);
+                                } else {
+                                    bytes.push(0);
+                                }
+                            }
+                            self.const_arrays.insert(name.clone(), bytes);
+                            self.const_values
+                                .insert(name.clone(), elements.len() as i64);
+                        }
+                        Expr::StructLit { fields, .. } => {
+                            let field_exprs: Vec<(String, Expr)> = fields.clone();
+                            for (field_name, field_expr) in fields {
+                                if let Some(val) =
+                                    eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                                {
+                                    self.const_values
+                                        .insert(format!("{}::{}", name, field_name), val);
+                                }
+                            }
+                            self.struct_consts.insert(name.clone(), field_exprs);
+                        }
+                        _ => {
+                            let val = (*evaluated_value)
+                                .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                            if let Some(val) = val {
+                                self.import_const(name, val);
                             }
                         }
-                        self.const_arrays.insert(name.clone(), bytes);
-                        self.const_values
-                            .insert(name.clone(), elements.len() as i64);
                     }
-                    Expr::StructLit { fields, .. } => {
-                        let field_exprs: Vec<(String, Expr)> = fields.clone();
-                        for (field_name, field_expr) in fields {
-                            if let Some(val) =
-                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
-                            {
-                                self.const_values
-                                    .insert(format!("{}::{}", name, field_name), val);
-                            }
-                        }
-                        self.struct_consts.insert(name.clone(), field_exprs);
-                    }
-                    _ => {
-                        let val = (*evaluated_value)
-                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                        if let Some(val) = val {
-                            self.import_const(name, val);
-                        }
-                    }
-                },
+                    // Collect for placement in ROM.
+                    self.collected_consts.push((
+                        name.clone(),
+                        ty.clone(),
+                        value.clone(),
+                        *evaluated_value,
+                    ));
+                }
                 Item::EnumDecl { name, variants, .. } => {
-                    self.collect_enum(name, variants, false);
+                    self.collect_enum(name, variants, true);
                 }
                 Item::UseDecl { trees, .. } => {
                     for tree in trees {
@@ -1540,6 +1639,21 @@ impl Codegen {
                         addr_binding.clone(),
                         init.clone(),
                     ));
+                }
+                Item::StructDecl { name, fields, .. } => {
+                    let size: usize = fields.iter().map(|f| {
+                        let base = type_size(&f.ty);
+                        if let Some(dim) = &f.array_dim {
+                            if let Some(d) = eval_const_expr_simple(dim) {
+                                base * d as usize
+                            } else {
+                                base
+                            }
+                        } else {
+                            base
+                        }
+                    }).sum();
+                    self.struct_sizes.insert(name.clone(), size);
                 }
                 _ => {}
             }
@@ -2185,7 +2299,7 @@ impl Codegen {
         addr_binding: &Option<Expr>,
         init: &Option<InitValue>,
     ) {
-        let size = type_size(ty);
+        let size = self.type_size(ty);
         let offset = if let Some(addr_expr) = addr_binding {
             eval_expr(addr_expr, &self.const_values, &self.symbol_types).unwrap_or(0) as u32
         } else if let Some(idx) = self.current_section {
@@ -2338,13 +2452,13 @@ impl Codegen {
     /// Return true when the last statement of a function body ends control
     /// flow, making a trailing RTS redundant. `return`, infinite `loop`,
     /// and an assembly instruction that returns or jumps (`rts`, `rti`,
-    /// `jmp`, `bra`) all end control flow.
+    /// `jmp`, `jp`, `bra`) all end control flow.
     fn body_ends_control_flow(body: &[FnStmt]) -> bool {
         match body.last() {
             Some(FnStmt::ReturnStmt) => true,
             Some(FnStmt::LoopStmt { .. }) => true,
             Some(FnStmt::AsmStmt { opcode, .. }) => {
-                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "bra")
+                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "jp" | "bra")
             }
             _ => false,
         }
@@ -2630,14 +2744,23 @@ impl Codegen {
                     self.emit_byte(op_byte);
                     self.emit_byte(0); // placeholder offset
                     self.add_relocation(1, RelocKind::Branch8, name, 0);
-                } else {
+                } else if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
                     // Non-branch instruction with label ref — treat as absolute.
-                    if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
-                        self.emit_byte(op_byte);
-                        self.emit_byte(0);
-                        self.emit_byte(0);
-                        self.add_relocation(2, RelocKind::Abs16, name, 0);
-                    }
+                    self.emit_byte(op_byte);
+                    self.emit_byte(0);
+                    self.emit_byte(0);
+                    self.add_relocation(2, RelocKind::Abs16, name, 0);
+                } else {
+                    // The mnemonic has no relative or absolute encoding for
+                    // this CPU. Silently dropping the instruction here used
+                    // to corrupt the generated code, so report an error.
+                    self.error(
+                        301,
+                        format!(
+                            "opcode '{}' with a label operand is not supported on {}",
+                            opcode, self.target.cpu
+                        ),
+                    );
                 }
             }
             Operand::Selector { path, accesses } => {
@@ -3419,7 +3542,7 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
         "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
             "reset" => Some(0xFFFC),
             "nmi" => Some(0xFFFA),
-            "irq" => Some(0xFFFE),
+            "irq" => Some(0xFFF8),
             _ => None,
         },
         "wdc65c816" => match interrupt_name {
@@ -3975,6 +4098,7 @@ mod tests {
             const_arrays: HashMap::new(),
             struct_consts: HashMap::new(),
             collected_vars: Vec::new(),
+            collected_consts: Vec::new(),
             symbol_types: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),
@@ -3990,6 +4114,7 @@ mod tests {
             source_dir: std::path::PathBuf::new(),
             placed_items: std::collections::HashSet::new(),
             crash_handler_symbol: "__op_default_crash_handler".to_string(),
+            struct_sizes: HashMap::new(),
             diags: Vec::new(),
         }
     }

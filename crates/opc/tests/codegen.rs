@@ -622,9 +622,9 @@ fn vector_address_6502_family() {
     use opc::codegen::interrupt_vector_address;
     assert_eq!(interrupt_vector_address("mos6502", "reset"), Some(0xFFFC));
     assert_eq!(interrupt_vector_address("mos6502", "nmi"), Some(0xFFFA));
-    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFF8));
     assert_eq!(interrupt_vector_address("rp2A03", "reset"), Some(0xFFFC));
-    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFF8));
 }
 
 #[test]
@@ -904,7 +904,7 @@ fn rp2a03_interrupt_vector_nmi() {
 #[test]
 fn rp2a03_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFF8));
 }
 
 #[test]
@@ -922,7 +922,7 @@ fn rp2a07_interrupt_vector_nmi() {
 #[test]
 fn rp2a07_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFF8));
 }
 
 // === Phase 0: array const placement ========================================

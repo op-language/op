@@ -143,7 +143,7 @@ pub enum VectorEncoding {
 ///
 /// The linker writes the target function address into the vector table
 /// at the specified address. For the 6502, the vector addresses are
-/// `reset` at `0xFFFC`, `nmi` at `0xFFFA`, and `irq` at `0xFFFE`.
+/// `reset` at `0xFFFC`, `nmi` at `0xFFFA`, and `irq` at `0xFFF8`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterruptVector {
     /// The interrupt name: "reset", "nmi", or "irq".
