@@ -539,27 +539,15 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     // Build a symbol table to look up the entry-point function address.
     let symbol_table = build_symbol_table_from_sections(&roms);
 
-    // Entry point: write a JP instruction at 0x0100 that jumps to the
-    // reset interrupt handler. The Game Boy starts execution at 0x0100.
-    // The linker already wrote a JP at 0x0100 from the interrupt vector,
-    // but the output stage overwrites it here to be safe.
+    // Ensure the ROM is large enough for the header region (0x0000-0x014F).
     let header_min = 0x150usize;
     if rom_bytes.len() < header_min {
         rom_bytes.resize(header_min, 0);
     }
-    // Look up the reset interrupt vector target in the symbol table.
-    let entry_name = obj
-        .interrupt_vectors
-        .iter()
-        .find(|v| v.name == "reset")
-        .map(|v| v.target.as_str());
-    if let Some(name) = entry_name {
-        if let Some(&entry_addr) = symbol_table.get(name) {
-            rom_bytes[0x100] = 0xC3; // JP
-            rom_bytes[0x101] = (entry_addr & 0xFF) as u8;
-            rom_bytes[0x102] = ((entry_addr >> 8) & 0xFF) as u8;
-        }
-    }
+
+    // #[gb()] processing: initialize 0x0000-0x0104 with 0x00, then write
+    // the header bytes (logo, title, flags, checksum) to 0x0104-0x014F.
+    rom_bytes[0x0000..0x0105].fill(0);
 
     // Nintendo logo at 0x104, 48 bytes.
     rom_bytes[0x104..0x104 + 48].copy_from_slice(&GB_NINTENDO_LOGO);
@@ -629,6 +617,34 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     // Header checksum at 0x14D.
     let cksum = gb_header_checksum(&rom_bytes);
     rom_bytes[0x14D] = cksum;
+
+    // #[interrupt] processing (after the #[gb()] zeroing above): write the
+    // reset vector as a two-level jump — 0x0000 = JP <reset handler> and
+    // 0x0100 (the SM83 reset entry) = JP 0x0000 — and re-write the other
+    // interrupt vectors, since the zeroing cleared the 0x0040-0x0060 IRQ slots.
+    for vector in &obj.interrupt_vectors {
+        let target_addr = match symbol_table.get(&vector.target) {
+            Some(&addr) => addr,
+            None => continue,
+        };
+        if vector.name == "reset" {
+            // 0x0000 = JP <reset handler>.
+            rom_bytes[0x0000] = 0xC3;
+            rom_bytes[0x0001] = (target_addr & 0xFF) as u8;
+            rom_bytes[0x0002] = ((target_addr >> 8) & 0xFF) as u8;
+            // SM83 reset entry (0x0100) = JP 0x0000.
+            let addr = vector.address as usize;
+            rom_bytes[addr] = 0xC3;
+            rom_bytes[addr + 1] = 0x00;
+            rom_bytes[addr + 2] = 0x00;
+        } else {
+            // JP <target> at the vector's address.
+            let addr = vector.address as usize;
+            rom_bytes[addr] = 0xC3;
+            rom_bytes[addr + 1] = (target_addr & 0xFF) as u8;
+            rom_bytes[addr + 2] = ((target_addr >> 8) & 0xFF) as u8;
+        }
+    }
 
     // Pad the ROM to the next power-of-2 size (minimum 32KB).
     // The GB requires power-of-2 ROM sizes.

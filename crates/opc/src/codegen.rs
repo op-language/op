@@ -500,13 +500,21 @@ impl Codegen {
                     Expr::StructLit { fields, .. } => {
                         let field_exprs: Vec<(String, Expr)> = fields.clone();
                         // Evaluate scalar fields into const_values as
-                        // CONST::field = value.
+                        // CONST::field = value. Skip pointer fields
+                        // that reference array consts — their value
+                        // is an address (relocation), not a length.
                         for (field_name, field_expr) in fields {
-                            if let Some(val) =
-                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
-                            {
-                                self.const_values
-                                    .insert(format!("{}::{}", name, field_name), val);
+                            let is_array_ref = matches!(
+                                field_expr,
+                                Expr::Ident { name } if self.const_arrays.contains_key(name)
+                            );
+                            if !is_array_ref {
+                                if let Some(val) =
+                                    eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                                {
+                                    self.const_values
+                                        .insert(format!("{}::{}", name, field_name), val);
+                                }
                             }
                         }
                         self.struct_consts.insert(name.clone(), field_exprs);
@@ -712,6 +720,21 @@ impl Codegen {
             .sections
             .iter()
             .position(|s| s.kind == SectionKind::Ram);
+
+        // SM83 (Game Boy): reserve the first 0x150 bytes of the bank-0 ROM
+        // section (org 0x0000) for the interrupt vectors (0x0040-0x0100) and
+        // the cartridge header (0x0104-0x014F). Code then starts at 0x0150,
+        // so the reset handler is not clobbered by the header written at
+        // emit time. The output stage (emit_gb) zeros this region, writes the
+        // header, and patches the reset vector.
+        if self.target.cpu == "sm83" {
+            if let Some(idx) = first_rom {
+                let section = &mut self.sections[idx];
+                if section.org == 0 && section.data.len() < 0x0150 {
+                    section.data.resize(0x0150, 0);
+                }
+            }
+        }
 
         // DFS placement from each root.
         for root in &roots {
@@ -1570,11 +1593,26 @@ impl Codegen {
                         Expr::StructLit { fields, .. } => {
                             let field_exprs: Vec<(String, Expr)> = fields.clone();
                             for (field_name, field_expr) in fields {
-                                if let Some(val) =
-                                    eval_expr(field_expr, &self.const_values, &self.symbol_types)
-                                {
-                                    self.const_values
-                                        .insert(format!("{}::{}", name, field_name), val);
+                                // For pointer fields that reference an array
+                                // const, do NOT store the array's length in
+                                // const_values. The field holds a pointer
+                                // (address), and storing the length would
+                                // cause lo!/hi! of the field to resolve to
+                                // the length instead of emitting a
+                                // relocation against the array symbol.
+                                let is_array_ref = matches!(
+                                    field_expr,
+                                    Expr::Ident { name } if self.const_arrays.contains_key(name)
+                                );
+                                if !is_array_ref {
+                                    if let Some(val) = eval_expr(
+                                        field_expr,
+                                        &self.const_values,
+                                        &self.symbol_types,
+                                    ) {
+                                        self.const_values
+                                            .insert(format!("{}::{}", name, field_name), val);
+                                    }
                                 }
                             }
                             self.struct_consts.insert(name.clone(), field_exprs);
@@ -1687,11 +1725,17 @@ impl Codegen {
                 Expr::StructLit { fields, .. } => {
                     let field_exprs: Vec<(String, Expr)> = fields.clone();
                     for (field_name, field_expr) in fields {
-                        if let Some(val) =
-                            eval_expr(field_expr, &self.const_values, &self.symbol_types)
-                        {
-                            self.const_values
-                                .insert(format!("{}::{}", name, field_name), val);
+                        let is_array_ref = matches!(
+                            field_expr,
+                            Expr::Ident { name } if self.const_arrays.contains_key(name)
+                        );
+                        if !is_array_ref {
+                            if let Some(val) =
+                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                            {
+                                self.const_values
+                                    .insert(format!("{}::{}", name, field_name), val);
+                            }
                         }
                     }
                     self.struct_consts.insert(name.to_string(), field_exprs);
