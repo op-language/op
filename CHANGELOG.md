@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0]
+
+### Changed
+- `opc` codegen: for SM83 (Game Boy) targets, reserve the first 0x150
+  bytes of the bank-0 ROM section (org 0x0000) for the interrupt
+  vectors and cartridge header. Code now starts at 0x0150, so the reset
+  handler is no longer clobbered by the header. This eliminates the
+  need for a manual `jp real_main` + nop trampoline in Game Boy
+  programs.
+- `opc` `emit_gb`: the `#[gb()]` annotation now initializes 0x0000-0x0104
+  with 0x00 and writes the cartridge header to 0x0104-0x014F. The
+  `#[interrupt(reset)]` is processed after that, writing `0x0000 = JP
+  <main>` and `0x0100 = JP 0x0000` (the SM83 reset entry bounces to
+  0x0000, which jumps to main). Other interrupt vectors are re-written
+  after the zeroing so they are preserved.
+- `opc` optimizer: fixed font loading relocations and code generation
+  for struct-pointer fields used in `ld_de #data` relocations.
+
 ## [0.10.0]
 
 ### Added
