@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use op_ir::{ObjectFile, Section, SectionKind};
+use std::collections::HashMap;
 
 use crate::cli::OpcArgs;
 
@@ -132,6 +133,18 @@ fn header_field<'a>(obj: &'a ObjectFile, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Build a symbol table from section symbols (name -> absolute address).
+fn build_symbol_table_from_sections(sections: &[&Section]) -> HashMap<String, u32> {
+    let mut table = HashMap::new();
+    for section in sections {
+        for sym in &section.symbols {
+            let addr = section.org + sym.offset;
+            table.insert(sym.name.clone(), addr);
+        }
+    }
+    table
+}
+
 /// Parse a header field as u32 (decimal or hex).
 fn header_field_u32(obj: &ObjectFile, key: &str) -> Option<u32> {
     header_field(obj, key).and_then(|v| {
@@ -182,10 +195,10 @@ fn emit_ines(obj: &ObjectFile) -> Result<Vec<u8>> {
     if header_field_bool(obj, "fourscreen") {
         flags6 |= 0x08;
     }
-    // Mirroring: "horizontal" sets bit 0; "vertical" clears it.
+    // Mirroring: per the iNES spec, bit 0 = 1 means vertical mirroring,
+    // bit 0 = 0 means horizontal mirroring.
     match header_field(obj, "mirroring") {
-        Some("horizontal") => flags6 |= 0x01,
-        Some("vertical") => {}
+        Some("vertical") => flags6 |= 0x01,
         _ => {}
     }
 
@@ -523,11 +536,18 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     let roms = rom_sections(obj);
     let mut rom_bytes: Vec<u8> = roms.iter().flat_map(|s| s.data.iter().copied()).collect();
 
-    // Ensure the ROM is large enough to hold the header.
+    // Build a symbol table to look up the entry-point function address.
+    let symbol_table = build_symbol_table_from_sections(&roms);
+
+    // Ensure the ROM is large enough for the header region (0x0000-0x014F).
     let header_min = 0x150usize;
     if rom_bytes.len() < header_min {
         rom_bytes.resize(header_min, 0);
     }
+
+    // #[gb()] processing: initialize 0x0000-0x0104 with 0x00, then write
+    // the header bytes (logo, title, flags, checksum) to 0x0104-0x014F.
+    rom_bytes[0x0000..0x0105].fill(0);
 
     // Nintendo logo at 0x104, 48 bytes.
     rom_bytes[0x104..0x104 + 48].copy_from_slice(&GB_NINTENDO_LOGO);
@@ -555,6 +575,40 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
         rom_bytes[0x144..0x144 + n].copy_from_slice(&bytes[..n]);
     }
 
+    // Cartridge type at 0x147. Controls the MBC and extra hardware.
+    if let Some(mbc) = header_field(obj, "mbc") {
+        rom_bytes[0x147] = match mbc {
+            "rom" | "none" => 0x00,     // ROM only
+            "mbc1" => 0x01,             // MBC1
+            "mbc1_ram" => 0x02,         // MBC1 + RAM
+            "mbc1_ram_battery" => 0x03, // MBC1 + RAM + Battery
+            "mbc3" => 0x11,             // MBC3
+            "mbc3_ram" => 0x12,         // MBC3 + RAM
+            "mbc3_ram_battery" => 0x13, // MBC3 + RAM + Battery
+            "mbc5" => 0x19,             // MBC5
+            "mbc5_ram" => 0x1A,         // MBC5 + RAM
+            "mbc5_ram_battery" => 0x1B, // MBC5 + RAM + Battery
+            _ => 0x00,
+        };
+    }
+
+    // ROM size at 0x148. Encoded as a power-of-2 value.
+    // 0x00 = 32KB, 0x01 = 64KB, 0x02 = 128KB, etc.
+    // Round up to the next power of 2.
+    let rom_kb = rom_bytes.len().next_power_of_two() / 1024;
+    rom_bytes[0x148] = match rom_kb {
+        32 => 0x00,
+        64 => 0x01,
+        128 => 0x02,
+        256 => 0x03,
+        512 => 0x04,
+        1024 => 0x05,
+        2048 => 0x06,
+        4096 => 0x07,
+        8192 => 0x08,
+        _ => 0x00,
+    };
+
     // Mask ROM version at 0x14C.
     if let Some(version) = header_field_u32(obj, "version") {
         rom_bytes[0x14C] = version as u8;
@@ -563,6 +617,39 @@ fn emit_gb(obj: &ObjectFile) -> Vec<u8> {
     // Header checksum at 0x14D.
     let cksum = gb_header_checksum(&rom_bytes);
     rom_bytes[0x14D] = cksum;
+
+    // #[interrupt] processing (after the #[gb()] zeroing above): write the
+    // reset vector as a two-level jump — 0x0000 = JP <reset handler> and
+    // 0x0100 (the SM83 reset entry) = JP 0x0000 — and re-write the other
+    // interrupt vectors, since the zeroing cleared the 0x0040-0x0060 IRQ slots.
+    for vector in &obj.interrupt_vectors {
+        let target_addr = match symbol_table.get(&vector.target) {
+            Some(&addr) => addr,
+            None => continue,
+        };
+        if vector.name == "reset" {
+            // 0x0000 = JP <reset handler>.
+            rom_bytes[0x0000] = 0xC3;
+            rom_bytes[0x0001] = (target_addr & 0xFF) as u8;
+            rom_bytes[0x0002] = ((target_addr >> 8) & 0xFF) as u8;
+            // SM83 reset entry (0x0100) = JP 0x0000.
+            let addr = vector.address as usize;
+            rom_bytes[addr] = 0xC3;
+            rom_bytes[addr + 1] = 0x00;
+            rom_bytes[addr + 2] = 0x00;
+        } else {
+            // JP <target> at the vector's address.
+            let addr = vector.address as usize;
+            rom_bytes[addr] = 0xC3;
+            rom_bytes[addr + 1] = (target_addr & 0xFF) as u8;
+            rom_bytes[addr + 2] = ((target_addr >> 8) & 0xFF) as u8;
+        }
+    }
+
+    // Pad the ROM to the next power-of-2 size (minimum 32KB).
+    // The GB requires power-of-2 ROM sizes.
+    let padded_size = rom_bytes.len().next_power_of_two().max(32768);
+    rom_bytes.resize(padded_size, 0);
 
     rom_bytes
 }
@@ -754,8 +841,9 @@ mod tests {
             ],
         });
         let bytes = emit_linked(&obj, "ines").unwrap();
-        // Flags 6: mapper_lo=7 << 4 | mirroring bit 0 (1) | battery (2) = 0x73.
-        assert_eq!(bytes[6], 0x73);
+        // Flags 6: mapper_lo=7 << 4 | battery (2). Horizontal mirroring
+        // leaves bit 0 clear: 0x72.
+        assert_eq!(bytes[6], 0x72);
         // Flags 7: mapper_hi = 0.
         assert_eq!(bytes[7], 0x00);
     }

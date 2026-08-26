@@ -7,6 +7,7 @@
 
 use op_ir::{
     InterruptVector, ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol, SymbolKind,
+    VectorEncoding,
 };
 use opc::linker::link_source;
 
@@ -337,6 +338,7 @@ fn link_writes_interrupt_vector_table() {
             name: "reset".to_string(),
             address: 0xFFFC,
             target: "main".to_string(),
+            encoding: VectorEncoding::Pointer2,
         }],
     );
 
@@ -361,6 +363,7 @@ fn link_extends_section_for_vector_table() {
             name: "reset".to_string(),
             address: 0xFFFC,
             target: "main".to_string(),
+            encoding: VectorEncoding::Pointer2,
         }],
     );
 
@@ -498,4 +501,210 @@ fn link_full_object_from_codegen() {
     // The interrupt_vectors field should pass through.
     assert_eq!(linked.interrupt_vectors.len(), 1);
     assert_eq!(linked.interrupt_vectors[0].name, "reset");
+}
+
+// === 9. Z80 vector encoding (JP instruction) ==============================
+
+#[test]
+fn link_writes_z80_reset_vector() {
+    // ROM at 0x0000, maxsize 0x8000. fn `main` at offset 0x100 (address
+    // 0x0100). The reset vector at 0x0000 must hold a JP instruction:
+    // 0xC3, 0x00, 0x01.
+    let data = vec![0; 0x200];
+    let symbols = vec![fn_sym("main", 0x100, 2)];
+    let section = rom_section("rom0", 0x0000, 0, 0x8000, data, symbols, vec![]);
+    let obj = ObjectFile {
+        version: 1,
+        target: "z80-sega-mastersystem".to_string(),
+        sections: vec![section],
+        interrupt_vectors: vec![InterruptVector {
+            name: "reset".to_string(),
+            address: 0x0000,
+            target: "main".to_string(),
+            encoding: VectorEncoding::JumpZ80,
+        }],
+        header: None,
+        pad_byte: 0x00,
+    };
+
+    let linked = link_clean(&obj);
+    let s = &linked.sections[0];
+    // JP instruction: 0xC3 + 2-byte LE address (0x0100).
+    assert_eq!(s.data[0], 0xC3);
+    assert_eq!(s.data[1], 0x00);
+    assert_eq!(s.data[2], 0x01);
+}
+
+#[test]
+fn link_writes_z80_nmi_vector() {
+    // ROM at 0x0000, maxsize 0x8000. fn `nmi_handler` at offset 0x200
+    // (address 0x0200). The NMI vector at 0x0066 must hold a JP
+    // instruction: 0xC3, 0x00, 0x02.
+    let data = vec![0; 0x8000];
+    let symbols = vec![fn_sym("nmi_handler", 0x200, 2)];
+    let section = rom_section("rom0", 0x0000, 0, 0x8000, data, symbols, vec![]);
+    let obj = ObjectFile {
+        version: 1,
+        target: "z80-sega-mastersystem".to_string(),
+        sections: vec![section],
+        interrupt_vectors: vec![InterruptVector {
+            name: "nmi".to_string(),
+            address: 0x0066,
+            target: "nmi_handler".to_string(),
+            encoding: VectorEncoding::JumpZ80,
+        }],
+        header: None,
+        pad_byte: 0x00,
+    };
+
+    let linked = link_clean(&obj);
+    let s = &linked.sections[0];
+    let offset = 0x0066_usize;
+    assert_eq!(s.data[offset], 0xC3);
+    assert_eq!(s.data[offset + 1], 0x00);
+    assert_eq!(s.data[offset + 2], 0x02);
+}
+
+// === 10. SM83 vector encoding (JP to handler) =============================
+
+#[test]
+fn link_writes_sm83_vblank_vector() {
+    // ROM at 0x0000, maxsize 0x8000. fn `vblank` at offset 0x0150
+    // (address 0x0150). The vblank vector at 0x0040 must hold a JP
+    // instruction: 0xC3, 0x50, 0x01.
+    let data = vec![0; 0x8000];
+    let symbols = vec![fn_sym("vblank", 0x0150, 2)];
+    let section = rom_section("rom0", 0x0000, 0, 0x8000, data, symbols, vec![]);
+    let obj = ObjectFile {
+        version: 1,
+        target: "sm83-nintendo-gameboy".to_string(),
+        sections: vec![section],
+        interrupt_vectors: vec![InterruptVector {
+            name: "vblank".to_string(),
+            address: 0x0040,
+            target: "vblank".to_string(),
+            encoding: VectorEncoding::JumpSm83,
+        }],
+        header: None,
+        pad_byte: 0x00,
+    };
+
+    let linked = link_clean(&obj);
+    let s = &linked.sections[0];
+    let offset = 0x0040_usize;
+    assert_eq!(s.data[offset], 0xC3);
+    assert_eq!(s.data[offset + 1], 0x50);
+    assert_eq!(s.data[offset + 2], 0x01);
+}
+
+// === 11. 68000 vector encoding (4-byte big-endian) ========================
+
+#[test]
+fn link_writes_68000_reset_vector() {
+    // ROM at 0x0000, maxsize 0x100000. fn `main` at offset 0x0200
+    // (address 0x00000200). RAM at 0x00FF0000, maxsize 0x10000 (top of
+    // RAM = 0x00FF10000 which is 0x010000). The reset vector at 0x0000
+    // must hold the SSP (0x00FF1000) as 4-byte big-endian. The PC
+    // vector at 0x0004 must hold 0x00000200 as 4-byte big-endian.
+    let rom = rom_section(
+        "rom0",
+        0x0000,
+        0,
+        0x100000,
+        vec![0; 0x100000],
+        vec![],
+        vec![],
+    );
+    let rom_with_sym = Section {
+        symbols: vec![fn_sym("main", 0x0200, 4)],
+        ..rom
+    };
+    let ram = Section {
+        name: "ram0".to_string(),
+        kind: SectionKind::Ram,
+        org: 0x00FF0000,
+        bank: 0,
+        maxsize: 0x10000,
+        symbols: vec![],
+        relocations: vec![],
+        data: vec![],
+    };
+    let obj = ObjectFile {
+        version: 1,
+        target: "m68000-sega-genesis".to_string(),
+        sections: vec![rom_with_sym, ram],
+        interrupt_vectors: vec![
+            InterruptVector {
+                name: "reset".to_string(),
+                address: 0x0000,
+                target: "_stack_top".to_string(),
+                encoding: VectorEncoding::Pointer4,
+            },
+            InterruptVector {
+                name: "reset_pc".to_string(),
+                address: 0x0004,
+                target: "main".to_string(),
+                encoding: VectorEncoding::Pointer4,
+            },
+        ],
+        header: None,
+        pad_byte: 0x00,
+    };
+
+    let linked = link_clean(&obj);
+    let rom = linked
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .unwrap();
+
+    // SSP = 0x01000000 (top of RAM: org 0x00FF0000 + maxsize 0x10000).
+    // 4-byte big-endian: 0x01, 0x00, 0x00, 0x00.
+    assert_eq!(rom.data[0], 0x01);
+    assert_eq!(rom.data[1], 0x00);
+    assert_eq!(rom.data[2], 0x00);
+    assert_eq!(rom.data[3], 0x00);
+
+    // PC = 0x00000200. 4-byte big-endian: 0x00, 0x00, 0x02, 0x00.
+    assert_eq!(rom.data[4], 0x00);
+    assert_eq!(rom.data[5], 0x00);
+    assert_eq!(rom.data[6], 0x02);
+    assert_eq!(rom.data[7], 0x00);
+}
+
+#[test]
+fn link_writes_68000_level2_vector() {
+    // ROM at 0x0000, maxsize 0x100000. fn `level2_handler` at offset
+    // 0x0300 (address 0x00000300). The level-2 autovector at 0x0068
+    // must hold 0x00000300 as 4-byte big-endian.
+    let rom = rom_section(
+        "rom0",
+        0x0000,
+        0,
+        0x100000,
+        vec![0; 0x100000],
+        vec![fn_sym("level2_handler", 0x0300, 4)],
+        vec![],
+    );
+    let obj = ObjectFile {
+        version: 1,
+        target: "m68000-sega-genesis".to_string(),
+        sections: vec![rom],
+        interrupt_vectors: vec![InterruptVector {
+            name: "level2".to_string(),
+            address: 0x0068,
+            target: "level2_handler".to_string(),
+            encoding: VectorEncoding::Pointer4,
+        }],
+        header: None,
+        pad_byte: 0x00,
+    };
+
+    let linked = link_clean(&obj);
+    let rom = &linked.sections[0];
+    // 0x00000300 in 4-byte big-endian.
+    assert_eq!(rom.data[0x68], 0x00);
+    assert_eq!(rom.data[0x69], 0x00);
+    assert_eq!(rom.data[0x6A], 0x03);
+    assert_eq!(rom.data[0x6B], 0x00);
 }

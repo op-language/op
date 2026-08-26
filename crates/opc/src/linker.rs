@@ -6,7 +6,10 @@
 
 use anyhow::Result;
 use op_diagnostics::{Diagnostic, Severity};
-use op_ir::{InterruptVector, ObjectFile, RelocKind, Section, SectionKind};
+use op_ir::{
+    InterruptVector, ObjectFile, RelocKind, Relocation, Section, SectionKind, Symbol,
+    VectorEncoding,
+};
 use std::collections::HashMap;
 
 use crate::cli::OpcArgs;
@@ -101,33 +104,71 @@ impl Linker {
                 .position(|s| s.name == section.name && s.bank == section.bank)
             {
                 let existing = &mut merged[idx];
-                let old_data_len = existing.data.len() as u32;
 
-                // Adjust symbol offsets for the merged section.
-                for sym in &mut existing.symbols {
-                    // Symbols already have their offsets relative to the
-                    // section origin. When we concatenate data, the new
-                    // symbols need their offsets adjusted by the old data
-                    // length.
-                    let _ = sym; // offsets are already correct for the
-                                 // existing section; new symbols below.
+                // When sections have the same org, concatenate data.
+                // When sections have different orgs (same name+bank),
+                // place data at the correct offset based on org difference.
+                if existing.org == section.org {
+                    let old_data_len = existing.data.len() as u32;
+
+                    // Adjust the new section's symbols.
+                    let mut new_section = section;
+                    for sym in &mut new_section.symbols {
+                        sym.offset += old_data_len;
+                    }
+                    for reloc in &mut new_section.relocations {
+                        reloc.offset += old_data_len;
+                    }
+
+                    existing.data.extend_from_slice(&new_section.data);
+                    existing.symbols.extend(new_section.symbols);
+                    existing.relocations.extend(new_section.relocations);
+                } else {
+                    // Different orgs: place data at offset (section.org - existing.org).
+                    let data_offset = (section.org - existing.org) as usize;
+
+                    // Ensure the existing data is large enough.
+                    if existing.data.len() < data_offset {
+                        existing.data.resize(data_offset, 0);
+                    }
+
+                    // Place the new section's data at the correct offset,
+                    // overwriting any existing bytes.
+                    let new_data = &section.data;
+                    if existing.data.len() < data_offset + new_data.len() {
+                        existing.data.resize(data_offset + new_data.len(), 0);
+                    }
+                    existing.data[data_offset..data_offset + new_data.len()]
+                        .copy_from_slice(new_data);
+
+                    // Adjust symbol offsets: they are relative to the
+                    // new section's org, so add (section.org - existing.org).
+                    let org_diff = section.org - existing.org;
+                    for sym in &section.symbols {
+                        existing.symbols.push(Symbol {
+                            name: sym.name.clone(),
+                            offset: sym.offset + org_diff,
+                            size: sym.size,
+                            kind: sym.kind,
+                            is_pub: sym.is_pub,
+                        });
+                    }
+                    for reloc in &section.relocations {
+                        existing.relocations.push(Relocation {
+                            offset: reloc.offset + org_diff,
+                            kind: reloc.kind,
+                            symbol: reloc.symbol.clone(),
+                            addend: reloc.addend,
+                        });
+                    }
+
+                    // Update maxsize to cover both sections.
+                    let end = section.org + section.maxsize;
+                    let existing_end = existing.org + existing.maxsize;
+                    if end > existing_end {
+                        existing.maxsize = end - existing.org;
+                    }
                 }
-
-                // Adjust the new section's symbols.
-                let mut new_section = section;
-                for sym in &mut new_section.symbols {
-                    sym.offset += old_data_len;
-                }
-
-                // Adjust relocations in the new section.
-                for reloc in &mut new_section.relocations {
-                    reloc.offset += old_data_len;
-                }
-
-                // Concatenate data.
-                existing.data.extend_from_slice(&new_section.data);
-                existing.symbols.extend(new_section.symbols);
-                existing.relocations.extend(new_section.relocations);
             } else {
                 merged.push(section);
             }
@@ -278,19 +319,33 @@ impl Linker {
         vectors: &[InterruptVector],
         symbol_table: &HashMap<String, u32>,
     ) {
+        // If the _stack_top symbol is not in the symbol table, compute it
+        // from the first RAM section (org + maxsize = top of RAM).
+        let stack_top = symbol_table.get("_stack_top").copied().unwrap_or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.kind == SectionKind::Ram)
+                .map(|s| s.org + s.maxsize)
+                .unwrap_or(0)
+        });
+
         for vector in vectors {
             // Look up the target function address.
-            let target_addr = match symbol_table.get(&vector.target) {
-                Some(addr) => *addr,
-                None => {
-                    self.diags.push(Diagnostic::error(
-                        402,
-                        "",
-                        0,
-                        0,
-                        format!("interrupt vector target not found: '{}'", vector.target),
-                    ));
-                    continue;
+            let target_addr = if vector.target == "_stack_top" {
+                stack_top
+            } else {
+                match symbol_table.get(&vector.target) {
+                    Some(addr) => *addr,
+                    None => {
+                        self.diags.push(Diagnostic::error(
+                            402,
+                            "",
+                            0,
+                            0,
+                            format!("interrupt vector target not found: '{}'", vector.target),
+                        ));
+                        continue;
+                    }
                 }
             };
 
@@ -303,15 +358,38 @@ impl Linker {
             if let Some(section) = rom_section {
                 let offset = (vec_addr - section.org) as usize;
 
-                // Ensure the section data is large enough.
-                let needed = offset + 2;
-                if section.data.len() < needed {
-                    section.data.resize(needed, 0);
+                match vector.encoding {
+                    VectorEncoding::Pointer2 => {
+                        // 2-byte little-endian address.
+                        let needed = offset + 2;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = (target_addr & 0xFF) as u8;
+                        section.data[offset + 1] = ((target_addr >> 8) & 0xFF) as u8;
+                    }
+                    VectorEncoding::Pointer4 => {
+                        // 4-byte big-endian address (68000 is big-endian).
+                        let needed = offset + 4;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = ((target_addr >> 24) & 0xFF) as u8;
+                        section.data[offset + 1] = ((target_addr >> 16) & 0xFF) as u8;
+                        section.data[offset + 2] = ((target_addr >> 8) & 0xFF) as u8;
+                        section.data[offset + 3] = (target_addr & 0xFF) as u8;
+                    }
+                    VectorEncoding::JumpZ80 | VectorEncoding::JumpSm83 => {
+                        // 3-byte JP instruction: 0xC3 + 2-byte LE address.
+                        let needed = offset + 3;
+                        if section.data.len() < needed {
+                            section.data.resize(needed, 0);
+                        }
+                        section.data[offset] = 0xC3;
+                        section.data[offset + 1] = (target_addr & 0xFF) as u8;
+                        section.data[offset + 2] = ((target_addr >> 8) & 0xFF) as u8;
+                    }
                 }
-
-                // Write the 2-byte address in little-endian order.
-                section.data[offset] = (target_addr & 0xFF) as u8;
-                section.data[offset + 1] = ((target_addr >> 8) & 0xFF) as u8;
             } else {
                 self.diags.push(Diagnostic::error(
                     403,

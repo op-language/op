@@ -1,0 +1,25 @@
+//! mos6502-atari-2600 example
+//!
+//! Minimal cart with reset and IRQ handlers. The Atari 2600 has no NMI.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[interrupt(irq)]
+fn irq() {
+    rti
+}
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+#[rom(org = 0xF000, bank = 0, maxsize = 0x1000)] {
+}
+
+#[setpad(0xFF)]

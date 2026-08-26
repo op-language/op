@@ -1,0 +1,16 @@
+[package]
+name = "z80_sega_gamegear_example"
+version = "0.1.0"
+edition = "1"
+
+[[rom]]
+name = "example"
+path = "src/cart.op"
+target = "z80-sega-gamegear"
+format = "sms"
+
+[dependencies]
+std = { version = "0.5.0", git = "https://github.com/op-language/std" }
+
+[target]
+default = "z80-sega-gamegear"

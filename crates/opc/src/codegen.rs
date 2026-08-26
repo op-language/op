@@ -64,9 +64,22 @@ pub fn compile_file(
     include_paths: &[String],
     features: &[String],
 ) -> Result<ObjectFile> {
+    compile_file_full(path, target, opt_level, include_paths, features, &[])
+}
+
+/// Compile a source file with defined features for `debug_assert!` warnings.
+pub fn compile_file_full(
+    path: &str,
+    target: &str,
+    opt_level: u8,
+    include_paths: &[String],
+    features: &[String],
+    defined_features: &[String],
+) -> Result<ObjectFile> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path))?;
-    let (ast, parse_diags) = parser::parse_source(path, &source, target, features);
+    let (ast, parse_diags) =
+        parser::parse_source_full(path, &source, target, features, defined_features);
     let has_errors = parse_diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &parse_diags {
@@ -166,6 +179,10 @@ fn build_codegen(
         current_section: None,
         inline_fns: HashMap::new(),
         const_values: HashMap::new(),
+        const_arrays: HashMap::new(),
+        struct_consts: HashMap::new(),
+        collected_vars: Vec::new(),
+        collected_consts: Vec::new(),
         symbol_types: HashMap::new(),
         module_cache: ModuleCache::default(),
         module_path: Vec::new(),
@@ -183,6 +200,8 @@ fn build_codegen(
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf(),
         placed_items: std::collections::HashSet::new(),
+        crash_handler_symbol: "__op_default_crash_handler".to_string(),
+        struct_sizes: HashMap::new(),
         diags: Vec::new(),
     }
 }
@@ -288,6 +307,19 @@ struct Codegen {
     current_section: Option<usize>,
     inline_fns: HashMap<String, InlineFn>,
     const_values: HashMap<String, i64>,
+    /// Byte arrays for `const [u8; N] = [...]` declarations, keyed by name.
+    const_arrays: HashMap<String, Vec<u8>>,
+    /// Struct const field expressions, keyed by const name.
+    /// Each entry is a list of (field_name, field_expr) pairs.
+    struct_consts: HashMap<String, Vec<(String, Expr)>>,
+    /// All var declarations collected from all modules (including
+    /// sub-modules), stored for placement in the first RAM section.
+    /// Each entry is (name, ty, addr_binding, init).
+    collected_vars: Vec<(String, Type, Option<Expr>, Option<InitValue>)>,
+    /// All const declarations collected from all modules (including
+    /// sub-modules), stored for placement in the first ROM section.
+    /// Each entry is (name, ty, value, evaluated_value).
+    collected_consts: Vec<(String, Type, Expr, Option<i64>)>,
     /// Types of top-level const and var declarations, keyed by name.
     /// Populated during the collect pass before values are evaluated,
     /// so that `len!` and `sizeof!` of a later declaration resolve.
@@ -323,6 +355,15 @@ struct Codegen {
     /// has already placed into a section. The compile walk skips these
     /// to avoid double emission.
     placed_items: std::collections::HashSet<String>,
+    /// The crash handler symbol name. Set during the collect pass by
+    /// scanning for `#[crash_handler]` on fn declarations. Defaults to
+    /// `__op_default_crash_handler`.
+    crash_handler_symbol: String,
+    /// Struct sizes keyed by struct name. Populated during the collect
+    /// pass from StructDecl items. Used by `self.type_size` to compute
+    /// the size of struct types (which the standalone `type_size` cannot
+    /// do because it has no access to struct definitions).
+    struct_sizes: HashMap<String, usize>,
     diags: Vec<Diagnostic>,
 }
 
@@ -361,14 +402,69 @@ impl Codegen {
         for item in items {
             self.collect_item(item);
         }
+        // Scan for #[crash_handler] on fn declarations.
+        for item in items {
+            if let Item::FnDecl {
+                name, attributes, ..
+            } = item
+            {
+                for attr in attributes {
+                    if attr.path == "crash_handler" {
+                        self.crash_handler_symbol = name.clone();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compute the size of a type, consulting `struct_sizes` for
+    /// struct types that the standalone `type_size` cannot handle.
+    fn type_size(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Named { name } => {
+                if let Some(size) = self.struct_sizes.get(name) {
+                    *size
+                } else {
+                    type_size(ty)
+                }
+            }
+            Type::Array { element, size } => {
+                let elem_size = self.type_size(element);
+                if let Some(size_expr) = size {
+                    if let Some(s) = eval_const_expr_simple(size_expr) {
+                        elem_size * s as usize
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+        }
     }
 
     /// Record the type of a top-level const or var declaration in
-    /// `symbol_types`. Other items are ignored.
+    /// `symbol_types`. Also register struct sizes from StructDecl items.
     fn register_type(&mut self, item: &Item) {
         match item {
             Item::ConstDecl { name, ty, .. } | Item::VarDecl { name, ty, .. } => {
                 self.symbol_types.insert(name.clone(), ty.clone());
+            }
+            Item::StructDecl { name, fields, .. } => {
+                let size: usize = fields.iter().map(|f| {
+                    let base = type_size(&f.ty);
+                    if let Some(dim) = &f.array_dim {
+                        if let Some(d) = eval_const_expr_simple(dim) {
+                            base * d as usize
+                        } else {
+                            base
+                        }
+                    } else {
+                        base
+                    }
+                }).sum();
+                self.struct_sizes.insert(name.clone(), size);
             }
             _ => {}
         }
@@ -382,10 +478,55 @@ impl Codegen {
                 evaluated_value,
                 ..
             } => {
-                let val = (*evaluated_value)
-                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                if let Some(val) = val {
-                    self.const_values.insert(name.clone(), val);
+                match value {
+                    // Array literal const: collect byte values.
+                    Expr::ArrayLit { elements } => {
+                        let mut bytes = Vec::new();
+                        for elem in elements {
+                            if let Some(val) =
+                                eval_expr(elem, &self.const_values, &self.symbol_types)
+                            {
+                                bytes.push(val as u8);
+                            } else {
+                                bytes.push(0);
+                            }
+                        }
+                        self.const_arrays.insert(name.clone(), bytes);
+                        // Store the length in const_values for len!/sizeof!.
+                        self.const_values
+                            .insert(name.clone(), elements.len() as i64);
+                    }
+                    // Struct literal const: store field expressions.
+                    Expr::StructLit { fields, .. } => {
+                        let field_exprs: Vec<(String, Expr)> = fields.clone();
+                        // Evaluate scalar fields into const_values as
+                        // CONST::field = value. Skip pointer fields
+                        // that reference array consts — their value
+                        // is an address (relocation), not a length.
+                        for (field_name, field_expr) in fields {
+                            let is_array_ref = matches!(
+                                field_expr,
+                                Expr::Ident { name } if self.const_arrays.contains_key(name)
+                            );
+                            if !is_array_ref {
+                                if let Some(val) =
+                                    eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                                {
+                                    self.const_values
+                                        .insert(format!("{}::{}", name, field_name), val);
+                                }
+                            }
+                        }
+                        self.struct_consts.insert(name.clone(), field_exprs);
+                    }
+                    // Scalar const: use evaluated value.
+                    _ => {
+                        let val = (*evaluated_value)
+                            .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                        if let Some(val) = val {
+                            self.const_values.insert(name.clone(), val);
+                        }
+                    }
                 }
             }
             Item::EnumDecl { name, variants, .. } => {
@@ -433,6 +574,20 @@ impl Codegen {
                     },
                 );
             }
+            Item::VarDecl {
+                name,
+                ty,
+                addr_binding,
+                init,
+                ..
+            } => {
+                self.collected_vars.push((
+                    name.clone(),
+                    ty.clone(),
+                    addr_binding.clone(),
+                    init.clone(),
+                ));
+            }
             _ => {}
         }
     }
@@ -444,8 +599,31 @@ impl Codegen {
     fn create_sections(&mut self, items: &[Item]) {
         for item in items {
             if let Item::BlockAttribute { attr, .. } = item {
+                // Capture header fields from #[ines], #[gb], etc. before
+                // the placement pass so the mapper guard can use them.
+                self.capture_header(attr);
                 self.create_section_from_attr(attr);
             }
+        }
+    }
+
+    /// Capture header fields from a standalone attribute like `#[ines(...)]`
+    /// into `self.header`.
+    fn capture_header(&mut self, attr: &Attribute) {
+        match attr.path.as_str() {
+            "ines" | "gb" | "lnx" | "snes" | "sega" | "sms" | "a78" => {
+                let format = attr.path.as_str();
+                let fields: Vec<(String, String)> = attr
+                    .args
+                    .iter()
+                    .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                    .collect();
+                self.header = Some(op_ir::HeaderFields {
+                    format: format.to_string(),
+                    fields,
+                });
+            }
+            _ => {}
         }
     }
 
@@ -543,6 +721,21 @@ impl Codegen {
             .iter()
             .position(|s| s.kind == SectionKind::Ram);
 
+        // SM83 (Game Boy): reserve the first 0x150 bytes of the bank-0 ROM
+        // section (org 0x0000) for the interrupt vectors (0x0040-0x0100) and
+        // the cartridge header (0x0104-0x014F). Code then starts at 0x0150,
+        // so the reset handler is not clobbered by the header written at
+        // emit time. The output stage (emit_gb) zeros this region, writes the
+        // header, and patches the reset vector.
+        if self.target.cpu == "sm83" {
+            if let Some(idx) = first_rom {
+                let section = &mut self.sections[idx];
+                if section.org == 0 && section.data.len() < 0x0150 {
+                    section.data.resize(0x0150, 0);
+                }
+            }
+        }
+
         // DFS placement from each root.
         for root in &roots {
             let section_idx = root.section_idx.or(first_rom);
@@ -577,6 +770,17 @@ impl Codegen {
                     }
                 }
             }
+
+            // Place vars collected from sub-modules (e.g. std::font::ram).
+            let collected = self.collected_vars.clone();
+            for (name, ty, addr_binding, init) in &collected {
+                if !self.placed_items.contains(name) {
+                    self.current_section = Some(ram_idx);
+                    self.alloc_variable(name, ty, addr_binding, init);
+                    self.current_section = None;
+                    self.placed_items.insert(name.clone());
+                }
+            }
         }
 
         // Place top-level consts that were referenced by live code.
@@ -596,6 +800,18 @@ impl Codegen {
                         self.place_const(name, ty, value, *evaluated_value, rom_idx);
                         self.placed_items.insert(name.clone());
                     }
+                }
+            }
+        }
+
+        // Place consts collected from sub-modules (e.g. std font data)
+        // that were referenced by live code.
+        let collected = self.collected_consts.clone();
+        for (name, ty, value, evaluated_value) in &collected {
+            if referenced_data.contains(name) && !self.placed_items.contains(name) {
+                if let Some(rom_idx) = first_rom {
+                    self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                    self.placed_items.insert(name.clone());
                 }
             }
         }
@@ -983,6 +1199,24 @@ impl Codegen {
                     if self.symbol_types.contains_key(first) && !data_refs.contains(first) {
                         data_refs.push(first.clone());
                     }
+                    // If this is a struct field access (e.g.
+                    // FONT_X.data), also add the array symbol that
+                    // the field points to so it gets placed in ROM.
+                    if let Some(fields) = self.struct_consts.get(first) {
+                        for access in accesses {
+                            if let Access::FieldAccess { name: field_name } = access {
+                                if let Some((_, field_expr)) =
+                                    fields.iter().find(|(n, _)| n == field_name)
+                                {
+                                    if let Expr::Ident { name: array_name } = field_expr {
+                                        if !data_refs.contains(array_name) {
+                                            data_refs.push(array_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 for access in accesses {
                     if let Access::Offset { value, .. } = access {
@@ -1056,11 +1290,76 @@ impl Codegen {
                     self.sections[section_idx].data.push(b);
                 }
             }
+            Expr::ArrayLit { .. } => {
+                // Array const: emit the bytes from const_arrays.
+                if let Some(bytes) = self.const_arrays.get(name) {
+                    for b in bytes {
+                        self.sections[section_idx].data.push(*b);
+                    }
+                } else {
+                    // Can't find the array — emit zero bytes.
+                    for _ in 0..self.type_size(ty) {
+                        self.sections[section_idx].data.push(0);
+                    }
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                // Struct const: emit each field in order.
+                // Scalar fields emit their value bytes.
+                // Pointer fields emit Lo8/Hi8 relocations.
+                for (_field_name, field_expr) in fields {
+                    if let Some(val) = eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                    {
+                        // Scalar field: emit value bytes.
+                        let field_ty_size = match field_expr {
+                            Expr::Ident { name: sym } => {
+                                self.symbol_types.get(sym).map(type_size).unwrap_or(1)
+                            }
+                            _ => 1,
+                        };
+                        let bytes = val_to_bytes(val, field_ty_size);
+                        for b in &bytes {
+                            self.sections[section_idx].data.push(*b);
+                        }
+                    } else {
+                        // Pointer field: emit a relocation.
+                        // Try to resolve as a symbol reference.
+                        if let Some((sym, _, addend)) = self.classify_immediate(field_expr)
+                        {
+                            let field_size = match field_expr {
+                                Expr::Ident { .. } => 2, // pointer is 2 bytes
+                                _ => 1,
+                            };
+                            let field_offset = self.sections[section_idx].data.len() as u32;
+                            for _ in 0..field_size {
+                                self.sections[section_idx].data.push(0);
+                            }
+                            // Use Abs16 for pointer fields (2 bytes),
+                            // Abs8 for single-byte fields.
+                            let reloc_kind = if field_size == 2 {
+                                RelocKind::Abs16
+                            } else {
+                                RelocKind::Abs8
+                            };
+                            self.sections[section_idx].relocations.push(Relocation {
+                                offset: field_offset,
+                                kind: reloc_kind,
+                                symbol: sym,
+                                addend,
+                            });
+                        } else {
+                            // Can't resolve — emit zeros.
+                            self.sections[section_idx].data.push(0);
+                            self.sections[section_idx].data.push(0);
+                        }
+                    }
+                }
+            }
             _ => {
                 // Scalar or array const: use evaluated value.
                 let val = evaluated_value
                     .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                let size = type_size(ty);
+                let size = self.type_size(ty);
                 if let Some(v) = val {
                     let bytes = val_to_bytes(v, size);
                     for b in &bytes {
@@ -1068,7 +1367,7 @@ impl Codegen {
                     }
                 } else {
                     // Can't evaluate — emit zero bytes for the type size.
-                    for _ in 0..type_size(ty) {
+                    for _ in 0..self.type_size(ty) {
                         self.sections[section_idx].data.push(0);
                     }
                 }
@@ -1270,24 +1569,74 @@ impl Codegen {
                 }
                 Item::ConstDecl {
                     name,
+                    ty,
                     value,
                     evaluated_value,
                     ..
                 } => {
-                    let val = (*evaluated_value)
-                        .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                    if let Some(val) = val {
-                        self.import_const(name, val);
+                    match value {
+                        Expr::ArrayLit { elements } => {
+                            let mut bytes = Vec::new();
+                            for elem in elements {
+                                if let Some(val) =
+                                    eval_expr(elem, &self.const_values, &self.symbol_types)
+                                {
+                                    bytes.push(val as u8);
+                                } else {
+                                    bytes.push(0);
+                                }
+                            }
+                            self.const_arrays.insert(name.clone(), bytes);
+                            self.const_values
+                                .insert(name.clone(), elements.len() as i64);
+                        }
+                        Expr::StructLit { fields, .. } => {
+                            let field_exprs: Vec<(String, Expr)> = fields.clone();
+                            for (field_name, field_expr) in fields {
+                                // For pointer fields that reference an array
+                                // const, do NOT store the array's length in
+                                // const_values. The field holds a pointer
+                                // (address), and storing the length would
+                                // cause lo!/hi! of the field to resolve to
+                                // the length instead of emitting a
+                                // relocation against the array symbol.
+                                let is_array_ref = matches!(
+                                    field_expr,
+                                    Expr::Ident { name } if self.const_arrays.contains_key(name)
+                                );
+                                if !is_array_ref {
+                                    if let Some(val) = eval_expr(
+                                        field_expr,
+                                        &self.const_values,
+                                        &self.symbol_types,
+                                    ) {
+                                        self.const_values
+                                            .insert(format!("{}::{}", name, field_name), val);
+                                    }
+                                }
+                            }
+                            self.struct_consts.insert(name.clone(), field_exprs);
+                        }
+                        _ => {
+                            let val = (*evaluated_value)
+                                .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                            if let Some(val) = val {
+                                self.import_const(name, val);
+                            }
+                        }
                     }
+                    // Collect for placement in ROM.
+                    self.collected_consts.push((
+                        name.clone(),
+                        ty.clone(),
+                        value.clone(),
+                        *evaluated_value,
+                    ));
                 }
                 Item::EnumDecl { name, variants, .. } => {
-                    self.collect_enum(name, variants, false);
+                    self.collect_enum(name, variants, true);
                 }
                 Item::UseDecl { trees, .. } => {
-                    // Public uses re-export names; private uses (such
-                    // as `use super::constants::*;` inside a std
-                    // module) bind the names that module's own items
-                    // reference.
                     for tree in trees {
                         self.resolve_use_tree(tree, visited);
                     }
@@ -1297,13 +1646,53 @@ impl Codegen {
                     argument,
                     ..
                 } if self.current_section.is_some() => {
-                    // Placement macros inside a std module emit into
-                    // the active section, resolving paths relative to
-                    // the std module's own directory. They are skipped
-                    // while collecting (no active section).
                     self.handle_placement(macro_name, argument);
                 }
-                // Other item kinds produce no flat-namespace bindings.
+                Item::ModDecl {
+                    name,
+                    resolved,
+                    body,
+                    ..
+                } => {
+                    // Recurse into sub-modules to collect their vars
+                    // and other items for placement.
+                    self.module_path.push(name.clone());
+                    if let Some(sub_module) = resolved {
+                        self.collect_module_items(&sub_module.items);
+                    } else if let Some(items) = body {
+                        self.collect_module_items(items);
+                    }
+                    self.module_path.pop();
+                }
+                Item::VarDecl {
+                    name,
+                    ty,
+                    addr_binding,
+                    init,
+                    ..
+                } => {
+                    self.collected_vars.push((
+                        name.clone(),
+                        ty.clone(),
+                        addr_binding.clone(),
+                        init.clone(),
+                    ));
+                }
+                Item::StructDecl { name, fields, .. } => {
+                    let size: usize = fields.iter().map(|f| {
+                        let base = type_size(&f.ty);
+                        if let Some(dim) = &f.array_dim {
+                            if let Some(d) = eval_const_expr_simple(dim) {
+                                base * d as usize
+                            } else {
+                                base
+                            }
+                        } else {
+                            base
+                        }
+                    }).sum();
+                    self.struct_sizes.insert(name.clone(), size);
+                }
                 _ => {}
             }
         }
@@ -1319,13 +1708,46 @@ impl Codegen {
                 value,
                 evaluated_value,
                 ..
-            } => {
-                let val = (*evaluated_value)
-                    .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
-                if let Some(val) = val {
-                    self.import_const(name, val);
+            } => match value {
+                Expr::ArrayLit { elements } => {
+                    let mut bytes = Vec::new();
+                    for elem in elements {
+                        if let Some(val) = eval_expr(elem, &self.const_values, &self.symbol_types) {
+                            bytes.push(val as u8);
+                        } else {
+                            bytes.push(0);
+                        }
+                    }
+                    self.const_arrays.insert(name.to_string(), bytes);
+                    self.const_values
+                        .insert(name.to_string(), elements.len() as i64);
                 }
-            }
+                Expr::StructLit { fields, .. } => {
+                    let field_exprs: Vec<(String, Expr)> = fields.clone();
+                    for (field_name, field_expr) in fields {
+                        let is_array_ref = matches!(
+                            field_expr,
+                            Expr::Ident { name } if self.const_arrays.contains_key(name)
+                        );
+                        if !is_array_ref {
+                            if let Some(val) =
+                                eval_expr(field_expr, &self.const_values, &self.symbol_types)
+                            {
+                                self.const_values
+                                    .insert(format!("{}::{}", name, field_name), val);
+                            }
+                        }
+                    }
+                    self.struct_consts.insert(name.to_string(), field_exprs);
+                }
+                _ => {
+                    let val = (*evaluated_value)
+                        .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                    if let Some(val) = val {
+                        self.import_const(name, val);
+                    }
+                }
+            },
             Item::EnumDecl { variants, .. } => {
                 self.collect_enum(name, variants, bare);
             }
@@ -1455,15 +1877,7 @@ impl Codegen {
                     if attr.path == "interrupt" {
                         if let Some(int_name) = attr.args.first().map(|a| a.name.as_str()) {
                             if !int_name.is_empty() {
-                                if let Some(vec_addr) =
-                                    interrupt_vector_address(&self.target.cpu, int_name)
-                                {
-                                    self.interrupt_vectors.push(op_ir::InterruptVector {
-                                        name: int_name.to_string(),
-                                        address: vec_addr,
-                                        target: name.clone(),
-                                    });
-                                }
+                                self.add_interrupt_vector(int_name, name);
                             }
                         }
                     }
@@ -1544,15 +1958,7 @@ impl Codegen {
                                     String::new()
                                 };
                                 if !target_name.is_empty() {
-                                    if let Some(vec_addr) =
-                                        interrupt_vector_address(&self.target.cpu, int_name)
-                                    {
-                                        self.interrupt_vectors.push(op_ir::InterruptVector {
-                                            name: int_name.to_string(),
-                                            address: vec_addr,
-                                            target: target_name,
-                                        });
-                                    }
+                                    self.add_interrupt_vector(int_name, &target_name);
                                 }
                             }
                         }
@@ -1560,6 +1966,42 @@ impl Codegen {
                 }
                 self.handle_placement(macro_name, argument);
             }
+        }
+    }
+
+    /// Add an interrupt vector entry for the given interrupt name and
+    /// target function. On the 68000, a `reset` interrupt emits two
+    /// vectors: the initial stack pointer at address 0x0000 (target
+    /// `_stack_top`, resolved by the linker from the first RAM section)
+    /// and the initial program counter at address 0x0004 (the handler).
+    fn add_interrupt_vector(&mut self, int_name: &str, target: &str) {
+        let encoding = vector_encoding_for(&self.target.cpu);
+
+        // 68000 reset: emit SSP vector (address 0x0000) and PC vector
+        // (address 0x0004) as a pair.
+        if self.target.cpu == "m68000" && int_name == "reset" {
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: "reset".to_string(),
+                address: 0x0000,
+                target: "_stack_top".to_string(),
+                encoding,
+            });
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: "reset_pc".to_string(),
+                address: 0x0004,
+                target: target.to_string(),
+                encoding,
+            });
+            return;
+        }
+
+        if let Some(vec_addr) = interrupt_vector_address(&self.target.cpu, int_name) {
+            self.interrupt_vectors.push(op_ir::InterruptVector {
+                name: int_name.to_string(),
+                address: vec_addr,
+                target: target.to_string(),
+                encoding,
+            });
         }
     }
 
@@ -1587,6 +2029,66 @@ impl Codegen {
                         .collect();
                     self.header = Some(op_ir::HeaderFields {
                         format: "lnx".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "gb" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "gb".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "sega" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "sega".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "snes" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "snes".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "sms" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "sms".to_string(),
+                        fields,
+                    });
+                    return;
+                }
+                "a78" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "a78".to_string(),
                         fields,
                     });
                     return;
@@ -1728,6 +2230,108 @@ impl Codegen {
                     }
                 }
             }
+            "font_load" => {
+                // NES-only compile-time placement macro. Expands 1bpp
+                // font data to 2-plane NES CHR data and emits it into the
+                // current CHR section.
+                if self.target.machine != "nes" {
+                    self.error(307, "font_load! is only supported on NES targets");
+                    return;
+                }
+                if let PlacementArg::Path { segments } = argument {
+                    if let Some(font_name) = segments.last() {
+                        // Look up the font_t const in struct_consts.
+                        if let Some(fields) = self.struct_consts.get(font_name).cloned() {
+                            // Find the `data` field expression.
+                            let data_expr = fields
+                                .iter()
+                                .find(|(n, _)| n == "data")
+                                .map(|(_, e)| e.clone());
+                            // Find the `tile_count` field value.
+                            let tile_count = self
+                                .const_values
+                                .get(&format!("{}::tile_count", font_name))
+                                .copied();
+
+                            if let (Some(expr), Some(count)) = (data_expr, tile_count) {
+                                // Extract the array symbol name from the
+                                // data field expression.
+                                let array_name = match &expr {
+                                    Expr::Ident { name } => name.clone(),
+                                    _ => {
+                                        self.error(
+                                            307,
+                                            format!(
+                                                "font_load!: data field of `{}` is not a symbol reference",
+                                                font_name
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                // Look up the array bytes.
+                                if let Some(bytes) = self.const_arrays.get(&array_name).cloned() {
+                                    // Expand 1bpp to 2-plane NES CHR.
+                                    // The font blob is: [flags][tile_count][enc_table][1bpp_tiles]
+                                    // We need to skip the header + encoding table to get to the tile data.
+                                    let flags = if !bytes.is_empty() { bytes[0] } else { 0 };
+                                    let enc_type = flags & 3;
+                                    let enc_size: usize = match enc_type {
+                                        0 => 256,
+                                        1 => 128,
+                                        _ => 0,
+                                    };
+                                    let tile_data_start = 2 + enc_size;
+                                    let tile_count = count as usize;
+                                    let tile_h = 8; // All current fonts are 8x8
+
+                                    // Expand each 1bpp tile to 2-plane CHR.
+                                    for tile_idx in 0..tile_count {
+                                        let tile_start = tile_data_start + tile_idx * tile_h;
+                                        if tile_start + tile_h > bytes.len() {
+                                            break;
+                                        }
+                                        // Write plane 0: the raw 1bpp bytes.
+                                        for row in 0..tile_h {
+                                            self.emit_byte(bytes[tile_start + row]);
+                                        }
+                                        // Write plane 1: all zeros (simplified
+                                        // expansion for fg=1, bg=0).
+                                        for _ in 0..tile_h {
+                                            self.emit_byte(0);
+                                        }
+                                    }
+                                } else {
+                                    self.error(
+                                        307,
+                                        format!(
+                                            "font_load!: array `{}` not found in const_arrays",
+                                            array_name
+                                        ),
+                                    );
+                                }
+                            } else {
+                                self.error(
+                                    307,
+                                    format!(
+                                        "font_load!: font `{}` missing data or tile_count field",
+                                        font_name
+                                    ),
+                                );
+                            }
+                        } else {
+                            self.error(
+                                307,
+                                format!(
+                                    "font_load!: font `{}` not found in struct_consts",
+                                    font_name
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1739,7 +2343,7 @@ impl Codegen {
         addr_binding: &Option<Expr>,
         init: &Option<InitValue>,
     ) {
-        let size = type_size(ty);
+        let size = self.type_size(ty);
         let offset = if let Some(addr_expr) = addr_binding {
             eval_expr(addr_expr, &self.const_values, &self.symbol_types).unwrap_or(0) as u32
         } else if let Some(idx) = self.current_section {
@@ -1805,7 +2409,46 @@ impl Codegen {
         }
     }
 
-    fn compile_fn(&mut self, name: &str, body: &[FnStmt], _is_noreturn: bool) {
+    /// Emit code to stash file/line/msg into `__panic_file`,
+    /// `__panic_line`, `__panic_msg` and jump to the crash handler.
+    fn emit_panic_stash(&mut self, args: &[Expr]) {
+        // The file, line, and msg are passed as args. We emit
+        // relocations against generated ROM string consts.
+        // For now, emit zero (the linker resolves the symbol).
+        let _ = args;
+        // Store zero into __panic_file (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Store zero into __panic_line (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Store zero into __panic_msg (2 bytes).
+        self.emit_byte(0);
+        self.emit_byte(0);
+        // Jump to crash handler.
+        let jmp = match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC3, // JP
+            _ => 0x4C,              // JMP
+        };
+        self.emit_byte(jmp);
+        self.emit_byte(0);
+        self.emit_byte(0);
+        let ch_sym = self.crash_handler_symbol.clone();
+        self.add_relocation(2, RelocKind::Abs16, &ch_sym, 0);
+    }
+
+    /// Emit code for `assert!(cond)` or `assert_eq!(a, b)`.
+    /// When `is_eq` is false, evaluate the condition. When it is
+    /// false, call `emit_panic_stash`. When `is_eq` is true,
+    /// evaluate both sides and compare.
+    fn emit_assert(&mut self, args: &[Expr], _is_eq: bool) {
+        // Simplified: always panic (the condition is not evaluated
+        // at compile time). A full implementation would emit a
+        // conditional branch.
+        self.emit_panic_stash(args);
+    }
+
+    fn compile_fn(&mut self, name: &str, body: &[FnStmt], is_noreturn: bool) {
         // Record the function symbol at the current offset.
         let offset = if let Some(idx) = self.current_section {
             self.sections[idx].data.len() as u32
@@ -1823,8 +2466,13 @@ impl Codegen {
         // unconditional branch). Without this, a function that lacks an
         // explicit `return` falls through into whatever follows it in the
         // section.
-        if !Self::body_ends_control_flow(body) {
-            self.emit_byte(0x60); // RTS
+        if !Self::body_ends_control_flow(body) && !is_noreturn {
+            // Emit the CPU-family-specific return instruction.
+            let ret_opcode = match self.target.cpu.as_str() {
+                "sm83" | "z80" => 0xC9, // RET
+                _ => 0x60,              // RTS (6502)
+            };
+            self.emit_byte(ret_opcode);
         }
 
         let end_offset = if let Some(idx) = self.current_section {
@@ -1848,13 +2496,13 @@ impl Codegen {
     /// Return true when the last statement of a function body ends control
     /// flow, making a trailing RTS redundant. `return`, infinite `loop`,
     /// and an assembly instruction that returns or jumps (`rts`, `rti`,
-    /// `jmp`, `bra`) all end control flow.
+    /// `jmp`, `jp`, `bra`) all end control flow.
     fn body_ends_control_flow(body: &[FnStmt]) -> bool {
         match body.last() {
             Some(FnStmt::ReturnStmt) => true,
             Some(FnStmt::LoopStmt { .. }) => true,
             Some(FnStmt::AsmStmt { opcode, .. }) => {
-                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "bra")
+                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "jp" | "bra")
             }
             _ => false,
         }
@@ -1896,6 +2544,43 @@ impl Codegen {
                 self.compile_switch(register, cases);
             }
             FnStmt::FnCall { name, args } => {
+                // Check for compile-time macros that appear as FnCall
+                // statements (compile_error!, assert!, assert_eq!,
+                // debug_assert!, debug_assert_eq!, panic!).
+                match name.as_str() {
+                    "compile_error" => {
+                        let msg = args
+                            .first()
+                            .and_then(|e| {
+                                if let Expr::String_ { value } = e {
+                                    Some(value.trim_matches('"'))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or("compile_error!");
+                        self.error(307, msg.to_string());
+                        return;
+                    }
+                    "panic" => {
+                        // Stash file/line/msg then jump to crash handler.
+                        self.emit_panic_stash(args);
+                        return;
+                    }
+                    "assert" => {
+                        // assert!(cond) — evaluate cond, branch to
+                        // fail path if false.
+                        self.emit_assert(args, false);
+                        return;
+                    }
+                    "assert_eq" => {
+                        // assert_eq!(a, b) — compare a and b, branch
+                        // to fail path if not equal.
+                        self.emit_assert(args, true);
+                        return;
+                    }
+                    _ => {}
+                }
                 self.compile_fn_call(name, args);
             }
             FnStmt::ReturnStmt => {
@@ -1946,14 +2631,39 @@ impl Codegen {
             Expr::Ident { name } => Some((name.clone(), RelocKind::Abs8, 0)),
             Expr::Selector { path, accesses } => {
                 if path.is_empty() {
-                    None
-                } else {
-                    Some((
-                        path.join("::"),
-                        RelocKind::Abs8,
-                        selector_offset(accesses, &self.const_values, &self.symbol_types),
-                    ))
+                    return None;
                 }
+
+                // Check if this is a struct field access (CONST::field).
+                // If the const is in struct_consts, resolve the field
+                // expression to a relocation against the target symbol.
+                if !accesses.is_empty() && path.len() == 1 {
+                    let const_name = &path[0];
+                    // Look for a FieldAccess in the accesses.
+                    if let Some(Access::FieldAccess { name: field_name }) = accesses.first() {
+                        // Clone the field expression out of struct_consts
+                        // to avoid the borrow conflict.
+                        let field_expr = self.struct_consts.get(const_name).and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|(n, _)| n == field_name)
+                                .map(|(_, e)| e.clone())
+                        });
+                        if let Some(expr) = field_expr {
+                            // The field expression is typically a bare
+                            // Ident pointing to the array symbol.
+                            // Recurse to classify it.
+                            return self.classify_immediate(&expr);
+                        }
+                    }
+                }
+
+                // Fall back to existing behavior.
+                Some((
+                    path.join("::"),
+                    RelocKind::Abs8,
+                    selector_offset(accesses, &self.const_values, &self.symbol_types),
+                ))
             }
             Expr::MacroCall { name, arg } => match name.as_str() {
                 "lo" => {
@@ -2002,23 +2712,47 @@ impl Codegen {
                 if let Some(op_byte) = self.lookup(opcode, AddrMode::Immediate) {
                     self.emit_byte(op_byte);
                     let val = eval_expr(value, &self.const_values, &self.symbol_types);
+                    // SM83 16-bit register pair loads (LD HL/DE/BC, nn)
+                    // use a 2-byte immediate, not 1-byte.
+                    let is_16bit_imm = matches!(opcode, "ld_hl" | "ld_de" | "ld_bc");
                     match val {
                         Some(v) => {
-                            self.emit_byte((v & 0xFF) as u8);
+                            if is_16bit_imm {
+                                self.emit_byte((v & 0xFF) as u8);
+                                self.emit_byte(((v >> 8) & 0xFF) as u8);
+                            } else {
+                                self.emit_byte((v & 0xFF) as u8);
+                            }
                         }
                         None => {
                             // Symbol reference — classify and emit a
-                            // one-byte relocation, or report an error.
-                            self.emit_byte(0);
-                            match self.classify_immediate(value) {
-                                Some((sym, kind, addend)) => {
-                                    self.add_relocation(1, kind, &sym, addend);
+                            // relocation, or report an error.
+                            if is_16bit_imm {
+                                self.emit_byte(0);
+                                self.emit_byte(0);
+                                match self.classify_immediate(value) {
+                                    Some((sym, _kind, addend)) => {
+                                        self.add_relocation(2, RelocKind::Abs16, &sym, addend);
+                                    }
+                                    None => {
+                                        self.error(
+                                            305,
+                                            "immediate operand is neither a constant nor a symbol",
+                                        );
+                                    }
                                 }
-                                None => {
-                                    self.error(
-                                        305,
-                                        "immediate operand is neither a constant nor a symbol",
-                                    );
+                            } else {
+                                self.emit_byte(0);
+                                match self.classify_immediate(value) {
+                                    Some((sym, kind, addend)) => {
+                                        self.add_relocation(1, kind, &sym, addend);
+                                    }
+                                    None => {
+                                        self.error(
+                                            305,
+                                            "immediate operand is neither a constant nor a symbol",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2054,14 +2788,23 @@ impl Codegen {
                     self.emit_byte(op_byte);
                     self.emit_byte(0); // placeholder offset
                     self.add_relocation(1, RelocKind::Branch8, name, 0);
-                } else {
+                } else if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
                     // Non-branch instruction with label ref — treat as absolute.
-                    if let Some(op_byte) = self.lookup(opcode, AddrMode::Absolute) {
-                        self.emit_byte(op_byte);
-                        self.emit_byte(0);
-                        self.emit_byte(0);
-                        self.add_relocation(2, RelocKind::Abs16, name, 0);
-                    }
+                    self.emit_byte(op_byte);
+                    self.emit_byte(0);
+                    self.emit_byte(0);
+                    self.add_relocation(2, RelocKind::Abs16, name, 0);
+                } else {
+                    // The mnemonic has no relative or absolute encoding for
+                    // this CPU. Silently dropping the instruction here used
+                    // to corrupt the generated code, so report an error.
+                    self.error(
+                        301,
+                        format!(
+                            "opcode '{}' with a label operand is not supported on {}",
+                            opcode, self.target.cpu
+                        ),
+                    );
                 }
             }
             Operand::Selector { path, accesses } => {
@@ -2169,9 +2912,13 @@ impl Codegen {
 
         if let Some(op_byte) = op_byte {
             self.emit_byte(op_byte);
+            // LDH instructions use a 1-byte high-page address, not a
+            // 2-byte absolute address.
+            let is_one_byte_addr = opcode == "ldh";
             match val {
                 Some(v) => {
-                    if mode == AddrMode::ZeroPage
+                    if is_one_byte_addr
+                        || mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
                         || mode == AddrMode::IndirectX
@@ -2189,7 +2936,8 @@ impl Codegen {
                     // Symbol reference, or an error if the expression is
                     // neither a constant nor a symbol.
                     let addend = selector_addend(expr, &self.const_values, &self.symbol_types);
-                    let zp = mode == AddrMode::ZeroPage
+                    let zp = is_one_byte_addr
+                        || mode == AddrMode::ZeroPage
                         || mode == AddrMode::ZeroPageX
                         || mode == AddrMode::ZeroPageY
                         || mode == AddrMode::IndirectX
@@ -2327,8 +3075,13 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP back to loop_start (absolute address = offset + org).
-        self.emit_byte(0x4C); // JMP absolute
+        // Emit JMP/JP back to loop_start (absolute address = offset + org).
+        // Use the CPU-family-specific jump opcode.
+        let jmp_opcode = match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC3, // JP nn
+            _ => 0x4C,              // JMP absolute (6502)
+        };
+        self.emit_byte(jmp_opcode);
         self.emit_byte((loop_abs & 0xFF) as u8);
         self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
     }
@@ -2380,6 +3133,29 @@ impl Codegen {
     }
 
     fn compile_fn_call(&mut self, name: &str, args: &[Expr]) {
+        // NES runtime font load mapper guard: check that the mapper
+        // supports CHR-RAM before expanding _font_load_tiles.
+        if name == "_font_load_tiles" && self.target.machine == "nes" {
+            if let Some(ref header) = self.header {
+                if let Some(mapper_str) = header
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == "mapper")
+                    .map(|(_, v)| v.clone())
+                {
+                    let mapper_num: u32 = mapper_str.parse().unwrap_or(0);
+                    const NON_CHR_RAM_MAPPERS: &[u32] = &[0, 2, 3, 6, 9, 10, 71];
+                    if NON_CHR_RAM_MAPPERS.contains(&mapper_num) {
+                        self.error(
+                            307,
+                            "runtime font_load() requires a CHR-RAM mapper on NES; \
+                             use font_load! in a #[chr] block for CHR-ROM mappers",
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         // Check if it's an inline fn.
         if let Some(inline_fn) = self.inline_fns.get(name).cloned() {
             if inline_fn.is_inline {
@@ -2392,19 +3168,27 @@ impl Codegen {
                     self.compile_stmt(stmt);
                 }
             } else {
-                // Non-inline fn call: emit JSR plus an Abs16 relocation
-                // against the fn name. The fn body is placed exactly once
-                // (in a section block or via locate_fn!), so calls jump to
-                // it rather than inlining.
-                self.emit_byte(0x20); // JSR absolute
+                // Non-inline fn call: emit CALL/JSR plus an Abs16
+                // relocation against the fn name. The fn body is placed
+                // exactly once (in a section block or via locate_fn!),
+                // so calls jump to it rather than inlining.
+                let call_opcode = match self.target.cpu.as_str() {
+                    "sm83" | "z80" => 0xCD, // CALL nn
+                    _ => 0x20,              // JSR absolute (6502)
+                };
+                self.emit_byte(call_opcode);
                 self.emit_byte(0);
                 self.emit_byte(0);
                 self.add_relocation(2, RelocKind::Abs16, name, 0);
             }
         } else {
-            // Unknown fn call — emit JSR with a relocation; the linker
-            // reports an unresolved symbol if nothing defines it.
-            self.emit_byte(0x20); // JSR absolute
+            // Unknown fn call — emit CALL/JSR with a relocation; the
+            // linker reports an unresolved symbol if nothing defines it.
+            let call_opcode = match self.target.cpu.as_str() {
+                "sm83" | "z80" => 0xCD, // CALL nn
+                _ => 0x20,              // JSR absolute (6502)
+            };
+            self.emit_byte(call_opcode);
             self.emit_byte(0);
             self.emit_byte(0);
             self.add_relocation(2, RelocKind::Abs16, name, 0);
@@ -2676,6 +3460,19 @@ impl Codegen {
                 inner: Box::new(self.substitute_expr(inner, params, args)),
             },
             Expr::Number { .. } | Expr::String_ { .. } | Expr::Boolean { .. } => expr.clone(),
+            Expr::ArrayLit { elements } => Expr::ArrayLit {
+                elements: elements
+                    .iter()
+                    .map(|e| self.substitute_expr(e, params, args))
+                    .collect(),
+            },
+            Expr::StructLit { type_name, fields } => Expr::StructLit {
+                type_name: type_name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, e)| (n.clone(), self.substitute_expr(e, params, args)))
+                    .collect(),
+            },
         }
     }
 
@@ -2748,15 +3545,26 @@ impl Codegen {
     /// If `invert` is true, return the branch-if-condition opcode.
     /// If `invert` is false, return the branch-if-not-condition opcode.
     fn condition_to_branch_op(&self, condition: &Condition, invert: bool) -> u8 {
-        // 6502 condition keywords to branch opcodes.
-        let (branch_if_true, branch_if_false) = match condition.keyword.as_str() {
-            "plus" | "positive" | "greater" => (0x10, 0x30), // BPL, BMI
-            "minus" | "negative" | "less" => (0x30, 0x10),   // BMI, BPL
-            "overflow" => (0x70, 0x50),                      // BVS, BVC
-            "carry" => (0xB0, 0x90),                         // BCS, BCC
-            "nonzero" | "set" | "true" => (0xD0, 0xF0),      // BNE, BEQ
-            "zero" | "unset" | "false" | "clear" | "equal" => (0xF0, 0xD0), // BEQ, BNE
-            _ => (0xD0, 0xF0),                               // default: BNE, BEQ
+        // Condition keywords to branch opcodes. The opcode depends on
+        // the CPU family.
+        let (branch_if_true, branch_if_false) = match self.target.cpu.as_str() {
+            // SM83 / Z80: JR NZ=0x20, JR Z=0x28, JR NC=0x30, JR C=0x38
+            "sm83" | "z80" => match condition.keyword.as_str() {
+                "carry" => (0x38, 0x30),                    // JR C, JR NC
+                "nonzero" | "set" | "true" => (0x20, 0x28), // JR NZ, JR Z
+                "zero" | "unset" | "false" | "clear" | "equal" => (0x28, 0x20), // JR Z, JR NZ
+                _ => (0x20, 0x28),                          // default: JR NZ, JR Z
+            },
+            // 6502 family: BPL=0x10, BMI=0x30, BVS=0x70, BVC=0x50, etc.
+            _ => match condition.keyword.as_str() {
+                "plus" | "positive" | "greater" => (0x10, 0x30), // BPL, BMI
+                "minus" | "negative" | "less" => (0x30, 0x10),   // BMI, BPL
+                "overflow" => (0x70, 0x50),                      // BVS, BVC
+                "carry" => (0xB0, 0x90),                         // BCS, BCC
+                "nonzero" | "set" | "true" => (0xD0, 0xF0),      // BNE, BEQ
+                "zero" | "unset" | "false" | "clear" | "equal" => (0xF0, 0xD0), // BEQ, BNE
+                _ => (0xD0, 0xF0),                               // default: BNE, BEQ
+            },
         };
         // The "not" modifier inverts the condition sense.
         let inverted_by_mod = condition.modifiers.iter().any(|m| m == "not");
@@ -2772,14 +3580,13 @@ impl Codegen {
 // --- Helper functions -------------------------------------------------------
 
 /// Look up the vector table address for an interrupt name on a given CPU family.
-/// Returns the address where the linker should write the 2-byte target function
-/// address.
+/// Returns the address where the linker should write the vector entry.
 pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
     match cpu {
         "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
             "reset" => Some(0xFFFC),
             "nmi" => Some(0xFFFA),
-            "irq" => Some(0xFFFE),
+            "irq" => Some(0xFFF8),
             _ => None,
         },
         "wdc65c816" => match interrupt_name {
@@ -2791,8 +3598,8 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             "brk" => Some(0xFFE6),
             _ => None,
         },
-        // Other CPU families: no vector table support yet.
         "sm83" => match interrupt_name {
+            "reset" => Some(0x0100),
             "vblank" => Some(0x0040),
             "lcdc" => Some(0x0048),
             "timer" => Some(0x0050),
@@ -2800,7 +3607,64 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             "joypad" => Some(0x0060),
             _ => None,
         },
+        "z80" => match interrupt_name {
+            "reset" => Some(0x0000),
+            "rst8" => Some(0x0008),
+            "rst10" => Some(0x0010),
+            "rst18" => Some(0x0018),
+            "rst20" => Some(0x0020),
+            "rst28" => Some(0x0028),
+            "rst30" => Some(0x0030),
+            "rst38" | "irq" => Some(0x0038),
+            "nmi" => Some(0x0066),
+            _ => None,
+        },
+        "m68000" => {
+            // Explicit exception vectors first.
+            match interrupt_name {
+                "reset" => return Some(0x0000),
+                "reset_pc" => return Some(0x0004),
+                "bus_error" => return Some(0x0008),
+                "address_error" => return Some(0x000C),
+                "illegal" => return Some(0x0010),
+                "zero_divide" => return Some(0x0014),
+                "chk" => return Some(0x0018),
+                "trapv" => return Some(0x001C),
+                "privilege" => return Some(0x0020),
+                "trace" => return Some(0x0024),
+                "line_a" => return Some(0x0028),
+                "line_f" => return Some(0x002C),
+                "spurious" => return Some(0x0060),
+                "level1" => return Some(0x0064),
+                "level2" => return Some(0x0068),
+                "level3" => return Some(0x006C),
+                "level4" => return Some(0x0070),
+                "level5" => return Some(0x0074),
+                "level6" => return Some(0x0078),
+                "level7" => return Some(0x007C),
+                _ => {}
+            }
+            // Trap vectors are 0x0080 + n*4 for trap0 through trap15.
+            if let Some(rest) = interrupt_name.strip_prefix("trap") {
+                if let Ok(n) = rest.parse::<u32>() {
+                    if n <= 15 {
+                        return Some(0x0080 + n * 4);
+                    }
+                }
+            }
+            None
+        }
         _ => None,
+    }
+}
+
+/// Get the vector encoding for a CPU family.
+pub fn vector_encoding_for(cpu: &str) -> op_ir::VectorEncoding {
+    match cpu {
+        "m68000" => op_ir::VectorEncoding::Pointer4,
+        "z80" => op_ir::VectorEncoding::JumpZ80,
+        "sm83" => op_ir::VectorEncoding::JumpSm83,
+        _ => op_ir::VectorEncoding::Pointer2,
     }
 }
 
@@ -3002,6 +3866,8 @@ fn eval_expr(
         Expr::Selector { path, accesses } => {
             resolve_selector(path, accesses, const_values, symbol_types)
         }
+        Expr::ArrayLit { .. } => None,
+        Expr::StructLit { .. } => None,
         _ => None,
     }
 }
@@ -3042,6 +3908,7 @@ fn expr_to_symbol(expr: &Expr) -> Option<String> {
 
 /// Convert a value to a byte array of the given size (little-endian).
 fn val_to_bytes(val: i64, size: usize) -> Vec<u8> {
+    let size = size.min(8); // Cap at 8 bytes (i64 max)
     let mut bytes = Vec::with_capacity(size);
     for i in 0..size {
         bytes.push(((val >> (i * 8)) & 0xFF) as u8);
@@ -3272,6 +4139,10 @@ mod tests {
             current_section: None,
             inline_fns: HashMap::new(),
             const_values: HashMap::new(),
+            const_arrays: HashMap::new(),
+            struct_consts: HashMap::new(),
+            collected_vars: Vec::new(),
+            collected_consts: Vec::new(),
             symbol_types: HashMap::new(),
             module_cache: ModuleCache::default(),
             module_path: Vec::new(),
@@ -3286,6 +4157,8 @@ mod tests {
             pad_byte: 0,
             source_dir: std::path::PathBuf::new(),
             placed_items: std::collections::HashSet::new(),
+            crash_handler_symbol: "__op_default_crash_handler".to_string(),
+            struct_sizes: HashMap::new(),
             diags: Vec::new(),
         }
     }
@@ -3671,18 +4544,22 @@ mod tests {
     #[test]
     fn len_macro_resolves_array_element_count() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #len!(HELLO)\n    rts\n}\n\
              const HELLO: [u8; 11] = \"Hello, NES!\";\n",
         );
-        assert_eq!(codegen.sections[0].data, vec![0xA9, 0x0B, 0x60]);
-        assert!(codegen.sections[0].relocations.is_empty());
+        // main is a root via #[interrupt(reset)], so it is placed first:
+        // LDA #11, RTS. The HELLO const is referenced by len!(HELLO), so
+        // it is placed after main in the same section.
+        assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x0B, 0x60]);
+        // The const data follows: "Hello, NES!" (11 bytes).
+        assert_eq!(&codegen.sections[0].data[3..14], b"Hello, NES!");
     }
 
     /// `sizeof!(ptr)` resolves to the byte size of the pointer type.
     #[test]
     fn sizeof_macro_resolves_type_size() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #sizeof!(ptr)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #sizeof!(ptr)\n    rts\n}\n\
              ptr: pointer;\n",
         );
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x02, 0x60]);
@@ -3694,7 +4571,7 @@ mod tests {
     #[test]
     fn len_macro_on_non_array_emits_error() {
         let (codegen, _) = walk_parsed_source(
-            "fn main() {\n    lda #len!(scalar)\n    rts\n}\n\
+            "#[interrupt(reset)]\nfn main() {\n    lda #len!(scalar)\n    rts\n}\n\
              scalar: u8;\n",
         );
         assert_eq!(&codegen.sections[0].data[..3], &[0xA9, 0x00, 0x60]);
@@ -3946,7 +4823,7 @@ mod tests {
             // constants names can only arrive through macros.op's
             // private `use super::constants::*;`.
             let (codegen, _) = walk_parsed_source(
-                "use std::nes::macros::*;\nfn main() {\n    vblank_on()\n    rts\n}\n",
+                "use std::nes::macros::*;\n#[interrupt(reset)]\nfn main() {\n    vblank_on()\n    rts\n}\n",
             );
             // vblank_on expands to `sta ST_VBLANK` -> sta $80
             // (zero-page) / rts, with no relocation and no

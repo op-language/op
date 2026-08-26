@@ -1,0 +1,24 @@
+//! vl65nc02-atari-lynx example
+//!
+//! Minimal Lynx cart. A full Lynx cart requires a multi-stage loader
+//! (future work). The Lynx programmer sets interrupt vectors at runtime,
+//! so no nmi/irq handlers are defined here.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[lnx(name = "example")]
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+#[rom(org = 0xFFFC, bank = 0, maxsize = 0x4)] {
+}
+
+#[setpad(0xFF)]

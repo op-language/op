@@ -1,0 +1,16 @@
+[package]
+name = "z80_sinclair_zx80_example"
+version = "0.1.0"
+edition = "1"
+
+[[rom]]
+name = "example"
+path = "src/cart.op"
+target = "z80-sinclair-zx80"
+format = "raw"
+
+[dependencies]
+std = { version = "0.5.0", git = "https://github.com/op-language/std" }
+
+[target]
+default = "z80-sinclair-zx80"

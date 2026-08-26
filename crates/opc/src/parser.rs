@@ -39,7 +39,13 @@ pub fn run(args: &OpcArgs) -> Result<()> {
     // so the AST carries the source path forward to the codegen, which needs
     // it to resolve `locate_bytes!`/`locate_str!` paths and the standard
     // library relative to the source directory.
-    let (ast, diags) = parse_token_stream(&stream.file.clone(), stream, target, &args.features);
+    let (ast, diags) = parse_token_stream_full(
+        &stream.file.clone(),
+        stream,
+        target,
+        &args.features,
+        &args.defined_features,
+    );
     let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if has_errors {
         for d in &diags {
@@ -77,8 +83,26 @@ pub fn parse_source(
     target: &str,
     features: &[String],
 ) -> (AstFile, Vec<Diagnostic>) {
+    parse_source_full(file, source, target, features, &[])
+}
+
+/// Parse a source string with defined features for `debug_assert!` warnings.
+pub fn parse_source_full(
+    file: &str,
+    source: &str,
+    target: &str,
+    features: &[String],
+    defined_features: &[String],
+) -> (AstFile, Vec<Diagnostic>) {
     let (token_stream, lex_diags) = lexer::lex_source(file, source);
-    parse_token_stream_with_diags(file, token_stream, lex_diags, target, features)
+    parse_token_stream_with_diags_full(
+        file,
+        token_stream,
+        lex_diags,
+        target,
+        features,
+        defined_features,
+    )
 }
 
 /// Parse a serialized [`TokenStream`] into an [`AstFile`] and a list of
@@ -94,6 +118,18 @@ pub fn parse_token_stream(
     parse_token_stream_with_diags(file, stream, Vec::new(), target, features)
 }
 
+/// Like `parse_token_stream` but also accepts defined feature names for
+/// `debug_assert!` warnings.
+pub fn parse_token_stream_full(
+    file: &str,
+    stream: TokenStream,
+    target: &str,
+    features: &[String],
+    defined_features: &[String],
+) -> (AstFile, Vec<Diagnostic>) {
+    parse_token_stream_with_diags_full(file, stream, Vec::new(), target, features, defined_features)
+}
+
 /// Shared body of [`parse_source`] and [`parse_token_stream`].
 ///
 /// `lex_diags` are diagnostics produced by the lexer stage. When the parser
@@ -105,6 +141,17 @@ fn parse_token_stream_with_diags(
     lex_diags: Vec<Diagnostic>,
     target: &str,
     features: &[String],
+) -> (AstFile, Vec<Diagnostic>) {
+    parse_token_stream_with_diags_full(file, stream, lex_diags, target, features, &[])
+}
+
+fn parse_token_stream_with_diags_full(
+    file: &str,
+    stream: TokenStream,
+    lex_diags: Vec<Diagnostic>,
+    target: &str,
+    features: &[String],
+    defined_features: &[String],
 ) -> (AstFile, Vec<Diagnostic>) {
     let triplet = TargetTriplet::parse(target).unwrap_or(TargetTriplet {
         cpu: String::new(),
@@ -123,6 +170,8 @@ fn parse_token_stream_with_diags(
             .to_path_buf(),
         triplet,
         features: features.to_vec(),
+        defined_features: defined_features.to_vec(),
+        header_fields: std::collections::HashMap::new(),
         diags: lex_diags,
     };
 
@@ -148,6 +197,12 @@ struct Parser {
     dir: std::path::PathBuf,
     triplet: TargetTriplet,
     features: Vec<String>,
+    /// Feature names defined in Cart.toml. Used to warn when `debug_assert!`
+    /// is used but the `debug` feature is not defined.
+    defined_features: Vec<String>,
+    /// Header attribute fields captured from `#[ines]`, `#[gb]`, etc.
+    /// Used by `eval_cfg_arg` for `ines.mapper` and similar predicates.
+    header_fields: std::collections::HashMap<String, String>,
     diags: Vec<Diagnostic>,
 }
 
@@ -265,6 +320,22 @@ impl Parser {
         self.diags
             .push(Diagnostic::error(code, &self.file, line, col, msg));
     }
+
+    /// Capture header fields from a standalone attribute like `#[ines(...)]`
+    /// into `self.header_fields` for `#[cfg(ines.mapper = "...")]` support.
+    fn capture_header_fields(&mut self, attr: &Attribute) {
+        match attr.path.as_str() {
+            "ines" | "gb" | "lnx" | "snes" | "sega" | "sms" | "a78" => {
+                for arg in &attr.args {
+                    if !arg.name.is_empty() {
+                        self.header_fields
+                            .insert(arg.name.clone(), arg.value.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // --- Module parsing ---------------------------------------------------------
@@ -288,6 +359,12 @@ impl Parser {
 
             // Check for cfg-guarded items.
             if let Some(cfg_attr) = find_cfg(&attrs) {
+                // Capture header fields from #[ines], #[gb], etc. before
+                // evaluating cfg, so that #[cfg(ines.mapper = "...")]
+                // predicates can use them.
+                for attr in &attrs {
+                    self.capture_header_fields(attr);
+                }
                 if !self.eval_cfg(&cfg_attr) {
                     // Skip the item that follows the cfg attribute.
                     self.skip_item();
@@ -366,6 +443,9 @@ impl Parser {
             // If we have attributes but no item follows, store each as a
             // standalone BlockAttribute with empty items.
             if self.at_eof() || self.check("Op_hash") {
+                for attr in &attrs {
+                    self.capture_header_fields(attr);
+                }
                 for attr in attrs {
                     module.items.push(Item::BlockAttribute {
                         attr,
@@ -590,21 +670,52 @@ impl Parser {
         //   identifier
         //   literal (NUMBER, STRING, Kw_true, Kw_false)
         //   identifier = literal
+        //   identifier.identifier = literal  (e.g. ines.mapper = "nrom")
+        //   combinator ( ident = "value", ... )
 
         let tok = self.peek().cloned();
         let (name, has_eq) = if let Some(ref t) = tok {
             match t.kind.as_str() {
                 "IDENT" | "OPCODE" | "Type_u8" | "Type_i8" | "Type_u16" | "Type_i16"
-                | "Type_u32" | "Type_i32" | "Type_bool" | "Type_pointer" => {
-                    let name = t.value.clone();
+                | "Type_u32" | "Type_i32" | "Type_bool" | "Type_pointer" | "Mod_not" => {
+                    // Mod_not is the keyword `not` used as a cfg combinator.
+                    let mut name = t.value.clone();
                     self.advance();
+                    // Support dotted keys like `ines.mapper`.
+                    while self.check("Op_dot") {
+                        self.advance();
+                        if let Some(seg) = self.peek().cloned() {
+                            if seg.kind == "IDENT" {
+                                self.advance();
+                                name.push('.');
+                                name.push_str(&seg.value);
+                            }
+                        }
+                    }
                     if self.check("Op_assign") {
                         self.advance();
                         (name, true)
+                    } else if self.check("Op_lparen") {
+                        // Combinator: all(...), any(...), not(...)
+                        self.advance(); // (
+                        let mut sub_args = Vec::new();
+                        while !self.check("Op_rparen") && !self.at_eof() {
+                            sub_args.push(self.parse_attr_arg());
+                            if self.check("Op_comma") {
+                                self.advance();
+                            }
+                        }
+                        let _ = self.expect("Op_rparen"); // )
+                        return AttrArg {
+                            name,
+                            value: String::new(),
+                            sub_args,
+                        };
                     } else {
                         return AttrArg {
                             name,
                             value: String::new(),
+                            sub_args: Vec::new(),
                         };
                     }
                 }
@@ -614,6 +725,7 @@ impl Parser {
                     return AttrArg {
                         name: String::new(),
                         value,
+                        sub_args: Vec::new(),
                     };
                 }
                 "Kw_true" | "Kw_false" => {
@@ -622,6 +734,7 @@ impl Parser {
                     return AttrArg {
                         name: String::new(),
                         value,
+                        sub_args: Vec::new(),
                     };
                 }
                 _ => {
@@ -637,6 +750,7 @@ impl Parser {
             return AttrArg {
                 name,
                 value: String::new(),
+                sub_args: Vec::new(),
             };
         }
 
@@ -649,7 +763,11 @@ impl Parser {
             String::new()
         };
 
-        AttrArg { name, value }
+        AttrArg {
+            name,
+            value,
+            sub_args: Vec::new(),
+        }
     }
 }
 
@@ -1134,7 +1252,58 @@ impl Parser {
     }
 
     fn parse_fn_stmt(&mut self) -> Option<FnStmt> {
+        // Check for #[cfg] on a statement inside a function body.
+        if self.check("Op_hash") {
+            let attrs = self.parse_attributes();
+            if let Some(cfg_attr) = find_cfg(&attrs) {
+                if !self.eval_cfg(&cfg_attr) {
+                    // Skip the single statement that follows.
+                    self.skip_fn_stmt();
+                    // Continue parsing the next statement.
+                    return self.parse_fn_stmt();
+                }
+            }
+            // Strip cfg attributes, pass the rest through.
+            return self.parse_fn_stmt();
+        }
+
         let kind = self.peek_kind().to_string();
+
+        // Compile-time macro as a statement: compile_error!("msg"),
+        // assert!(cond), assert_eq!(a, b), panic!("msg"), etc.
+        if kind.starts_with("Macro_") {
+            let tok = self.advance().unwrap();
+            let macro_name = tok.value;
+            let _ = self.expect("Op_lparen");
+            let arg = self.parse_expr();
+            let _ = self.expect("Op_rparen");
+            self.optional_semicolon();
+
+            // Check debug_assert! feature gating.
+            if (macro_name == "debug_assert" || macro_name == "debug_assert_eq")
+                && !self.features.iter().any(|f| f == "debug")
+            {
+                if !self.defined_features.iter().any(|f| f == "debug") {
+                    self.diags.push(Diagnostic::warning(
+                        206,
+                        &self.file,
+                        tok.line,
+                        tok.col,
+                        format!(
+                            "`{}!` is used but the `debug` feature is not defined in Cart.toml",
+                            macro_name
+                        ),
+                    ));
+                }
+                // Drop the statement when the feature is not enabled.
+                return None;
+            }
+
+            return Some(FnStmt::FnCall {
+                name: macro_name,
+                args: vec![arg],
+            });
+        }
 
         // Label: LABEL_DEF followed by a statement
         if kind == "LABEL_DEF" {
@@ -1214,6 +1383,14 @@ impl Parser {
         }
 
         None
+    }
+
+    /// Skip a single function statement (used when cfg drops it). Parses
+    /// the statement and discards the result.
+    fn skip_fn_stmt(&mut self) {
+        // Collect any additional attributes.
+        let _ = self.parse_attributes();
+        let _ = self.parse_fn_stmt();
     }
 
     fn parse_asm_stmt(&mut self) -> FnStmt {
@@ -1799,6 +1976,20 @@ impl Parser {
             };
         }
 
+        // Bracket array literal: [ expr, expr, ... ]
+        if self.check("Op_lbracket") {
+            self.advance(); // [
+            let mut elements = Vec::new();
+            while !self.check("Op_rbracket") && !self.at_eof() {
+                elements.push(self.parse_expr());
+                if self.check("Op_comma") {
+                    self.advance();
+                }
+            }
+            let _ = self.expect("Op_rbracket"); // ]
+            return Expr::ArrayLit { elements };
+        }
+
         // Compile-time macro call: lo!(expr), hi!(expr), etc.
         if kind.starts_with("Macro_") {
             let tok = self.advance().unwrap();
@@ -1812,7 +2003,7 @@ impl Parser {
             };
         }
 
-        // Identifier — could be a selector, path, or function call
+        // Identifier — could be a selector, path, struct literal, or function call
         if kind == "IDENT"
             || kind.starts_with("Type_")
             || kind.starts_with("Cond_")
@@ -1822,6 +2013,26 @@ impl Parser {
             let name = tok.value;
             let path = vec![name.clone()];
             let mut accesses = Vec::new();
+
+            // Struct literal: IDENT { field: value, ... }
+            if self.check("Op_lbrace") {
+                self.advance(); // {
+                let mut fields = Vec::new();
+                while !self.check("Op_rbrace") && !self.at_eof() {
+                    let field_name = self.advance().map(|t| t.value).unwrap_or_default();
+                    let _ = self.expect("Op_colon"); // :
+                    let field_value = self.parse_expr();
+                    fields.push((field_name, field_value));
+                    if self.check("Op_comma") {
+                        self.advance();
+                    }
+                }
+                let _ = self.expect("Op_rbrace"); // }
+                return Expr::StructLit {
+                    type_name: name,
+                    fields,
+                };
+            }
 
             // Parse ::ident, .ident, +expr, -expr
             while self.check("Op_colon_colon") || self.check("Op_dot") {
@@ -1911,28 +2122,56 @@ impl Parser {
     }
 
     fn eval_cfg_arg(&self, arg: &AttrArg) -> bool {
-        // Simple key=value: name = "value"
-        if !arg.name.is_empty() && !arg.value.is_empty() {
+        // Combinator: all(...), any(...), not(...)
+        if !arg.sub_args.is_empty() {
+            match arg.name.as_str() {
+                "all" => arg.sub_args.iter().all(|sub| self.eval_cfg_arg(sub)),
+                "any" => arg.sub_args.iter().any(|sub| self.eval_cfg_arg(sub)),
+                "not" if arg.sub_args.len() == 1 => !self.eval_cfg_arg(&arg.sub_args[0]),
+                _ => true,
+            }
+        } else if !arg.name.is_empty() && !arg.value.is_empty() {
+            // Simple key=value: name = "value"
             let key = arg.name.as_str();
             let val = arg.value.trim_matches('"');
-            return match key {
+            match key {
                 "target" => self.triplet.as_str() == val,
                 "cpu" => self.triplet.cpu == val,
                 "manufacturer" => self.triplet.manufacturer == val,
                 "machine" => self.triplet.machine == val,
                 "variant" => self.triplet.variant == val,
                 "feature" => self.features.iter().any(|f| f == val),
-                _ => false,
-            };
+                _ => {
+                    // Check header fields (e.g. ines.mapper).
+                    if let Some(dot_pos) = key.find('.') {
+                        let prefix = &key[..dot_pos];
+                        let field = &key[dot_pos + 1..];
+                        if prefix == "ines"
+                            || prefix == "gb"
+                            || prefix == "lnx"
+                            || prefix == "snes"
+                            || prefix == "sega"
+                            || prefix == "sms"
+                            || prefix == "a78"
+                        {
+                            if let Some(raw) = self.header_fields.get(field) {
+                                if field == "mapper" && prefix == "ines" {
+                                    // Map numeric mapper to name.
+                                    let mapped = ines_mapper_name(raw);
+                                    return mapped == val;
+                                }
+                                return raw.trim_matches('"') == val;
+                            }
+                            return false;
+                        }
+                    }
+                    false
+                }
+            }
+        } else {
+            // Unknown argument shape — include the item.
+            true
         }
-        // The value alone could be a combinator name like "all", "any", "not".
-        // But the lexer doesn't parse cfg predicates structurally — it just
-        // tokenizes the attribute. The AttrArg has name="" and value=the
-        // identifier for positional args.
-        // For now, we only support simple key=value cfg predicates.
-        // Combinators (all/any/not) require deeper attribute parsing which
-        // is out of scope for this phase.
-        true
     }
 }
 
@@ -2038,6 +2277,8 @@ fn eval_const_expr(expr: &Expr) -> Option<i64> {
             })
         }
         Expr::ParenExpr { inner } => eval_const_expr(inner),
+        Expr::ArrayLit { .. } => None,
+        Expr::StructLit { .. } => None,
         _ => None,
     }
 }
@@ -2076,6 +2317,8 @@ impl Parser {
             dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
             triplet: self.triplet.clone(),
             features: self.features.clone(),
+            defined_features: self.defined_features.clone(),
+            header_fields: self.header_fields.clone(),
             diags: Vec::new(),
         };
 
@@ -2104,4 +2347,32 @@ fn parse_number(s: &str) -> i64 {
     } else {
         s.parse::<i64>().unwrap_or(0)
     }
+}
+
+/// iNES mapper number to name mapping for `#[cfg(ines.mapper = "name")]`.
+const INES_MAPPER_NAMES: &[(u32, &str)] = &[
+    (0, "nrom"),
+    (1, "mmc1"),
+    (2, "uxrom"),
+    (3, "cnrom"),
+    (4, "mmc3"),
+    (5, "mmc5"),
+    (7, "axrom"),
+    (9, "mmc2"),
+    (10, "mmc4"),
+    (11, "color Dreams"),
+    (66, "gxrom"),
+    (71, "bfu"),
+];
+
+/// Map an iNES mapper number string to its name, or return the raw
+/// number string if no name is known.
+fn ines_mapper_name(raw: &str) -> &str {
+    let num: u32 = raw.trim_matches('"').parse().unwrap_or(0);
+    for (n, name) in INES_MAPPER_NAMES {
+        if *n == num {
+            return name;
+        }
+    }
+    raw
 }

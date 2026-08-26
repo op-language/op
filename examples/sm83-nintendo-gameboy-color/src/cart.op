@@ -1,0 +1,27 @@
+//! sm83-nintendo-gameboy-color example
+//!
+//! Minimal Game Boy Color cart with a vblank interrupt handler and a main loop.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[interrupt(vblank)]
+fn vblank() {
+    reti
+}
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[gb(title = "GBC EXAMPLE", cgb = "compatible")]
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+#[rom(org = 0x0000, bank = 0, maxsize = 0x8000)] {
+}
+
+#[setpad(0x00)]

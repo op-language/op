@@ -54,12 +54,12 @@ impl Diagnostic {
 
     /// Print the diagnostic to stderr in the structured format.
     pub fn print(&self, source: Option<&str>) {
-        let level = match self.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Note => "note",
+        let (level, prefix) = match self.severity {
+            Severity::Error => ("error", "E"),
+            Severity::Warning => ("warning", "W"),
+            Severity::Note => ("note", "N"),
         };
-        eprintln!("{}[E{:03}]: {}", level, self.code, self.message);
+        eprintln!("{}[{}{:03}]: {}", level, prefix, self.code, self.message);
         eprintln!("  --> {}:{}:{}", self.file, self.line, self.col);
         eprintln!("   |");
         if let Some(line) = source {

@@ -1,0 +1,30 @@
+//! z80-sinclair-zx81 example
+//!
+//! Minimal cart with reset, NMI, and IRQ handlers.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[interrupt(nmi)]
+fn nmi() {
+    retn
+}
+
+#[interrupt(irq)]
+fn irq() {
+    reti
+}
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+#[rom(org = 0x0000, bank = 0, maxsize = 0x2000)] {
+}
+
+#[setpad(0xFF)]

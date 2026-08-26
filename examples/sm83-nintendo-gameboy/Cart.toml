@@ -1,0 +1,16 @@
+[package]
+name = "sm83_nintendo_gameboy_example"
+version = "0.1.0"
+edition = "1"
+
+[[rom]]
+name = "example"
+path = "src/cart.op"
+target = "sm83-nintendo-gameboy"
+format = "gb"
+
+[dependencies]
+std = { version = "0.5.0", git = "https://github.com/op-language/std" }
+
+[target]
+default = "sm83-nintendo-gameboy"

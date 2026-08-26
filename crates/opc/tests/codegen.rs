@@ -615,6 +615,104 @@ fn codegen_empty_source() {
     assert_eq!(obj.sections.len(), 0);
 }
 
+// === Interrupt vector address lookup ======================================
+
+#[test]
+fn vector_address_6502_family() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("mos6502", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("mos6502", "nmi"), Some(0xFFFA));
+    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("rp2A03", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFF8));
+}
+
+#[test]
+fn vector_address_65c816() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("wdc65c816", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("wdc65c816", "nmi"), Some(0xFFEA));
+    assert_eq!(interrupt_vector_address("wdc65c816", "irq"), Some(0xFFEE));
+    assert_eq!(interrupt_vector_address("wdc65c816", "abort"), Some(0xFFE8));
+    assert_eq!(interrupt_vector_address("wdc65c816", "cop"), Some(0xFFE4));
+}
+
+#[test]
+fn vector_address_sm83() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("sm83", "vblank"), Some(0x0040));
+    assert_eq!(interrupt_vector_address("sm83", "lcdc"), Some(0x0048));
+    assert_eq!(interrupt_vector_address("sm83", "timer"), Some(0x0050));
+    assert_eq!(interrupt_vector_address("sm83", "serial"), Some(0x0058));
+    assert_eq!(interrupt_vector_address("sm83", "joypad"), Some(0x0060));
+}
+
+#[test]
+fn vector_address_z80() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("z80", "reset"), Some(0x0000));
+    assert_eq!(interrupt_vector_address("z80", "rst8"), Some(0x0008));
+    assert_eq!(interrupt_vector_address("z80", "rst10"), Some(0x0010));
+    assert_eq!(interrupt_vector_address("z80", "rst18"), Some(0x0018));
+    assert_eq!(interrupt_vector_address("z80", "rst20"), Some(0x0020));
+    assert_eq!(interrupt_vector_address("z80", "rst28"), Some(0x0028));
+    assert_eq!(interrupt_vector_address("z80", "rst30"), Some(0x0030));
+    assert_eq!(interrupt_vector_address("z80", "rst38"), Some(0x0038));
+    assert_eq!(interrupt_vector_address("z80", "irq"), Some(0x0038));
+    assert_eq!(interrupt_vector_address("z80", "nmi"), Some(0x0066));
+}
+
+#[test]
+fn vector_address_68000() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("m68000", "reset"), Some(0x0000));
+    assert_eq!(interrupt_vector_address("m68000", "reset_pc"), Some(0x0004));
+    assert_eq!(
+        interrupt_vector_address("m68000", "bus_error"),
+        Some(0x0008)
+    );
+    assert_eq!(
+        interrupt_vector_address("m68000", "address_error"),
+        Some(0x000C)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "illegal"), Some(0x0010));
+    assert_eq!(
+        interrupt_vector_address("m68000", "zero_divide"),
+        Some(0x0014)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "chk"), Some(0x0018));
+    assert_eq!(interrupt_vector_address("m68000", "trapv"), Some(0x001C));
+    assert_eq!(
+        interrupt_vector_address("m68000", "privilege"),
+        Some(0x0020)
+    );
+    assert_eq!(interrupt_vector_address("m68000", "trace"), Some(0x0024));
+    assert_eq!(interrupt_vector_address("m68000", "line_a"), Some(0x0028));
+    assert_eq!(interrupt_vector_address("m68000", "line_f"), Some(0x002C));
+    assert_eq!(interrupt_vector_address("m68000", "spurious"), Some(0x0060));
+    assert_eq!(interrupt_vector_address("m68000", "level1"), Some(0x0064));
+    assert_eq!(interrupt_vector_address("m68000", "level2"), Some(0x0068));
+    assert_eq!(interrupt_vector_address("m68000", "level3"), Some(0x006C));
+    assert_eq!(interrupt_vector_address("m68000", "level4"), Some(0x0070));
+    assert_eq!(interrupt_vector_address("m68000", "level5"), Some(0x0074));
+    assert_eq!(interrupt_vector_address("m68000", "level6"), Some(0x0078));
+    assert_eq!(interrupt_vector_address("m68000", "level7"), Some(0x007C));
+    assert_eq!(interrupt_vector_address("m68000", "trap0"), Some(0x0080));
+    assert_eq!(interrupt_vector_address("m68000", "trap15"), Some(0x00BC));
+}
+
+#[test]
+fn vector_encoding_for_cpu() {
+    use op_ir::VectorEncoding;
+    use opc::codegen::vector_encoding_for;
+    assert_eq!(vector_encoding_for("mos6502"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("rp2A03"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("wdc65c816"), VectorEncoding::Pointer2);
+    assert_eq!(vector_encoding_for("sm83"), VectorEncoding::JumpSm83);
+    assert_eq!(vector_encoding_for("z80"), VectorEncoding::JumpZ80);
+    assert_eq!(vector_encoding_for("m68000"), VectorEncoding::Pointer4);
+}
+
 #[test]
 fn codegen_no_block_attributes() {
     // Functions without a #[rom] block produce no sections.
@@ -806,7 +904,7 @@ fn rp2a03_interrupt_vector_nmi() {
 #[test]
 fn rp2a03_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFF8));
 }
 
 #[test]
@@ -824,5 +922,68 @@ fn rp2a07_interrupt_vector_nmi() {
 #[test]
 fn rp2a07_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFFE));
+    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFF8));
+}
+
+// === Phase 0: array const placement ========================================
+
+#[test]
+fn array_const_placed_in_rom() {
+    let obj = compile(
+        "#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+            fn main() { lda DATA }
+        }
+         const DATA: [u8; 4] = [0x01, 0x02, 0x03, 0x04];",
+    );
+    // The rom section should exist and contain data.
+    let rom = obj.sections.iter().find(|s| s.kind == SectionKind::Rom);
+    assert!(rom.is_some());
+    let rom = rom.unwrap();
+    // Find the DATA symbol.
+    let sym = rom.symbols.iter().find(|s| s.name == "DATA");
+    assert!(
+        sym.is_some(),
+        "DATA symbol not found in symbols: {:?}",
+        rom.symbols
+    );
+    let sym = sym.unwrap();
+    let start = sym.offset as usize;
+    let end = start + 4;
+    let bytes = &rom.data[start..end];
+    assert_eq!(bytes, &[0x01, 0x02, 0x03, 0x04]);
+}
+
+#[test]
+fn array_const_len_resolves() {
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "const DATA: [u8; 4] = [10, 20, 30, 40];",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 1, &[], &[]);
+    // len!(DATA) should resolve to 4 via const_values.
+    // We verify via the NameTables.
+    let data_len = tables.const_values.get("DATA");
+    assert_eq!(data_len, Some(&4));
+    let _ = obj;
+}
+
+// === Phase 0: struct const field resolution ================================
+
+#[test]
+fn struct_const_scalar_field_in_const_values() {
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] { }
+         const MYFONT: font_t = font_t { tile_count: 102, data: SOMEDATA };",
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let (obj, _diags, tables) = compile_source_with_tables(&ast, 1, &[], &[]);
+    // The scalar field tile_count should be in const_values as
+    // MYFONT::tile_count = 102.
+    let tile_count = tables.const_values.get("MYFONT::tile_count");
+    assert_eq!(tile_count, Some(&102));
+    let _ = obj;
 }

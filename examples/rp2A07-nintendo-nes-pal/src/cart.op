@@ -1,0 +1,32 @@
+//! rp2A07-nintendo-nes-pal example
+//!
+//! Minimal cart with reset, NMI, and IRQ handlers.
+
+use std::cpu::*;
+use std::machine::*;
+
+#[interrupt(reset)]
+noreturn fn main() {
+    loop {
+    }
+}
+
+#[interrupt(nmi)]
+fn nmi() {
+    rti
+}
+
+#[interrupt(irq)]
+fn irq() {
+    rti
+}
+
+#[ines(mapper = 0, mirroring = "vertical", battery = false, trainer = false, fourscreen = false)]
+
+#[ram(org = 0x0000, maxsize = 0x100)] {
+}
+
+#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+}
+
+#[setpad(0xFF)]

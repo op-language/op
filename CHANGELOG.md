@@ -5,16 +5,73 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.0]
+## [0.11.0]
 
 ### Changed
+- `opc` codegen: for SM83 (Game Boy) targets, reserve the first 0x150
+  bytes of the bank-0 ROM section (org 0x0000) for the interrupt
+  vectors and cartridge header. Code now starts at 0x0150, so the reset
+  handler is no longer clobbered by the header. This eliminates the
+  need for a manual `jp real_main` + nop trampoline in Game Boy
+  programs.
+- `opc` `emit_gb`: the `#[gb()]` annotation now initializes 0x0000-0x0104
+  with 0x00 and writes the cartridge header to 0x0104-0x014F. The
+  `#[interrupt(reset)]` is processed after that, writing `0x0000 = JP
+  <main>` and `0x0100 = JP 0x0000` (the SM83 reset entry bounces to
+  0x0000, which jumps to main). Other interrupt vectors are re-written
+  after the zeroing so they are preserved.
+- `opc` optimizer: fixed font loading relocations and code generation
+  for struct-pointer fields used in `ld_de #data` relocations.
+
+## [0.10.0]
+
+### Added
+- `VectorEncoding` enum in `op-ir` (`lib.rs`). The enum has four
+  variants: `Pointer2` (2-byte LE address, 6502 family and 65C816),
+  `Pointer4` (4-byte BE address, 68000), `JumpZ80` (3-byte JP
+  instruction, Z80), and `JumpSm83` (3-byte JP instruction, SM83).
+- `encoding` field on `InterruptVector` in `op-ir`. The field tells
+  the linker how to encode each vector entry. Defaults to
+  `Pointer2` for backward compatibility.
+- Z80 interrupt vector support in `interrupt_vector_address`
+  (`codegen.rs`). Supports `reset` (0x0000), `rst8` through `rst38`
+  (0x0008 through 0x0038), `irq` (alias for `rst38`), and `nmi`
+  (0x0066).
+- 68000 interrupt vector support in `interrupt_vector_address`
+  (`codegen.rs`). Supports the full exception vector table: `reset`
+  (0x0000), `reset_pc` (0x0004), `bus_error` (0x0008),
+  `address_error` (0x000C), `illegal` (0x0010), `zero_divide`
+  (0x0014), `chk` (0x0018), `trapv` (0x001C), `privilege` (0x0020),
+  `trace` (0x0024), `line_a` (0x0028), `line_f` (0x002C),
+  `spurious` (0x0060), `level1` through `level7` (0x0064 through
+  0x007C), and `trap0` through `trap15` (0x0080 through 0x00BC).
+- `vector_encoding_for` function in `codegen.rs`. Returns the
+  `VectorEncoding` for a given CPU family.
+- `add_interrupt_vector` helper method on the codegen struct. Sets
+  the encoding per CPU family and handles the 68000 reset vector
+  specially (emits SSP at 0x0000 with target `_stack_top` and PC at
+  0x0004 with the handler target).
+- Linker `_stack_top` resolution. The linker computes the stack top
+  from the first RAM section (org + maxsize) when the `_stack_top`
+  symbol is not in the symbol table.
+- New linker tests for Z80 reset and NMI vectors, SM83 vblank
+  vector, 68000 reset vector (SSP + PC), and 68000 level-2
+  autovector.
+- New codegen tests for `interrupt_vector_address` on all CPU
+  families and for `vector_encoding_for`.
+
+### Changed
+- SM83 vector encoding changed from `Pointer2` (handler address at
+  vector slot) to `JumpSm83` (3-byte JP instruction at vector slot).
+  The handler function can now live anywhere in ROM. The linker
+  emits `0xC3` + 2-byte LE address at the vector address.
+- The linker `write_vector_tables` method now dispatches on the
+  `VectorEncoding` to write the correct byte format per CPU family.
 - Integration test data moved from `examples/` to
   `crates/opc/tests/data/`. The `include_str!` and `include_bytes!`
   paths in `integration.rs` now reference `data/nes.op` and
   `data/font.chr` instead of `../../../examples/nes.op` and
   `../../../examples/font.chr`. The `examples/` directory is deleted.
-
-### Added
 - `ENCODING_VL65NC02` encoding table in `encoding.rs`. The table is an
   exact copy of `ENCODING_65SC02`. The VL65NC02 is a 65SC02 core.
 - `ENCODING_SM83` encoding table in `encoding.rs`. The table holds
@@ -28,8 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at 0x0058, joypad at 0x0060.
 - Known limitation note for the `all`, `any`, and `not` cfg
   combinators in `language-specification.md`.
-
-### Changed
 - Updated `crates/opc/tests/integration.rs` to reference
   `mos6502/mod.op` instead of the deleted `mos6502.op` flat file.
 - Updated `crates/opc/tests/codegen.rs` `std_resolves_cpu_glob` test

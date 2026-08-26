@@ -1,0 +1,16 @@
+[package]
+name = "m68000_neogeo_aes_example"
+version = "0.1.0"
+edition = "1"
+
+[[rom]]
+name = "example"
+path = "src/cart.op"
+target = "m68000-neogeo-aes"
+format = "raw"
+
+[dependencies]
+std = { version = "0.5.0", git = "https://github.com/op-language/std" }
+
+[target]
+default = "m68000-neogeo-aes"

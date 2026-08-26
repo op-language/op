@@ -705,8 +705,8 @@ fn full_pipeline_std_nes_game() {
     assert_eq!(bytes[4], 1, "one 16 KB PRG bank");
     assert_eq!(bytes[5], 1, "one 8 KB CHR bank");
     assert_eq!(
-        bytes[6], 0,
-        "flags6: mapper 0, vertical mirroring, no battery/trainer/fourscreen"
+        bytes[6], 1,
+        "flags6: mapper 0, vertical mirroring (bit 0 set), no battery/trainer/fourscreen"
     );
 }
 

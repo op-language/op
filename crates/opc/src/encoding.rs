@@ -1778,6 +1778,18 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
         mode: AddrMode::Absolute,
         opcode: 0x32,
     },
+    // LD A, (nn) — load A from a 16-bit absolute address
+    EncodingEntry {
+        mnemonic: "ld_a",
+        mode: AddrMode::Indirect,
+        opcode: 0xFA,
+    },
+    // LD (nn), A — store A to a 16-bit absolute address
+    EncodingEntry {
+        mnemonic: "ld_addr",
+        mode: AddrMode::Indirect,
+        opcode: 0xEA,
+    },
     // PUSH/POP
     EncodingEntry {
         mnemonic: "push",
@@ -2011,11 +2023,64 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
         mode: AddrMode::Implied,
         opcode: 0x10,
     },
-    // LDH (load from high memory)
+    // LDH (load from/to high memory)
     EncodingEntry {
         mnemonic: "ldh",
         mode: AddrMode::Immediate,
         opcode: 0xF0,
+    },
+    EncodingEntry {
+        mnemonic: "ldh",
+        mode: AddrMode::Absolute,
+        opcode: 0xE0,
+    },
+    // 16-bit register pair increments (SM83 specific)
+    EncodingEntry {
+        mnemonic: "inc_hl",
+        mode: AddrMode::Implied,
+        opcode: 0x23,
+    },
+    EncodingEntry {
+        mnemonic: "inc_de",
+        mode: AddrMode::Implied,
+        opcode: 0x13,
+    },
+    EncodingEntry {
+        mnemonic: "inc_bc",
+        mode: AddrMode::Implied,
+        opcode: 0x03,
+    },
+    // 16-bit register pair loads (LD HL, nn; LD DE, nn; LD BC, nn)
+    EncodingEntry {
+        mnemonic: "ld_hl",
+        mode: AddrMode::Immediate,
+        opcode: 0x21,
+    },
+    EncodingEntry {
+        mnemonic: "ld_de",
+        mode: AddrMode::Immediate,
+        opcode: 0x11,
+    },
+    EncodingEntry {
+        mnemonic: "ld_bc",
+        mode: AddrMode::Immediate,
+        opcode: 0x01,
+    },
+    // Indirect loads: LD A, (HL); LD A, (BC); LD A, (DE)
+    EncodingEntry {
+        mnemonic: "ld_a_hl",
+        mode: AddrMode::Implied,
+        opcode: 0x7E,
+    },
+    EncodingEntry {
+        mnemonic: "ld_a_bc",
+        mode: AddrMode::Implied,
+        opcode: 0x0A,
+    },
+    EncodingEntry {
+        mnemonic: "ld_a_de",
+        mode: AddrMode::Implied,
+        opcode: 0x1A,
     },
 ];
 
