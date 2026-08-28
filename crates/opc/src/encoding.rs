@@ -2082,6 +2082,69 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
         mode: AddrMode::Implied,
         opcode: 0x1A,
     },
+    // Register-to-register loads crossing A (LD B..L, A / LD A, B..L).
+    // These allow a 16-bit value stored in RAM to be assembled into a
+    // register pair (e.g. ld_a (nn); ld_ba; ld_a (nn+1); ld_ca).
+    EncodingEntry {
+        mnemonic: "ld_ba",
+        mode: AddrMode::Implied,
+        opcode: 0x47,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ca",
+        mode: AddrMode::Implied,
+        opcode: 0x4F,
+    },
+    EncodingEntry {
+        mnemonic: "ld_da",
+        mode: AddrMode::Implied,
+        opcode: 0x57,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ea",
+        mode: AddrMode::Implied,
+        opcode: 0x5F,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ha",
+        mode: AddrMode::Implied,
+        opcode: 0x67,
+    },
+    EncodingEntry {
+        mnemonic: "ld_la",
+        mode: AddrMode::Implied,
+        opcode: 0x6F,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ab",
+        mode: AddrMode::Implied,
+        opcode: 0x78,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ac",
+        mode: AddrMode::Implied,
+        opcode: 0x79,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ad",
+        mode: AddrMode::Implied,
+        opcode: 0x7A,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ae",
+        mode: AddrMode::Implied,
+        opcode: 0x7B,
+    },
+    EncodingEntry {
+        mnemonic: "ld_ah",
+        mode: AddrMode::Implied,
+        opcode: 0x7C,
+    },
+    EncodingEntry {
+        mnemonic: "ld_al",
+        mode: AddrMode::Implied,
+        opcode: 0x7D,
+    },
 ];
 
 // --- CPU family selection ---------------------------------------------------

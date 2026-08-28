@@ -1567,6 +1567,11 @@ impl Codegen {
                 } => {
                     self.import_inline_fn(name, params, body);
                 }
+                Item::FnDecl {
+                    name, is_noreturn, body, ..
+                } => {
+                    self.import_fn(name, *is_noreturn, body);
+                }
                 Item::ConstDecl {
                     name,
                     ty,
@@ -1704,6 +1709,9 @@ impl Codegen {
             Item::InlineFnDecl { params, body, .. } => {
                 self.import_inline_fn(name, params, body);
             }
+            Item::FnDecl { is_noreturn, body, .. } => {
+                self.import_fn(name, *is_noreturn, body);
+            }
             Item::ConstDecl {
                 value,
                 evaluated_value,
@@ -1753,6 +1761,27 @@ impl Codegen {
             }
             _ => {}
         }
+    }
+
+    /// Insert a non-inline function into the flat namespace, warning
+    /// on collision. Its body is placed exactly once (in the first ROM
+    /// section) when the function is reachable from a placement root;
+    /// calls emit CALL nn against the function symbol.
+    fn import_fn(&mut self, name: &str, _is_noreturn: bool, body: &[FnStmt]) {
+        if self.inline_fns.contains_key(name) {
+            self.warning(
+                304,
+                format!("name `{name}` imported more than once; last import wins"),
+            );
+        }
+        self.inline_fns.insert(
+            name.to_string(),
+            InlineFn {
+                params: Vec::new(),
+                body: body.to_vec(),
+                is_inline: false,
+            },
+        );
     }
 
     /// Insert an inline function into the flat namespace, warning on

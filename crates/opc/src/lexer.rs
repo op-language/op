@@ -166,6 +166,8 @@ const OPCODES: &[&str] = &[
     "outi", "otir", "outd", "otdr", "bit", "set", "res", // LR35902
     "stop", "ldh", // SM83 register-pair pseudo-instructions
     "inc_hl", "inc_de", "inc_bc", "ld_hl", "ld_de", "ld_bc", "ld_a_hl", "ld_a_bc", "ld_a_de",
+    "ld_ba", "ld_ca", "ld_da", "ld_ea", "ld_ha", "ld_la", "ld_ab", "ld_ac", "ld_ad", "ld_ae",
+    "ld_ah", "ld_al",
     "ld_a", "ld_addr",
 ];
 
