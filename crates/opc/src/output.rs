@@ -197,9 +197,8 @@ fn emit_ines(obj: &ObjectFile) -> Result<Vec<u8>> {
     }
     // Mirroring: per the iNES spec, bit 0 = 1 means vertical mirroring,
     // bit 0 = 0 means horizontal mirroring.
-    match header_field(obj, "mirroring") {
-        Some("vertical") => flags6 |= 0x01,
-        _ => {}
+    if let Some("vertical") = header_field(obj, "mirroring") {
+        flags6 |= 0x01;
     }
 
     // Flags 7: upper mapper nibble. NES 1.0 leaves the rest as 0.

@@ -212,8 +212,8 @@ fn full_pipeline_lex_then_parse() {
         }
 
         #[rom(org = 0xC000, bank = 0)] {
-            #[interrupt(reset)]
-            locate_fn!(game::main);
+            #[locate(addr = 0xC010)]
+            const BLOB: [u8; 4] = [1, 2, 3, 4];
         }
 
         fn main() {
@@ -556,7 +556,8 @@ use std::machine::*;
 }
 
 #[chr(bank = 0)] {
-    locate_bytes!("blob.chr")
+    #[locate(file = "blob.chr")]
+    const CHR_DATA: [u8] = [0];
 }
 "#;
 
@@ -626,8 +627,8 @@ fn full_pipeline_std_nes_game() {
     let source = include_str!("data/nes.op");
     let font = include_bytes!("data/font.chr");
 
-    // Write the source and font into a temp dir so locate_bytes! can
-    // find font.chr regardless of the test's working directory.
+    // Write the source and font into a temp dir so #[locate(file = ...)]
+    // can find font.chr regardless of the test's working directory.
     let dir = std::env::temp_dir().join(format!("opc-int-nes-game-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("nes.op"), source).unwrap();

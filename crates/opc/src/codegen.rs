@@ -202,6 +202,9 @@ fn build_codegen(
         placed_items: std::collections::HashSet::new(),
         crash_handler_symbol: "__op_default_crash_handler".to_string(),
         struct_sizes: HashMap::new(),
+        pending_locate: (None, None),
+        fn_locate_pins: HashMap::new(),
+        collected_locates: HashMap::new(),
         diags: Vec::new(),
     }
 }
@@ -220,7 +223,7 @@ struct ModuleCache {
 
 /// A parsed module plus the directory of the file it was loaded
 /// from. The directory lets placement macros inside a std module
-/// (such as `locate_bytes!`) resolve paths relative to the std file
+/// (such as `#[locate(file = ...)]`) resolve paths relative to the std file
 /// instead of the root source file.
 struct CachedModule {
     module: Module,
@@ -320,6 +323,10 @@ struct Codegen {
     /// sub-modules), stored for placement in the first ROM section.
     /// Each entry is (name, ty, value, evaluated_value).
     collected_consts: Vec<(String, Type, Expr, Option<i64>)>,
+    /// `#[locate(...)]` pins captured from imported std consts, keyed by
+    /// const name: (addr, file). Consumed by the placement pass when the
+    /// const is placed.
+    collected_locates: HashMap<String, (Option<u32>, Option<String>)>,
     /// Types of top-level const and var declarations, keyed by name.
     /// Populated during the collect pass before values are evaluated,
     /// so that `len!` and `sizeof!` of a later declaration resolve.
@@ -345,11 +352,11 @@ struct Codegen {
     pad_byte: u8,
     /// Directory of the std module file whose items are currently
     /// being walked, if any. `None` while walking the root source
-    /// file. `locate_bytes!` and `locate_str!` inside std modules
+    /// file. `#[locate(file = ...)]` and `locate_str!` inside std modules
     /// resolve paths against this directory.
     current_module_dir: Option<std::path::PathBuf>,
     /// Directory of the root source file. Used to resolve
-    /// `locate_bytes!` and `locate_str!` paths.
+    /// and `locate_str!` paths.
     source_dir: std::path::PathBuf,
     /// Names of top-level fns, consts, and vars that the placement pass
     /// has already placed into a section. The compile walk skips these
@@ -364,6 +371,15 @@ struct Codegen {
     /// the size of struct types (which the standalone `type_size` cannot
     /// do because it has no access to struct definitions).
     struct_sizes: HashMap<String, usize>,
+    /// Pending `#[locate(...)]` attribute for the const the placement
+    /// pass is about to place: (addr, file). Set from the const's
+    /// declarations during the placement pass and consumed by
+    /// `place_const`.
+    pending_locate: (Option<u32>, Option<String>),
+    /// `#[locate(addr = ...)]` pins for in-block fns keyed by fn name.
+    /// The pin moves the fn body start to the absolute address. Consumed
+    /// in `place_fn_tree` right before the fn compiles.
+    fn_locate_pins: std::collections::HashMap<String, u32>,
     diags: Vec<Diagnostic>,
 }
 
@@ -381,7 +397,7 @@ impl Codegen {
         // Place reachable fns and top-level data into sections, then
         // emit dead-code warnings for unreachable items.
         self.placement_pass(&module.items);
-        // Walk items for codegen (section blocks, locate_bytes!, etc.).
+        // Walk items for codegen (section blocks, locate_str!, etc.).
         // Top-level fns/consts/vars placed by the placer are skipped.
         for item in &module.items {
             self.walk_item(item);
@@ -452,18 +468,21 @@ impl Codegen {
                 self.symbol_types.insert(name.clone(), ty.clone());
             }
             Item::StructDecl { name, fields, .. } => {
-                let size: usize = fields.iter().map(|f| {
-                    let base = type_size(&f.ty);
-                    if let Some(dim) = &f.array_dim {
-                        if let Some(d) = eval_const_expr_simple(dim) {
-                            base * d as usize
+                let size: usize = fields
+                    .iter()
+                    .map(|f| {
+                        let base = type_size(&f.ty);
+                        if let Some(dim) = &f.array_dim {
+                            if let Some(d) = eval_const_expr_simple(dim) {
+                                base * d as usize
+                            } else {
+                                base
+                            }
                         } else {
                             base
                         }
-                    } else {
-                        base
-                    }
-                }).sum();
+                    })
+                    .sum();
                 self.struct_sizes.insert(name.clone(), size);
             }
             _ => {}
@@ -627,6 +646,13 @@ impl Codegen {
         }
     }
 
+    /// Return true when the source declares a `#[gb(...)]` header
+    /// attribute. The SM83 0x150 reservation and the emit-time header
+    /// writes both depend on it.
+    fn header_is_gb(&self) -> bool {
+        matches!(&self.header, Some(h) if h.format == "gb")
+    }
+
     /// Create a single section from a block attribute (rom/ram/chr).
     fn create_section_from_attr(&mut self, attr: &Attribute) {
         let kind = match attr.path.as_str() {
@@ -678,8 +704,15 @@ impl Codegen {
         // Gather roots in declaration order.
         let roots = self.gather_roots(items);
 
-        // If there are no roots, skip placement and dead-code warnings.
-        if roots.is_empty() {
+        // A `#[locate]` pin on any const is a placement directive even
+        // without fn roots: data-only ROM images (a boot ROM, a font
+        // bank) must still place.
+        let has_pinned_const = Self::items_have_pinned_const(items)
+            || self
+                .collected_locates
+                .values()
+                .any(|(addr, _)| addr.is_some());
+        if roots.is_empty() && !has_pinned_const {
             return;
         }
 
@@ -727,7 +760,10 @@ impl Codegen {
         // so the reset handler is not clobbered by the header written at
         // emit time. The output stage (emit_gb) zeros this region, writes the
         // header, and patches the reset vector.
-        if self.target.cpu == "sm83" {
+        // The reservation runs only when the source declares a `#[gb]`
+        // header. A raw-format program (for example, a boot ROM) keeps full
+        // control of $0000-$014F.
+        if self.target.cpu == "sm83" && self.header_is_gb() {
             if let Some(idx) = first_rom {
                 let section = &mut self.sections[idx];
                 if section.org == 0 && section.data.len() < 0x0150 {
@@ -785,19 +821,66 @@ impl Codegen {
 
         // Place top-level consts that were referenced by live code.
         // Process in first-reference order (which is the order they
-        // appear in referenced_data, built during DFS).
+        // appear in referenced_data, built during DFS). Consts declared
+        // inside `#[rom]` blocks participate the same way; the block
+        // declares their ROM section.
+        let mut const_items: Vec<(&Item, Option<usize>)> = Vec::new();
         for item in items {
+            match item {
+                Item::ConstDecl { .. } => const_items.push((item, None)),
+                Item::BlockAttribute {
+                    attr,
+                    items: block_items,
+                } if attr.path == "rom" || attr.path == "chr" => {
+                    let kind = if attr.path == "rom" {
+                        SectionKind::Rom
+                    } else {
+                        SectionKind::Chr
+                    };
+                    let bank = get_attr_u32(attr, "bank").unwrap_or(0);
+                    let name = format!("{}_bank{}", kind_name(kind), bank);
+                    let idx = self.sections.iter().position(|s| s.name == name);
+                    for bi in block_items {
+                        if let Item::ConstDecl { .. } = bi {
+                            const_items.push((bi, idx));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (item, block_section) in const_items {
             if let Item::ConstDecl {
                 name,
                 ty,
                 value,
                 evaluated_value,
+                attributes,
                 ..
             } = item
             {
-                if referenced_data.contains(name) && !self.placed_items.contains(name) {
-                    if let Some(rom_idx) = first_rom {
+                // A `#[locate]` pin is a placement directive: the const
+                // places even when no live code references it. Without a
+                // pin, the refered-only rule applies as before.
+                let pinned = Self::find_locate_attr(attributes).is_some();
+                if (pinned || referenced_data.contains(name)) && !self.placed_items.contains(name) {
+                    if let Some(rom_idx) = block_section.or(first_rom) {
+                        // #[locate(addr = ...)] pins the const at an
+                        // absolute address within its block. With a
+                        // `file` argument, the file bytes emit at the
+                        // pinned address instead of the const's value.
+                        let (locate_addr, locate_file) =
+                            Self::find_locate_attr(attributes).unwrap_or((None, None));
+                        if let (Some(addr), Some(file)) = (locate_addr, locate_file.clone()) {
+                            self.place_const_file(name, addr, &file, rom_idx);
+                            self.placed_items.insert(name.clone());
+                            continue;
+                        }
+                        if locate_addr.is_some() || locate_file.is_some() {
+                            self.pending_locate = (locate_addr, locate_file.clone());
+                        }
                         self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                        self.pending_locate = (None, None);
                         self.placed_items.insert(name.clone());
                     }
                 }
@@ -805,12 +888,29 @@ impl Codegen {
         }
 
         // Place consts collected from sub-modules (e.g. std font data)
-        // that were referenced by live code.
+        // that were referenced by live code. A collected const with a
+        // `#[locate]` pin places even without a reference: the pin is a
+        // placement directive.
         let collected = self.collected_consts.clone();
         for (name, ty, value, evaluated_value) in &collected {
-            if referenced_data.contains(name) && !self.placed_items.contains(name) {
+            let (locate_addr, locate_file) = self
+                .collected_locates
+                .get(name)
+                .cloned()
+                .unwrap_or((None, None));
+            let pinned = self.collected_locates.contains_key(name);
+            if (referenced_data.contains(name) || pinned) && !self.placed_items.contains(name) {
                 if let Some(rom_idx) = first_rom {
+                    if let (Some(addr), Some(file)) = (locate_addr, locate_file.clone()) {
+                        self.place_const_file(name, addr, &file, rom_idx);
+                        self.placed_items.insert(name.clone());
+                        continue;
+                    }
+                    if let Some(addr) = locate_addr {
+                        self.pending_locate = (Some(addr), locate_file);
+                    }
                     self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                    self.pending_locate = (None, None);
                     self.placed_items.insert(name.clone());
                 }
             }
@@ -861,7 +961,37 @@ impl Codegen {
 
     /// Gather placement roots from top-level items in declaration order.
     #[allow(clippy::collapsible_if, clippy::collapsible_match)]
-    fn gather_roots(&self, items: &[Item]) -> Vec<PlacementRoot> {
+    /// Return true when any const declaration among the items (top
+    /// level or inside a `#[rom]` block) carries a `#[locate(...)]`
+    /// attribute.
+    fn items_have_pinned_const(items: &[Item]) -> bool {
+        for item in items {
+            match item {
+                Item::ConstDecl { attributes, .. } => {
+                    if attributes.iter().any(|a| a.path == "locate") {
+                        return true;
+                    }
+                }
+                Item::BlockAttribute {
+                    attr,
+                    items: block_items,
+                } => {
+                    if attr.path == "rom"
+                        && block_items.iter().any(|bi| {
+                            matches!(bi, Item::ConstDecl { attributes, .. }
+                                if attributes.iter().any(|a| a.path == "locate"))
+                        })
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn gather_roots(&mut self, items: &[Item]) -> Vec<PlacementRoot> {
         let mut roots = Vec::new();
         let first_rom = self
             .sections
@@ -885,43 +1015,30 @@ impl Codegen {
                 Item::BlockAttribute {
                     attr,
                     items: block_items,
-                } => {
-                    if attr.path == "rom" {
-                        let section_idx = self.sections.iter().position(|s| {
-                            s.kind == SectionKind::Rom
-                                && s.bank == get_attr_u32(attr, "bank").unwrap_or(0)
-                        });
-                        for block_item in block_items {
-                            match block_item {
-                                Item::FnDecl {
-                                    name, attributes, ..
-                                } => {
-                                    // In-block fn is a root (placed at its position in the block).
-                                    let has_interrupt =
-                                        attributes.iter().any(|a| a.path == "interrupt");
-                                    if has_interrupt || true {
-                                        roots.push(PlacementRoot {
-                                            name: name.clone(),
-                                            section_idx,
-                                        });
-                                    }
-                                }
-                                Item::Placement {
-                                    macro_name,
-                                    argument,
-                                    ..
-                                } if macro_name == "locate_fn" => {
-                                    if let PlacementArg::Path { segments } = argument {
-                                        if let Some(fn_name) = segments.last() {
-                                            roots.push(PlacementRoot {
-                                                name: fn_name.clone(),
-                                                section_idx,
-                                            });
-                                        }
-                                    }
-                                }
-                                _ => {}
+                } if attr.path == "rom" => {
+                    let section_idx = self.sections.iter().position(|s| {
+                        s.kind == SectionKind::Rom
+                            && s.bank == get_attr_u32(attr, "bank").unwrap_or(0)
+                    });
+                    for block_item in block_items {
+                        if let Item::FnDecl {
+                            name, attributes, ..
+                        } = block_item
+                        {
+                            // In-block fn is a root (placed at its
+                            // position in the block). A
+                            // `#[locate(addr = ...)]` pin moves the
+                            // body start to that absolute address.
+                            let locate =
+                                Self::find_locate_attr(attributes).and_then(|(addr, _)| addr);
+                            if let Some(addr) = locate {
+                                self.fn_locate_pins.insert(name.clone(), addr);
                             }
+                            let _has_interrupt = attributes.iter().any(|a| a.path == "interrupt");
+                            roots.push(PlacementRoot {
+                                name: name.clone(),
+                                section_idx,
+                            });
                         }
                     }
                 }
@@ -972,10 +1089,20 @@ impl Codegen {
         }
 
         // Compile this fn into the section first (roots appear before
-        // their callees in the block).
+        // their callees in the block). A `#[locate(addr = ...)]` pin on
+        // the fn moves its body start to the absolute address: the gap
+        // up to the pin fills with the pad byte.
         self.current_section = Some(section_idx);
+        if let Some(&addr) = self.fn_locate_pins.get(fn_name) {
+            if !self.locate_to_addr(addr, fn_name) {
+                self.current_section = None;
+                self.placed_items.insert(fn_name.to_string());
+                return;
+            }
+        }
         self.compile_fn(fn_name, &inline_fn.body, false);
         self.current_section = None;
+        self.fn_locate_pins.remove(fn_name);
         self.placed_items.insert(fn_name.to_string());
 
         // Then place callees (DFS, first-call order).
@@ -1205,13 +1332,11 @@ impl Codegen {
                     if let Some(fields) = self.struct_consts.get(first) {
                         for access in accesses {
                             if let Access::FieldAccess { name: field_name } = access {
-                                if let Some((_, field_expr)) =
+                                if let Some((_, Expr::Ident { name: array_name })) =
                                     fields.iter().find(|(n, _)| n == field_name)
                                 {
-                                    if let Expr::Ident { name: array_name } = field_expr {
-                                        if !data_refs.contains(array_name) {
-                                            data_refs.push(array_name.clone());
-                                        }
+                                    if !data_refs.contains(array_name) {
+                                        data_refs.push(array_name.clone());
                                     }
                                 }
                             }
@@ -1268,6 +1393,124 @@ impl Codegen {
         }
     }
 
+    /// Find a `#[locate(...)]` attribute on an item. Returns the
+    /// attribute arguments: `addr` (absolute ROM address) and optional
+    /// `file` (binary file whose bytes emit at `addr`).
+    fn find_locate_attr(attributes: &[Attribute]) -> Option<(Option<u32>, Option<String>)> {
+        for attr in attributes {
+            if attr.path != "locate" {
+                continue;
+            }
+            let addr = get_attr_u32(attr, "addr");
+            let file = attr
+                .args
+                .iter()
+                .find(|a| a.name == "file")
+                .map(|arg| arg.value.trim_matches('"').to_string());
+            return Some((addr, file));
+        }
+        None
+    }
+
+    /// Grow the current section data so that the next emitted byte lands
+    /// at absolute address `addr` (that is, at offset `addr - org`).
+    /// Fills the gap with the module pad byte. Emits an error when the
+    /// address precedes the current data end (overlap) or when the
+    /// section has no room for the request (maxsize).
+    fn locate_to_addr(&mut self, addr: u32, item_name: &str) -> bool {
+        let idx = match self.current_section {
+            Some(idx) => idx,
+            None => {
+                self.error(
+                    300,
+                    format!("#[locate] on `{item_name}`: no ROM block surrounds the item"),
+                );
+                return false;
+            }
+        };
+        let org = self.sections[idx].org;
+        let maxsize = self.sections[idx].maxsize;
+        let target_offset = if addr >= org {
+            addr - org
+        } else {
+            self.error(
+                300,
+                format!(
+                    "#[locate] on `{item_name}`: address 0x{addr:04X} is below the block org 0x{org:04X}"
+                ),
+            );
+            return false;
+        };
+        let cur_len = self.sections[idx].data.len() as u32;
+        if target_offset < cur_len {
+            self.error(
+                300,
+                format!(
+                    "#[locate] on `{item_name}`: address 0x{addr:04X} overlaps existing data (current end 0x{:04X})",
+                    org + cur_len
+                ),
+            );
+            return false;
+        }
+        if maxsize > 0 && target_offset >= maxsize {
+            self.error(
+                300,
+                format!(
+                    "#[locate] on `{item_name}`: address 0x{addr:04X} exceeds the block maxsize 0x{maxsize:04X}"
+                ),
+            );
+            return false;
+        }
+        let pad = self.pad_byte;
+        self.sections[idx].data.resize(target_offset as usize, pad);
+        true
+    }
+
+    /// Emit the bytes of `file` at the current section offset. Path
+    /// resolution matches other file reads: relative to the current std
+    /// module directory when walking std, else relative to the source
+    /// directory.
+    fn emit_file_bytes(&mut self, file: &str, item_name: &str) {
+        let base = self
+            .current_module_dir
+            .clone()
+            .unwrap_or_else(|| self.source_dir.clone());
+        let path = base.join(file);
+        match std::fs::read(&path) {
+            Ok(data) => {
+                let idx = match self.current_section {
+                    Some(idx) => idx,
+                    None => {
+                        self.error(
+                            300,
+                            format!("#[locate] on `{item_name}`: no ROM block surrounds the item"),
+                        );
+                        return;
+                    }
+                };
+                let maxsize = self.sections[idx].maxsize;
+                let cur_len = self.sections[idx].data.len() as u32;
+                let need = cur_len + data.len() as u32;
+                if maxsize > 0 && need > maxsize {
+                    self.error(
+                        300,
+                        format!(
+                            "#[locate] on `{item_name}`: file `{file}` ({}) exceeds the block maxsize 0x{maxsize:04X}",
+                            data.len()
+                        ),
+                    );
+                    return;
+                }
+                for b in data {
+                    self.sections[idx].data.push(b);
+                }
+            }
+            Err(_) => {
+                self.error(300, format!("#[locate]: cannot read file '{file}'"));
+            }
+        }
+    }
+
     /// Place a top-level const's data into a section.
     fn place_const(
         &mut self,
@@ -1281,7 +1524,35 @@ impl Codegen {
         // For scalar consts, emit the evaluated value bytes.
         // For other consts, emit based on type size.
         self.current_section = Some(section_idx);
+
+        // #[locate(addr = ...)] pins the const at an absolute address.
+        // With `file`, the file bytes emit at the pinned address and the
+        // const's own value bytes are skipped (the file replaces them).
+        // Both modes record the symbol at the pinned offset.
+        // The locate attribute is looked up by the placement pass and
+        // stored in `self.pending_locate`.
+        let (locate_addr, locate_file) = std::mem::take(&mut self.pending_locate);
+        if let Some(addr) = locate_addr {
+            if !self.locate_to_addr(addr, name) {
+                self.current_section = None;
+                return;
+            }
+        }
         let offset = self.sections[section_idx].data.len() as u32;
+        if let Some(file) = locate_file {
+            // The file replaces the const's own value bytes.
+            self.emit_file_bytes(&file, name);
+            let end_offset = self.sections[section_idx].data.len() as u32;
+            self.sections[section_idx].symbols.push(Symbol {
+                name: name.to_string(),
+                offset,
+                size: end_offset - offset,
+                kind: SymbolKind::Variable,
+                is_pub: false,
+            });
+            self.current_section = None;
+            return;
+        }
 
         match value {
             Expr::String_ { value: s } => {
@@ -1324,8 +1595,7 @@ impl Codegen {
                     } else {
                         // Pointer field: emit a relocation.
                         // Try to resolve as a symbol reference.
-                        if let Some((sym, _, addend)) = self.classify_immediate(field_expr)
-                        {
+                        if let Some((sym, _, addend)) = self.classify_immediate(field_expr) {
                             let field_size = match field_expr {
                                 Expr::Ident { .. } => 2, // pointer is 2 bytes
                                 _ => 1,
@@ -1376,6 +1646,28 @@ impl Codegen {
 
         let end_offset = self.sections[section_idx].data.len() as u32;
         // Record symbol.
+        self.sections[section_idx].symbols.push(Symbol {
+            name: name.to_string(),
+            offset,
+            size: end_offset - offset,
+            kind: SymbolKind::Variable,
+            is_pub: false,
+        });
+        self.current_section = None;
+    }
+
+    /// Place a const whose value comes from an external file.
+    /// `#[locate(addr = ..., file = "...")]` on a naked const
+    /// declaration with no initializer value.
+    fn place_const_file(&mut self, name: &str, addr: u32, file: &str, section_idx: usize) {
+        self.current_section = Some(section_idx);
+        if !self.locate_to_addr(addr, name) {
+            self.current_section = None;
+            return;
+        }
+        let offset = self.sections[section_idx].data.len() as u32;
+        self.emit_file_bytes(file, name);
+        let end_offset = self.sections[section_idx].data.len() as u32;
         self.sections[section_idx].symbols.push(Symbol {
             name: name.to_string(),
             offset,
@@ -1568,7 +1860,10 @@ impl Codegen {
                     self.import_inline_fn(name, params, body);
                 }
                 Item::FnDecl {
-                    name, is_noreturn, body, ..
+                    name,
+                    is_noreturn,
+                    body,
+                    ..
                 } => {
                     self.import_fn(name, *is_noreturn, body);
                 }
@@ -1577,6 +1872,7 @@ impl Codegen {
                     ty,
                     value,
                     evaluated_value,
+                    attributes,
                     ..
                 } => {
                     match value {
@@ -1623,14 +1919,24 @@ impl Codegen {
                             self.struct_consts.insert(name.clone(), field_exprs);
                         }
                         _ => {
-                            let val = (*evaluated_value)
-                                .or_else(|| eval_expr(value, &self.const_values, &self.symbol_types));
+                            let val = (*evaluated_value).or_else(|| {
+                                eval_expr(value, &self.const_values, &self.symbol_types)
+                            });
                             if let Some(val) = val {
                                 self.import_const(name, val);
                             }
                         }
                     }
                     // Collect for placement in ROM.
+                    if let Some(locate) = attributes.iter().find(|a| a.path == "locate") {
+                        let addr = get_attr_u32(locate, "addr");
+                        let file = locate
+                            .args
+                            .iter()
+                            .find(|a| a.name == "file")
+                            .map(|a| a.value.trim_matches('"').to_string());
+                        self.collected_locates.insert(name.clone(), (addr, file));
+                    }
                     self.collected_consts.push((
                         name.clone(),
                         ty.clone(),
@@ -1684,18 +1990,21 @@ impl Codegen {
                     ));
                 }
                 Item::StructDecl { name, fields, .. } => {
-                    let size: usize = fields.iter().map(|f| {
-                        let base = type_size(&f.ty);
-                        if let Some(dim) = &f.array_dim {
-                            if let Some(d) = eval_const_expr_simple(dim) {
-                                base * d as usize
+                    let size: usize = fields
+                        .iter()
+                        .map(|f| {
+                            let base = type_size(&f.ty);
+                            if let Some(dim) = &f.array_dim {
+                                if let Some(d) = eval_const_expr_simple(dim) {
+                                    base * d as usize
+                                } else {
+                                    base
+                                }
                             } else {
                                 base
                             }
-                        } else {
-                            base
-                        }
-                    }).sum();
+                        })
+                        .sum();
                     self.struct_sizes.insert(name.clone(), size);
                 }
                 _ => {}
@@ -1709,7 +2018,9 @@ impl Codegen {
             Item::InlineFnDecl { params, body, .. } => {
                 self.import_inline_fn(name, params, body);
             }
-            Item::FnDecl { is_noreturn, body, .. } => {
+            Item::FnDecl {
+                is_noreturn, body, ..
+            } => {
                 self.import_fn(name, *is_noreturn, body);
             }
             Item::ConstDecl {
@@ -1911,7 +2222,7 @@ impl Codegen {
                         }
                     }
                 }
-                // Store the body so `locate_fn!` can find it (the
+                // Store the body so the placement pass can find it (the
                 // collect pass already does this, but repeat in case
                 // the fn was not seen by collect — e.g. in a nested
                 // walk).
@@ -1925,7 +2236,7 @@ impl Codegen {
                     return;
                 }
                 // When declared inside a section, compile in place.
-                // When declared outside a section, defer to `locate_fn!`.
+                // When declared outside a section, defer to a placement root.
                 if self.current_section.is_some() {
                     self.compile_fn(name, body, *is_noreturn);
                 }
@@ -2186,60 +2497,6 @@ impl Codegen {
 
     fn handle_placement(&mut self, macro_name: &str, argument: &PlacementArg) {
         match macro_name {
-            "locate_bytes" => {
-                if let PlacementArg::String_ { value } = argument {
-                    let filename = value.trim_matches('"');
-                    let base = self
-                        .current_module_dir
-                        .clone()
-                        .unwrap_or_else(|| self.source_dir.clone());
-                    let path = base.join(filename);
-                    if let Ok(data) = std::fs::read(&path) {
-                        self.emit_bytes(&data);
-                    } else {
-                        self.error(
-                            300,
-                            format!("locate_bytes: cannot read file '{}'", filename),
-                        );
-                    }
-                }
-            }
-            "locate_fn" => {
-                if let PlacementArg::Path { segments } = argument {
-                    // Look up the function in the inline_fns map.
-                    if !segments.is_empty() {
-                        let fn_name = segments.last().unwrap();
-                        // Skip if the placer already placed this fn.
-                        if self.placed_items.contains(fn_name) {
-                            return;
-                        }
-                        if let Some(inline_fn) = self.inline_fns.get(fn_name).cloned() {
-                            // Record the function symbol at the current
-                            // offset, then compile the body inline.
-                            let start_offset = if let Some(idx) = self.current_section {
-                                self.sections[idx].data.len() as u32
-                            } else {
-                                0
-                            };
-                            self.compile_fn_body(&inline_fn.body);
-                            let end_offset = if let Some(idx) = self.current_section {
-                                self.sections[idx].data.len() as u32
-                            } else {
-                                0
-                            };
-                            if let Some(idx) = self.current_section {
-                                self.sections[idx].symbols.push(Symbol {
-                                    name: fn_name.clone(),
-                                    offset: start_offset,
-                                    size: end_offset - start_offset,
-                                    kind: SymbolKind::Function,
-                                    is_pub: false,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
             "locate_str" => {
                 if let PlacementArg::String_ { value } = argument {
                     let filename = value.trim_matches('"');
@@ -2531,7 +2788,21 @@ impl Codegen {
             Some(FnStmt::ReturnStmt) => true,
             Some(FnStmt::LoopStmt { .. }) => true,
             Some(FnStmt::AsmStmt { opcode, .. }) => {
-                matches!(opcode.as_str(), "rts" | "rti" | "jmp" | "jp" | "bra")
+                matches!(
+                    opcode.as_str(),
+                    "rts"
+                        | "rti"
+                        | "jmp"
+                        | "jp"
+                        | "bra"
+                        | "ret"
+                        | "reti"
+                        | "jr"
+                        | "jr_nz"
+                        | "jr_z"
+                        | "jr_nc"
+                        | "jr_c"
+                )
             }
             _ => false,
         }
@@ -3199,7 +3470,7 @@ impl Codegen {
             } else {
                 // Non-inline fn call: emit CALL/JSR plus an Abs16
                 // relocation against the fn name. The fn body is placed
-                // exactly once (in a section block or via locate_fn!),
+                // exactly once (in a section block),
                 // so calls jump to it rather than inlining.
                 let call_opcode = match self.target.cpu.as_str() {
                     "sm83" | "z80" => 0xCD, // CALL nn
@@ -3713,6 +3984,15 @@ fn get_attr_u32(attr: &Attribute, key: &str) -> Option<u32> {
     })
 }
 
+/// Section name prefix for a section kind.
+fn kind_name(kind: SectionKind) -> &'static str {
+    match kind {
+        SectionKind::Rom => "rom",
+        SectionKind::Chr => "chr",
+        SectionKind::Ram => "ram",
+    }
+}
+
 /// Compute the byte size of a type.
 fn type_size(ty: &Type) -> usize {
     match ty {
@@ -4030,12 +4310,11 @@ mod tests {
     use super::ModuleCache;
     use crate::encoding::get_full_encoding_table;
     use op_common::ast::{
-        Access, EnumVariant, Expr, FnStmt, OffsetOp, Operand, PlacementArg, UseRoot, UseTail,
-        UseTree,
+        Access, EnumVariant, Expr, FnStmt, OffsetOp, Operand, UseRoot, UseTail, UseTree,
     };
     use op_common::TargetTriplet;
     use op_diagnostics::Severity;
-    use op_ir::{RelocKind, Section, SectionKind};
+    use op_ir::{RelocKind, Section, SectionKind, Symbol, SymbolKind};
     use std::collections::HashMap;
 
     /// Serializes tests that mutate the process environment.
@@ -4188,6 +4467,9 @@ mod tests {
             placed_items: std::collections::HashSet::new(),
             crash_handler_symbol: "__op_default_crash_handler".to_string(),
             struct_sizes: HashMap::new(),
+            pending_locate: (None, None),
+            fn_locate_pins: HashMap::new(),
+            collected_locates: HashMap::new(),
             diags: Vec::new(),
         }
     }
@@ -4880,46 +5162,111 @@ mod tests {
     }
 
     #[test]
-    fn locate_bytes_resolves_relative_to_source_dir() {
+    fn locate_attr_file_resolves_relative_to_source_dir() {
         let tmp = std::env::temp_dir().join(format!("opc-locate-src-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("blob.bin"), [0x11u8, 0x22, 0x33]).unwrap();
 
         let mut codegen = test_codegen_with_rom_section();
         codegen.source_dir = tmp.clone();
-        let arg = PlacementArg::String_ {
-            value: "\"blob.bin\"".to_string(),
-        };
-        codegen.handle_placement("locate_bytes", &arg);
+        codegen.current_section = Some(0);
+        codegen.emit_file_bytes("blob.bin", "test");
+        codegen.current_section = None;
 
         assert_eq!(codegen.sections[0].data, vec![0x11, 0x22, 0x33]);
         assert!(codegen.diags.is_empty());
     }
 
     #[test]
-    fn locate_bytes_in_std_module_resolves_relative_to_std_file() {
+    fn locate_addr_pads_gap_and_pins_symbol() {
+        use op_common::ast::{AttrArg, Attribute};
+
+        let mut codegen = test_codegen_with_rom_section();
+        codegen.current_section = Some(0);
+        codegen.pad_byte = 0xFF;
+        assert!(codegen.locate_to_addr(0x8010, "tab")); // org 0x8000 + 0x10
+        codegen.sections[0].data.extend_from_slice(&[0xAA, 0xBB]);
+        codegen.sections[0].symbols.push(Symbol {
+            name: "tab".to_string(),
+            offset: 0x10,
+            size: 2,
+            kind: SymbolKind::Variable,
+            is_pub: false,
+        });
+        codegen.current_section = None;
+
+        assert_eq!(codegen.sections[0].data[0], 0xFF);
+        assert_eq!(codegen.sections[0].data[0x10], 0xAA);
+        assert_eq!(codegen.sections[0].data[0x11], 0xBB);
+        assert_eq!(
+            codegen.sections[0]
+                .symbols
+                .iter()
+                .find(|s| s.name == "tab")
+                .unwrap()
+                .offset,
+            0x10
+        );
+        assert!(codegen.diags.is_empty());
+
+        // Overlap detection.
+        codegen.current_section = Some(0);
+        codegen.locate_to_addr(0x8010, "again");
+        assert!(codegen.diags.iter().any(|d| d.severity == Severity::Error));
+        codegen.current_section = None;
+
+        // Attribute parsing.
+        let attr = Attribute {
+            path: "locate".to_string(),
+            args: vec![
+                AttrArg {
+                    name: "addr".to_string(),
+                    value: "0x0080".to_string(),
+                    sub_args: Vec::new(),
+                },
+                AttrArg {
+                    name: "file".to_string(),
+                    value: "\"blob.bin\"".to_string(),
+                    sub_args: Vec::new(),
+                },
+            ],
+        };
+        let (addr, file) = Codegen::find_locate_attr(&[attr]).unwrap();
+        assert_eq!(addr, Some(0x80));
+        assert_eq!(file.as_deref(), Some("blob.bin"));
+    }
+
+    #[test]
+    fn locate_str_in_std_module_resolves_relative_to_std_file() {
         let tmp = std::env::temp_dir().join(format!("opc-locate-std-{}", std::process::id()));
         let std_root = tmp.join("std/src");
         std::fs::create_dir_all(&std_root).unwrap();
+        // The std module declares a pinned const. The pin at 0x8010 sits
+        // 0x10 bytes into the org-0x8000 test ROM section. Import alone
+        // (no reference) places it: the pin is a placement directive.
         std::fs::write(std_root.join("lib.op"), "pub mod res;\n").unwrap();
-        std::fs::write(std_root.join("res.op"), "locate_bytes!(\"data.bin\");\n").unwrap();
-        std::fs::write(std_root.join("data.bin"), [0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+        std::fs::write(
+            std_root.join("res.op"),
+            "#[locate(addr = 0x8010)]\nconst DATA: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];\n",
+        )
+        .unwrap();
 
         with_std_env(&std_root, || {
-            // An active section is required for placement macros in
-            // imported modules to emit. source_dir is empty, so the
-            // bytes can only come from the std module's own
-            // directory.
             let mut codegen = test_codegen_with_rom_section();
+            codegen.source_dir = std_root.clone();
             let tree = UseTree::Path {
                 root: UseRoot::Name("std".into()),
                 segments: vec!["res".to_string()],
                 tail: UseTail::Glob,
             };
             codegen.resolve_use_decl(&[tree]);
+            // The pin on the imported const drives placement without fn
+            // roots or references.
+            let items: Vec<op_common::ast::Item> = Vec::new();
+            codegen.placement_pass(&items);
 
-            assert_eq!(codegen.sections[0].data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-            assert!(codegen.diags.is_empty());
+            assert_eq!(codegen.sections[0].data.len(), 0x14);
+            assert_eq!(&codegen.sections[0].data[0x10..], &[0xDE, 0xAD, 0xBE, 0xEF]);
         });
     }
 }

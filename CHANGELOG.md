@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0]
+
+### Added
+- `opc` codegen: a `#[locate(...)]` placement attribute. Declare it on a
+  const declaration or on a fn declared inside a ROM block.
+  `#[locate(addr = 0x00A8)]` pins the item at that absolute ROM address:
+  the gap up to the pin fills with the pad byte, and the linker resolves
+  symbols and relocations to the pinned address. With a
+  `#[locate(addr = 0x00A8, file = "blob.bin")]` argument pair, the file
+  bytes emit at the pinned address. A const with only a `file` argument
+  (no `addr`) emits the file bytes at the current section offset. A pin
+  is a placement directive: the item places even when no live code
+  references it.
+- `opc` codegen: consts declared inside `#[chr]` blocks now emit into
+  that CHR section (previously only ROM blocks collected const data).
+
+### Changed
+- `opc` codegen: the SM83 (Game Boy) 0x0000-0x014F reservation now runs
+  only when the source declares a `#[gb]` header attribute. A raw-format
+  program (for example, a boot ROM) keeps full control of $0000-$014F.
+- `opc` codegen: a fn body that ends with `ret`, `reti`, `jr`, or a
+  conditional `jr` no longer receives a trailing implicit `RET`/`RTS`.
+  This removes a stray 0xC9 byte after such fns.
+
+### Removed
+- `opc`: the `locate_bytes!` and `locate_fn!` placement macros and their
+  lexer tokens. Use `#[locate(addr = 0x00A8, file = "x.bin")]` to place
+  external file bytes at an address, and declare the fn inside the
+  `#[rom]` block to place it. `locate_str!` remains: it includes Op
+  source text and is not a placement macro.
+
 ## [0.11.0]
 
 ### Changed

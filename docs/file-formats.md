@@ -417,9 +417,7 @@ lists every token type and its meaning.
 
 | Token type | Source text | Meaning |
 |------------|-------------|---------|
-| `Include_locate_bytes` | `locate_bytes!` | Read a binary file and place its bytes into the current data block |
 | `Include_locate_str` | `locate_str!` | Read a text file and parse it as Op source at the current location |
-| `Include_locate_fn` | `locate_fn!` | Place a function from another module into the current ROM block |
 
 #### Condition keywords
 
@@ -534,7 +532,7 @@ its fields.
 | `ModDecl` | `name`, `is_pub`, `body`, `resolved`, `attributes` | A module declaration. `body` is `null` for a file module. `resolved` is `null` if the sub-module file was not found. |
 | `UseDecl` | `is_pub`, `trees` | A use declaration. `trees` is an array of UseTree objects. |
 | `BlockAttribute` | `attr`, `items` | A block attribute such as `#[rom(...)] { ... }`. |
-| `Placement` | `macro_name`, `argument`, `attributes` | A placement macro call such as `locate_fn!(path::name)`. |
+| `Placement` | `macro_name`, `argument`, `attributes` | A source-inclusion macro call such as `locate_str!(path::name)`. |
 
 ### Attribute object
 

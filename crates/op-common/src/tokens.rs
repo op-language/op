@@ -126,9 +126,7 @@ pub enum TokenType {
     Macro_panic,
 
     // --- Include macros -------------------------------------------------
-    Include_locate_bytes,
     Include_locate_str,
-    Include_locate_fn,
     Include_font_load,
 
     // --- Condition keywords ---------------------------------------------
@@ -285,9 +283,7 @@ impl TokenType {
             Self::Macro_panic => "Macro_panic",
 
             // Include macros
-            Self::Include_locate_bytes => "Include_locate_bytes",
             Self::Include_locate_str => "Include_locate_str",
-            Self::Include_locate_fn => "Include_locate_fn",
             Self::Include_font_load => "Include_font_load",
 
             // Condition keywords

@@ -380,14 +380,11 @@ fn lex_compile_macros() {
 
 #[test]
 fn lex_include_macros() {
-    let stream = lex("locate_bytes!(\"font.chr\")");
-    assert_tok(&stream, 0, "Include_locate_bytes", "locate_bytes");
+    let stream = lex("locate_str!(\"module.op\")");
+    assert_tok(&stream, 0, "Include_locate_str", "locate_str");
     assert_tok(&stream, 1, "Op_lparen", "(");
-    assert_tok(&stream, 2, "STRING", "\"font.chr\"");
+    assert_tok(&stream, 2, "STRING", "\"module.op\"");
     assert_tok(&stream, 3, "Op_rparen", ")");
-
-    let stream = lex("locate_fn!(nes_code::main)");
-    assert_tok(&stream, 0, "Include_locate_fn", "locate_fn");
 }
 
 // === Comments ===============================================================

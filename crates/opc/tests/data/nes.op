@@ -154,7 +154,8 @@ pstr: pointer;
 // --- CHR data (pattern tables) ---------------------------------------------
 
 #[chr(bank = 0)] {
-    locate_bytes!("font.chr")
+    #[locate(file = "font.chr")]
+    const FONT_DATA: [u8] = [0];
 }
 
 // --- filler/padding --------------------------------------------------------

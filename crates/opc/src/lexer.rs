@@ -133,9 +133,7 @@ const COMPILE_MACROS: &[(&str, TokenType)] = &[
 
 /// Include macro names and their corresponding token types.
 const INCLUDE_MACROS: &[(&str, TokenType)] = &[
-    ("locate_bytes", TokenType::Include_locate_bytes),
     ("locate_str", TokenType::Include_locate_str),
-    ("locate_fn", TokenType::Include_locate_fn),
     ("font_load", TokenType::Include_font_load),
 ];
 
@@ -167,8 +165,7 @@ const OPCODES: &[&str] = &[
     "stop", "ldh", // SM83 register-pair pseudo-instructions
     "inc_hl", "inc_de", "inc_bc", "ld_hl", "ld_de", "ld_bc", "ld_a_hl", "ld_a_bc", "ld_a_de",
     "ld_ba", "ld_ca", "ld_da", "ld_ea", "ld_ha", "ld_la", "ld_ab", "ld_ac", "ld_ad", "ld_ae",
-    "ld_ah", "ld_al",
-    "ld_a", "ld_addr",
+    "ld_ah", "ld_al", "ld_a", "ld_addr",
 ];
 
 /// Multi-character operators, sorted longest-first for longest-match.

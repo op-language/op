@@ -758,11 +758,13 @@ block wraps variable declarations.
 ### CHR data blocks (NES)
 
 The `#[chr(bank = value)]` attribute begins a CHR data block. The block
-contains binary data from `locate_bytes!` or from byte initializers.
+contains binary data from `#[locate(file = ...)]` consts or from byte
+initializers.
 
 ```
 #[chr(bank = 0)] {
-    locate_bytes!("font.chr")
+    #[locate(file = "font.chr")]
+    const FONT: [u8] = [0];
 }
 ```
 
@@ -774,7 +776,8 @@ boundary.
 ```
 #[align(0x100)]
 #[rom(org = 0, bank = 0)] {
-    locate_bytes!("loader.bin")
+    #[locate(file = "loader.bin")]
+    const LOADER: [u8] = [0];
 }
 ```
 
@@ -1035,12 +1038,14 @@ A `use path;` declaration imports a path into the current scope.
 
 ### Binary inclusion
 
-The `locate_bytes!("file.bin")` macro reads a binary file and places its bytes
-into the current data block at the current offset.
+The `#[locate(file = "file.bin")]` attribute reads a binary file and places its
+bytes into the current data block at the current offset. Combined with `addr`,
+the attribute places the bytes at an exact address.
 
 ```
 #[chr(bank = 0)] {
-    locate_bytes!("font.chr")
+    #[locate(file = "font.chr")]
+    const FONT: [u8] = [0];
 }
 ```
 
@@ -1049,43 +1054,56 @@ into the current data block at the current offset.
 The `locate_str!("file.op")` macro reads a text file and parses it as Op
 source at the current location.
 
-### Function placement
+### The locate attribute
 
-The `locate_fn!(path::name)` macro places a function from another module
-into the current ROM block. The function body is compiled and located at the
-current section offset. An `#[interrupt(...)]` attribute on the `locate_fn!`
-call maps the function to an interrupt vector.
+The `#[locate(...)]` attribute pins an item at an absolute address inside its
+block. The attribute carries an `addr` argument, a `file` argument, or both.
+
+On a `const`, `addr` pins the data bytes at that address: the compiler fills
+the gap from the current block end to the pin address with the pad byte, and
+the linker resolves every symbol reference and relocation against the pinned
+address. On a `fn` declared inside a `#[rom]` block, `addr` pins the body
+start the same way.
+
+On a `const`, an optional `file` argument reads the binary file and emits its
+bytes instead of the const's own value bytes. The attribute form
+`#[locate(addr = 0x00A8, file = "blob.bin")]` places the file bytes at the
+exact address. A const with only a `file` argument (no `addr`) emits the file
+bytes at the current section offset.
+
+A pin is a placement directive. A pinned item places even when no live code
+references it.
+
+The compiler emits an error E300 when a pin address overlaps existing block
+data, sits below the block `org`, or pushes the block past its `maxsize`.
 
 ```
-#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
-
+#[rom(org = 0x0000, bank = 0, maxsize = 0x100)] {
     #[interrupt(reset)]
-    locate_fn!(game::main);
+    noreturn fn main() {
+        ld #lo!(LOGO)
+        ld #hi!(LOGO)
+        loop {
+            halt
+        }
+    }
 
-    #[interrupt(nmi)]
-    locate_fn!(game::nmi_handler);
-
-    #[interrupt(irq)]
-    locate_fn!(game::irq_handler);
+    #[locate(addr = 0x00A8)]
+    const LOGO: [u8; 48] = [0xCE, 0xED, /* ... */ 0x3E];
 }
 ```
 
-The `locate_fn!` macro lets the game file act as a declarative layout script.
-The game file places functions, data, and binary blobs into ROM, RAM, and CHR
-regions without containing the function bodies themselves.
-
 ### Automatic function and data placement
 
-When a source file does not use `locate_fn!` to pin every function, the
-compiler automatically places functions and data into the appropriate
-sections. The compiler builds a dependency tree from the following roots,
-in declaration order:
+The compiler automatically places unpinned functions and data into the
+appropriate sections. The compiler builds a dependency tree from the
+following roots, in declaration order:
 
 1. A non-inline `fn` with an `#[interrupt(name)]` attribute on its
    definition. The compiler places the fn in the first `#[rom]` block.
 2. A `fn` declared directly inside a `#[rom]` block. The compiler places
-   the fn at its position in the block.
-3. A `fn` pinned by a `locate_fn!` placement inside a `#[rom]` block.
+   the fn at its position in the block, or at the `#[locate(addr = ...)]`
+   pin when the fn carries one.
 
 The compiler walks each root's body, expanding inline functions, and
 records edges to called non-inline functions and referenced top-level
