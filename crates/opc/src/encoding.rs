@@ -2141,11 +2141,198 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
         opcode: 0x7C,
     },
     EncodingEntry {
+        mnemonic: "ld_ah",
+        mode: AddrMode::Implied,
+        opcode: 0x7C,
+    },
+    EncodingEntry {
         mnemonic: "ld_al",
         mode: AddrMode::Implied,
         opcode: 0x7D,
     },
+    // --- SM83 extensions -------------------------------------------------
+    //
+    // Per-register forms the core table cannot express (the generic
+    // 'ld' immediate entry only targets A). The boot ROM, font loader,
+    // and hand-written cart code need these fixed encodings.
+    // LD SP, nn
+    EncodingEntry {
+        mnemonic: "ld_sp",
+        mode: AddrMode::Immediate,
+        opcode: 0x31,
+    },
+    // LD (HL), A
+    EncodingEntry {
+        mnemonic: "ld_hl_a",
+        mode: AddrMode::Implied,
+        opcode: 0x77,
+    },
+    // LD (HL-), A
+    EncodingEntry {
+        mnemonic: "ld_hld_a",
+        mode: AddrMode::Implied,
+        opcode: 0x32,
+    },
+    // LD (C), A — write A to $FF00+C
+    EncodingEntry {
+        mnemonic: "ld_c_a",
+        mode: AddrMode::Implied,
+        opcode: 0xE2,
+    },
+    // LD r, n for B, C, D, E, H, L
+    EncodingEntry {
+        mnemonic: "ld_b",
+        mode: AddrMode::Immediate,
+        opcode: 0x06,
+    },
+    EncodingEntry {
+        mnemonic: "ld_c",
+        mode: AddrMode::Immediate,
+        opcode: 0x0E,
+    },
+    EncodingEntry {
+        mnemonic: "ld_d",
+        mode: AddrMode::Immediate,
+        opcode: 0x16,
+    },
+    EncodingEntry {
+        mnemonic: "ld_e",
+        mode: AddrMode::Immediate,
+        opcode: 0x1E,
+    },
+    EncodingEntry {
+        mnemonic: "ld_h",
+        mode: AddrMode::Immediate,
+        opcode: 0x26,
+    },
+    EncodingEntry {
+        mnemonic: "ld_l",
+        mode: AddrMode::Immediate,
+        opcode: 0x2E,
+    },
+    // INC r (A is covered by plain 'inc')
+    EncodingEntry {
+        mnemonic: "inc_b",
+        mode: AddrMode::Implied,
+        opcode: 0x04,
+    },
+    EncodingEntry {
+        mnemonic: "inc_c",
+        mode: AddrMode::Implied,
+        opcode: 0x0C,
+    },
+    EncodingEntry {
+        mnemonic: "inc_d",
+        mode: AddrMode::Implied,
+        opcode: 0x14,
+    },
+    EncodingEntry {
+        mnemonic: "inc_e",
+        mode: AddrMode::Implied,
+        opcode: 0x1C,
+    },
+    EncodingEntry {
+        mnemonic: "inc_h",
+        mode: AddrMode::Implied,
+        opcode: 0x24,
+    },
+    EncodingEntry {
+        mnemonic: "inc_l",
+        mode: AddrMode::Implied,
+        opcode: 0x2C,
+    },
+    EncodingEntry {
+        mnemonic: "inc_a",
+        mode: AddrMode::Implied,
+        opcode: 0x3C,
+    },
+    // DEC r (A is covered by plain 'dec')
+    EncodingEntry {
+        mnemonic: "dec_b",
+        mode: AddrMode::Implied,
+        opcode: 0x05,
+    },
+    EncodingEntry {
+        mnemonic: "dec_c",
+        mode: AddrMode::Implied,
+        opcode: 0x0D,
+    },
+    EncodingEntry {
+        mnemonic: "dec_d",
+        mode: AddrMode::Implied,
+        opcode: 0x15,
+    },
+    EncodingEntry {
+        mnemonic: "dec_e",
+        mode: AddrMode::Implied,
+        opcode: 0x1D,
+    },
+    EncodingEntry {
+        mnemonic: "dec_h",
+        mode: AddrMode::Implied,
+        opcode: 0x25,
+    },
+    EncodingEntry {
+        mnemonic: "dec_l",
+        mode: AddrMode::Implied,
+        opcode: 0x2D,
+    },
+    EncodingEntry {
+        mnemonic: "dec_a",
+        mode: AddrMode::Implied,
+        opcode: 0x3D,
+    },
+    // ALU A against a register.
+    EncodingEntry {
+        mnemonic: "add_a_hl",
+        mode: AddrMode::Implied,
+        opcode: 0x86,
+    },
+    EncodingEntry {
+        mnemonic: "sub_b",
+        mode: AddrMode::Implied,
+        opcode: 0x90,
+    },
+    // XOR A (A with A: clears A and flags)
+    EncodingEntry {
+        mnemonic: "xor_a",
+        mode: AddrMode::Implied,
+        opcode: 0xAF,
+    },
+    // CP (HL) — compare A with the byte at HL
+    EncodingEntry {
+        mnemonic: "cp_hl",
+        mode: AddrMode::Implied,
+        opcode: 0xBE,
+    },
+    // Conditional relative jumps (JR cc, ...)
+    EncodingEntry {
+        mnemonic: "jr_nz",
+        mode: AddrMode::Relative,
+        opcode: 0x20,
+    },
+    EncodingEntry {
+        mnemonic: "jr_z",
+        mode: AddrMode::Relative,
+        opcode: 0x28,
+    },
+    EncodingEntry {
+        mnemonic: "jr_nc",
+        mode: AddrMode::Relative,
+        opcode: 0x30,
+    },
+    EncodingEntry {
+        mnemonic: "jr_c",
+        mode: AddrMode::Relative,
+        opcode: 0x38,
+    },
 ];
+
+/// Two-byte CB-prefix encodings. A single-byte EncodingEntry cannot
+/// express the second byte, so compile_asm consults this table directly.
+pub const ENCODING_SM83_CB_PAIRS: &[(&str, [u8; 2])] =
+    &[("bit_h7", [0xCB, 0x7C]), ("rl_c", [0xCB, 0x11])];
+
 
 // --- CPU family selection ---------------------------------------------------
 
@@ -2163,6 +2350,17 @@ pub fn get_encoding_table(cpu: &str) -> &'static [EncodingEntry] {
         "sm83" => ENCODING_SM83,
         _ => &[],
     }
+}
+
+/// Look up a two-byte CB-prefix encoding: returns the byte pair.
+pub fn lookup_cb_pair(mnemonic: &str) -> Option<&'static [u8; 2]> {
+    ENCODING_SM83_CB_PAIRS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(mnemonic))
+        .map(|(_, bytes)| {
+            // Static promo: the pairs table is const.
+            bytes
+        })
 }
 
 /// Get the full encoding table for a CPU family, including the base 6502

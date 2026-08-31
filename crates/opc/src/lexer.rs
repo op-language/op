@@ -165,7 +165,12 @@ const OPCODES: &[&str] = &[
     "stop", "ldh", // SM83 register-pair pseudo-instructions
     "inc_hl", "inc_de", "inc_bc", "ld_hl", "ld_de", "ld_bc", "ld_a_hl", "ld_a_bc", "ld_a_de",
     "ld_ba", "ld_ca", "ld_da", "ld_ea", "ld_ha", "ld_la", "ld_ab", "ld_ac", "ld_ad", "ld_ae",
-    "ld_ah", "ld_al", "ld_a", "ld_addr",
+    "ld_ah", "ld_al", "ld_a", "ld_addr", "ld_sp", "ld_hl_a", "ld_hld_a", "ld_c_a",
+    "ld_b", "ld_c", "ld_d", "ld_e", "ld_h", "ld_l",
+    "inc_b", "inc_c", "inc_d", "inc_e", "inc_h", "inc_l", "inc_a",
+    "dec_b", "dec_c", "dec_d", "dec_e", "dec_h", "dec_l", "dec_a",
+    "add_a_hl", "sub_b", "xor_a", "bit_h7", "rl_c", "cp_hl",
+    "jr_nz", "jr_z", "jr_nc", "jr_c",
 ];
 
 /// Multi-character operators, sorted longest-first for longest-match.

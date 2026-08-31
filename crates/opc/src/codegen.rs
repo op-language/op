@@ -204,6 +204,7 @@ fn build_codegen(
         struct_sizes: HashMap::new(),
         pending_locate: (None, None),
         fn_locate_pins: HashMap::new(),
+        noreturn_fns: std::collections::HashSet::new(),
         collected_locates: HashMap::new(),
         diags: Vec::new(),
     }
@@ -376,6 +377,10 @@ struct Codegen {
     /// declarations during the placement pass and consumed by
     /// `place_const`.
     pending_locate: (Option<u32>, Option<String>),
+    /// `noreturn` fns keyed by name. The placement pass compiles via
+    /// `compile_fn(..., is_noreturn)`; this map carries the flag from the
+    /// declaration to the compile call.
+    noreturn_fns: std::collections::HashSet<String>,
     /// `#[locate(addr = ...)]` pins for in-block fns keyed by fn name.
     /// The pin moves the fn body start to the absolute address. Consumed
     /// in `place_fn_tree` right before the fn compiles.
@@ -571,7 +576,15 @@ impl Codegen {
             Item::BlockAttribute { items, .. } => {
                 self.collect_module_items(items);
             }
-            Item::FnDecl { name, body, .. } => {
+            Item::FnDecl {
+                name,
+                is_noreturn,
+                body,
+                ..
+            } => {
+                if *is_noreturn {
+                    self.noreturn_fns.insert(name.clone());
+                }
                 self.inline_fns.insert(
                     name.clone(),
                     InlineFn {
@@ -772,18 +785,129 @@ impl Codegen {
             }
         }
 
-        // DFS placement from each root.
-        for root in &roots {
-            let section_idx = root.section_idx.or(first_rom);
-            if let Some(idx) = section_idx {
-                self.place_fn_tree(
-                    &root.name,
-                    idx,
-                    &mut placed_fns,
-                    &mut called_inline_fns,
-                    &mut referenced_data,
-                    &mut referenced_enums,
-                );
+        // Walk items in declaration order. Fns with a pin place at their
+        // pin; pinned consts emit at their pin; this lets data sit between
+        // two code regions exactly as the source declares. Unpinned fn
+        // roots ALSO place here in declaration order, so plain code lands
+        // ahead of later pinned items in source order. Unpinned consts
+        // defer to the loop after this walk (reference-driven).
+        for item in items {
+            match item {
+                Item::FnDecl { name, .. } => {
+                    if placed_fns.contains(name) {
+                        continue;
+                    }
+                    let pinned = self.fn_locate_pins.contains_key(name);
+                    let is_root = roots.iter().any(|r| &r.name == name);
+                    if pinned || is_root {
+                        let root = roots.iter().find(|r| &r.name == name);
+                        let idx = root.and_then(|r| r.section_idx).or(first_rom);
+                        if let Some(idx) = idx {
+                            self.place_fn_tree(
+                                name,
+                                idx,
+                                &mut placed_fns,
+                                &mut called_inline_fns,
+                                &mut referenced_data,
+                                &mut referenced_enums,
+                            );
+                        }
+                    }
+                }
+                Item::ConstDecl { name, ty, value, evaluated_value, attributes, .. } => {
+                    if self.placed_items.contains(name) {
+                        continue;
+                    }
+                    let (locate_addr, locate_file) =
+                        Self::find_locate_attr(attributes).unwrap_or((None, None));
+                    if locate_addr.is_none() && locate_file.is_none() {
+                        continue;
+                    }
+                    if let Some(rom_idx) = first_rom
+                    {
+                        if let (Some(addr), Some(file)) = (locate_addr, locate_file.clone()) {
+                            self.place_const_file(name, addr, &file, rom_idx);
+                            self.placed_items.insert(name.clone());
+                            continue;
+                        }
+                        if locate_addr.is_some() || locate_file.is_some() {
+                            self.pending_locate = (locate_addr, locate_file.clone());
+                        }
+                        self.place_const(name, ty, value, *evaluated_value, rom_idx);
+                        self.pending_locate = (None, None);
+                        self.placed_items.insert(name.clone());
+                    }
+                }
+                Item::BlockAttribute { items: block_items, attr, .. }
+                    if attr.path == "rom" || attr.path == "chr" =>
+                {
+                    let kind = if attr.path == "rom" {
+                        SectionKind::Rom
+                    } else {
+                        SectionKind::Chr
+                    };
+                    let bank = get_attr_u32(attr, "bank").unwrap_or(0);
+                    let sec_name = format!("{}_bank{}", kind_name(kind), bank);
+                    let sec_idx = self.sections.iter().position(|s| s.name == sec_name);
+                    for bi in block_items {
+                        match bi {
+                            Item::FnDecl { name, .. } => {
+                                if placed_fns.contains(name) {
+                                    continue;
+                                }
+                                let pinned = self.fn_locate_pins.contains_key(name);
+                                let is_root = roots.iter().any(|r| &r.name == name);
+                                if pinned || is_root {
+                                    if let Some(idx) = sec_idx {
+                                        self.place_fn_tree(
+                                            name,
+                                            idx,
+                                            &mut placed_fns,
+                                            &mut called_inline_fns,
+                                            &mut referenced_data,
+                                            &mut referenced_enums,
+                                        );
+                                    }
+                                }
+                            }
+                            Item::ConstDecl { name, ty, value, evaluated_value, attributes, .. } => {
+                                if self.placed_items.contains(name) {
+                                    continue;
+                                }
+                                let (locate_addr, locate_file) =
+                                    Self::find_locate_attr(attributes)
+                                        .unwrap_or((None, None));
+                                if locate_addr.is_none() && locate_file.is_none() {
+                                    continue;
+                                }
+                                if let Some(rom_idx) = sec_idx.or(first_rom) {
+                                    if let (Some(addr), Some(file)) =
+                                        (locate_addr, locate_file.clone())
+                                    {
+                                        self.place_const_file(name, addr, &file, rom_idx);
+                                        self.placed_items.insert(name.clone());
+                                        continue;
+                                    }
+                                    if locate_addr.is_some() || locate_file.is_some() {
+                                        self.pending_locate =
+                                            (locate_addr, locate_file.clone());
+                                    }
+                                    self.place_const(
+                                        name,
+                                        ty,
+                                        value,
+                                        *evaluated_value,
+                                        rom_idx,
+                                    );
+                                    self.pending_locate = (None, None);
+                                    self.placed_items.insert(name.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1100,7 +1224,8 @@ impl Codegen {
                 return;
             }
         }
-        self.compile_fn(fn_name, &inline_fn.body, false);
+        let is_noreturn = self.noreturn_fns.contains(fn_name);
+        self.compile_fn(fn_name, &inline_fn.body, is_noreturn);
         self.current_section = None;
         self.fn_locate_pins.remove(fn_name);
         self.placed_items.insert(fn_name.to_string());
@@ -2078,7 +2203,10 @@ impl Codegen {
     /// on collision. Its body is placed exactly once (in the first ROM
     /// section) when the function is reachable from a placement root;
     /// calls emit CALL nn against the function symbol.
-    fn import_fn(&mut self, name: &str, _is_noreturn: bool, body: &[FnStmt]) {
+    fn import_fn(&mut self, name: &str, is_noreturn: bool, body: &[FnStmt]) {
+        if is_noreturn {
+            self.noreturn_fns.insert(name.to_string());
+        }
         if self.inline_fns.contains_key(name) {
             self.warning(
                 304,
@@ -2231,6 +2359,9 @@ impl Codegen {
                     body: body.clone(),
                     is_inline: false,
                 });
+                if *is_noreturn {
+                    self.noreturn_fns.insert(name.clone());
+                }
                 // Skip compilation if the placer already placed this fn.
                 if self.placed_items.contains(name) {
                     return;
@@ -2992,6 +3123,15 @@ impl Codegen {
     fn compile_asm(&mut self, opcode: &str, operands: &[Operand]) {
         // Handle implied/accumulator mode (no operands).
         if operands.is_empty() {
+            // SM83 CB-prefix pairs (e.g. BIT 7,H = CB 7C) are two bytes.
+            if self.target.cpu == "sm83" || self.target.cpu == "z80" {
+                if let Some(pair) = crate::encoding::lookup_cb_pair(opcode) {
+                    for b in pair {
+                        self.emit_byte(*b);
+                    }
+                    return;
+                }
+            }
             if let Some(op_byte) = self.lookup(opcode, AddrMode::Implied) {
                 self.emit_byte(op_byte);
                 return;
@@ -3014,7 +3154,8 @@ impl Codegen {
                     let val = eval_expr(value, &self.const_values, &self.symbol_types);
                     // SM83 16-bit register pair loads (LD HL/DE/BC, nn)
                     // use a 2-byte immediate, not 1-byte.
-                    let is_16bit_imm = matches!(opcode, "ld_hl" | "ld_de" | "ld_bc");
+                    let is_16bit_imm =
+                        matches!(opcode, "ld_hl" | "ld_de" | "ld_bc" | "ld_sp");
                     match val {
                         Some(v) => {
                             if is_16bit_imm {
@@ -4469,6 +4610,7 @@ mod tests {
             struct_sizes: HashMap::new(),
             pending_locate: (None, None),
             fn_locate_pins: HashMap::new(),
+            noreturn_fns: std::collections::HashSet::new(),
             collected_locates: HashMap::new(),
             diags: Vec::new(),
         }
