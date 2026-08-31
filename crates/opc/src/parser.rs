@@ -555,6 +555,12 @@ impl Parser {
                     // pub fn is public
                     item
                 }
+                // `pub` may precede fn prefix keywords: `pub noreturn fn`.
+                "noreturn" => self.parse_fn_decl(true, attrs),
+                "inline" => self.parse_inline_fn_decl(attrs),
+                // `pub` may also prefix a const or volatile var.
+                "const" => self.parse_const_decl(attrs),
+                "volatile" => self.parse_var_decl(attrs),
                 _ => {
                     self.error(201, format!("unexpected keyword after 'pub': {}", kw));
                     self.advance();
