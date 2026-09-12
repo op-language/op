@@ -1101,6 +1101,186 @@ pub const ENCODING_VL65NC02: &[EncodingEntry] = &[
     },
 ];
 
+// --- W65C02 additional opcodes ---------------------------------------------
+
+/// The Rockwell bit-manipulation opcodes and the WDC low-power modes
+/// that the WDC W65C02S adds to the 65SC02 core. The bit number is part
+/// of the mnemonic (RMB0-RMB7, SMB0-SMB7, BBR0-BBR7, BBS0-BBS7).
+/// BBR and BBS are 3-byte instructions: opcode, zero-page address, and
+/// a relative branch offset.
+pub const ENCODING_W65C02: &[EncodingEntry] = &[
+    EncodingEntry {
+        mnemonic: "rmb0",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x07,
+    },
+    EncodingEntry {
+        mnemonic: "rmb1",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x17,
+    },
+    EncodingEntry {
+        mnemonic: "rmb2",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x27,
+    },
+    EncodingEntry {
+        mnemonic: "rmb3",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x37,
+    },
+    EncodingEntry {
+        mnemonic: "rmb4",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x47,
+    },
+    EncodingEntry {
+        mnemonic: "rmb5",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x57,
+    },
+    EncodingEntry {
+        mnemonic: "rmb6",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x67,
+    },
+    EncodingEntry {
+        mnemonic: "rmb7",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x77,
+    },
+    EncodingEntry {
+        mnemonic: "smb0",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x87,
+    },
+    EncodingEntry {
+        mnemonic: "smb1",
+        mode: AddrMode::ZeroPage,
+        opcode: 0x97,
+    },
+    EncodingEntry {
+        mnemonic: "smb2",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xA7,
+    },
+    EncodingEntry {
+        mnemonic: "smb3",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xB7,
+    },
+    EncodingEntry {
+        mnemonic: "smb4",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xC7,
+    },
+    EncodingEntry {
+        mnemonic: "smb5",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xD7,
+    },
+    EncodingEntry {
+        mnemonic: "smb6",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xE7,
+    },
+    EncodingEntry {
+        mnemonic: "smb7",
+        mode: AddrMode::ZeroPage,
+        opcode: 0xF7,
+    },
+    EncodingEntry {
+        mnemonic: "bbr0",
+        mode: AddrMode::Relative,
+        opcode: 0x0F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr1",
+        mode: AddrMode::Relative,
+        opcode: 0x1F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr2",
+        mode: AddrMode::Relative,
+        opcode: 0x2F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr3",
+        mode: AddrMode::Relative,
+        opcode: 0x3F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr4",
+        mode: AddrMode::Relative,
+        opcode: 0x4F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr5",
+        mode: AddrMode::Relative,
+        opcode: 0x5F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr6",
+        mode: AddrMode::Relative,
+        opcode: 0x6F,
+    },
+    EncodingEntry {
+        mnemonic: "bbr7",
+        mode: AddrMode::Relative,
+        opcode: 0x7F,
+    },
+    EncodingEntry {
+        mnemonic: "bbs0",
+        mode: AddrMode::Relative,
+        opcode: 0x8F,
+    },
+    EncodingEntry {
+        mnemonic: "bbs1",
+        mode: AddrMode::Relative,
+        opcode: 0x9F,
+    },
+    EncodingEntry {
+        mnemonic: "bbs2",
+        mode: AddrMode::Relative,
+        opcode: 0xAF,
+    },
+    EncodingEntry {
+        mnemonic: "bbs3",
+        mode: AddrMode::Relative,
+        opcode: 0xBF,
+    },
+    EncodingEntry {
+        mnemonic: "bbs4",
+        mode: AddrMode::Relative,
+        opcode: 0xCF,
+    },
+    EncodingEntry {
+        mnemonic: "bbs5",
+        mode: AddrMode::Relative,
+        opcode: 0xDF,
+    },
+    EncodingEntry {
+        mnemonic: "bbs6",
+        mode: AddrMode::Relative,
+        opcode: 0xEF,
+    },
+    EncodingEntry {
+        mnemonic: "bbs7",
+        mode: AddrMode::Relative,
+        opcode: 0xFF,
+    },
+    EncodingEntry {
+        mnemonic: "wai",
+        mode: AddrMode::Implied,
+        opcode: 0xCB,
+    },
+    EncodingEntry {
+        mnemonic: "stp",
+        mode: AddrMode::Implied,
+        opcode: 0xDB,
+    },
+];
+
 // --- 65C816 additional opcodes ---------------------------------------------
 
 pub const ENCODING_65C816: &[EncodingEntry] = &[
@@ -2347,6 +2527,7 @@ pub fn get_encoding_table(cpu: &str) -> &'static [EncodingEntry] {
         "rp2A03" => ENCODING_6502,
         "rp2A07" => ENCODING_6502,
         "vl65NC02" => ENCODING_VL65NC02,
+        "w65c02" => ENCODING_W65C02,
         "sm83" => ENCODING_SM83,
         _ => &[],
     }
@@ -2395,6 +2576,11 @@ pub fn get_full_encoding_table(cpu: &str) -> Vec<&'static EncodingEntry> {
         "vl65NC02" => {
             table.extend(ENCODING_6502.iter());
             table.extend(ENCODING_VL65NC02.iter());
+        }
+        "w65c02" => {
+            table.extend(ENCODING_6502.iter());
+            table.extend(ENCODING_65SC02.iter());
+            table.extend(ENCODING_W65C02.iter());
         }
         "sm83" => {
             table.extend(ENCODING_SM83.iter());

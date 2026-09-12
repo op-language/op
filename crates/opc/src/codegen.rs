@@ -3145,6 +3145,49 @@ impl Codegen {
             return;
         }
 
+        // Rockwell bit branches (BBR0-BBR7, BBS0-BBS7 on the W65C02S)
+        // take a zero-page address and a label: opcode byte, zero-page
+        // byte, relative offset byte. The encoding table lists them
+        // under the Relative mode, so a memory operand followed by a
+        // label reference selects this three-byte form.
+        if operands.len() == 2 {
+            if let (Operand::MemoryOperand { expr, .. }, Operand::LabelRef { name }) =
+                (&operands[0], &operands[1])
+            {
+                if let Some(op_byte) = self.lookup(opcode, AddrMode::Relative) {
+                    self.emit_byte(op_byte);
+                    let val = eval_expr(expr, &self.const_values, &self.symbol_types);
+                    match val {
+                        Some(v) => {
+                            self.emit_byte((v & 0xFF) as u8);
+                        }
+                        None => {
+                            // Symbol reference: placeholder byte plus an
+                            // Abs8 relocation, matching the zero-page
+                            // path of compile_memory_operand.
+                            self.emit_byte(0);
+                            let addend =
+                                selector_addend(expr, &self.const_values, &self.symbol_types);
+                            match expr_to_symbol(expr) {
+                                Some(sym) => {
+                                    self.add_relocation(1, RelocKind::Abs8, &sym, addend);
+                                }
+                                None => {
+                                    self.error(
+                                        305,
+                                        "address operand is neither a constant nor a symbol",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.emit_byte(0); // placeholder branch offset
+                    self.add_relocation(1, RelocKind::Branch8, name, 0);
+                    return;
+                }
+            }
+        }
+
         let operand = &operands[0];
 
         match operand {

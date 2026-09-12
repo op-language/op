@@ -138,8 +138,8 @@ const INCLUDE_MACROS: &[(&str, TokenType)] = &[
 ];
 
 /// All CPU opcode mnemonics in lowercase. The lexer matches opcodes
-/// case-insensitively. This includes the 6502, 65SC02, 65C816, 68000,
-/// Z80, and LR35902 CPU families.
+/// case-insensitively. This includes the 6502, 65SC02, W65C02, 65C816,
+/// 68000, Z80, and LR35902 CPU families.
 const OPCODES: &[&str] = &[
     // 6502
     "adc", "and", "asl", "bcc", "bcs", "beq", "bit", "bmi", "bne", "bpl", "brk", "bvc", "bvs",
@@ -149,7 +149,12 @@ const OPCODES: &[&str] = &[
     "tsx", "txa", "txs", "tya", // 6502 undocumented
     "alr", "anc", "ane", "arr", "dcp", "isc", "las", "lax", "lxa", "rla", "rra", "sax", "sha",
     "shx", "shy", "slo", "sre", "tas", "usbc", // 65SC02
-    "bra", "phx", "phy", "plx", "ply", "stz", "tsb", "trb", "ina", "dea", // 65C816
+    // W65C02 Rockwell bit ops (wai and stp are already listed with the
+    // 65C816 group below; the W65C02S shares them)
+    "bra", "phx", "phy", "plx", "ply", "stz", "tsb", "trb", "ina", "dea", "rmb0", "rmb1", "rmb2",
+    "rmb3", "rmb4", "rmb5", "rmb6", "rmb7", "smb0", "smb1", "smb2", "smb3", "smb4", "smb5", "smb6",
+    "smb7", "bbr0", "bbr1", "bbr2", "bbr3", "bbr4", "bbr5", "bbr6", "bbr7", "bbs0", "bbs1", "bbs2",
+    "bbs3", "bbs4", "bbs5", "bbs6", "bbs7", // 65C816
     "rep", "sep", "xba", "xce", "tcd", "tdc", "tcs", "tsc", "txy", "tyx", "mvn", "mvp", "pea",
     "pei", "per", "jml", "jsl", "rtl", "cop", "wai", "stp", // 68000
     "move", "moveq", "movem", "lea", "clr", "not", "or", "eor", "add", "adda", "addi", "addq",
