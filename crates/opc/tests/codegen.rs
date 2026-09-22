@@ -1037,6 +1037,68 @@ fn w65c02_bbs0_branches_to_label() {
     assert_eq!(rom.data[4], 0x60); // RTS at the 'skip label
 }
 
+// === W65C02 Commander X16 vectors and cartridge placement ===================
+
+#[test]
+fn vector_address_w65c02() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("w65c02", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("w65c02", "nmi"), Some(0xFFFA));
+    assert_eq!(interrupt_vector_address("w65c02", "irq"), Some(0xFFF8));
+    // The W65C02S has no other vector names.
+    assert_eq!(interrupt_vector_address("w65c02", "vblank"), None);
+}
+
+#[test]
+fn vector_encoding_w65c02_is_pointer2() {
+    use op_ir::VectorEncoding;
+    use opc::codegen::vector_encoding_for;
+    // The W65C02S uses the 6502-family 2-byte little-endian vector
+    // entries, which is the encoding_for default.
+    assert_eq!(vector_encoding_for("w65c02"), VectorEncoding::Pointer2);
+}
+
+#[test]
+fn w65c02_crt_reservation_places_entry_at_offset_4() {
+    let obj = compile_w65c02(
+        "#[crt(name = \"TEST\")]
+        #[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { nop } }",
+    );
+    let rom = obj
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom && s.bank == 32);
+    let rom = rom.unwrap();
+    // The first 4 bytes hold the cartridge boot signature written at
+    // emit time; code starts at offset 4 ($C004).
+    let main_sym = rom.symbols.iter().find(|s| s.name == "main");
+    assert!(
+        main_sym.is_some(),
+        "main symbol not found: {:?}",
+        rom.symbols
+    );
+    assert_eq!(main_sym.unwrap().offset, 4);
+    assert_eq!(rom.data[0], 0x00);
+    assert_eq!(rom.data[4], 0xEA); // the fn body: nop
+    assert_eq!(rom.data[5], 0x60); // implicit RTS
+}
+
+#[test]
+fn w65c02_no_crt_header_starts_at_offset_0() {
+    let obj =
+        compile_w65c02("#[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { nop } }");
+    let rom = obj
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom && s.bank == 32);
+    let rom = rom.unwrap();
+    // Without a #[crt] header the program keeps full control of the
+    // section start (a PRG program).
+    let main_sym = rom.symbols.iter().find(|s| s.name == "main");
+    assert!(main_sym.is_some());
+    assert_eq!(main_sym.unwrap().offset, 0);
+}
+
 // === Phase 0: array const placement ========================================
 
 #[test]

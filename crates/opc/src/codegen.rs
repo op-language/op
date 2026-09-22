@@ -643,7 +643,7 @@ impl Codegen {
     /// into `self.header`.
     fn capture_header(&mut self, attr: &Attribute) {
         match attr.path.as_str() {
-            "ines" | "gb" | "lnx" | "snes" | "sega" | "sms" | "a78" => {
+            "ines" | "gb" | "lnx" | "snes" | "sega" | "sms" | "a78" | "crt" => {
                 let format = attr.path.as_str();
                 let fields: Vec<(String, String)> = attr
                     .args
@@ -664,6 +664,13 @@ impl Codegen {
     /// writes both depend on it.
     fn header_is_gb(&self) -> bool {
         matches!(&self.header, Some(h) if h.format == "gb")
+    }
+
+    /// Return true when the source declares a `#[crt(...)]` header
+    /// attribute. The W65C02 (Commander X16) cartridge signature
+    /// reservation and the emit-time header writes both depend on it.
+    fn header_is_crt(&self) -> bool {
+        matches!(&self.header, Some(h) if h.format == "crt")
     }
 
     /// Create a single section from a block attribute (rom/ram/chr).
@@ -781,6 +788,27 @@ impl Codegen {
                 let section = &mut self.sections[idx];
                 if section.org == 0 && section.data.len() < 0x0150 {
                     section.data.resize(0x0150, 0);
+                }
+            }
+        }
+
+        // W65C02 (Commander X16): reserve the first 4 bytes of the bank-32
+        // ROM section (org 0xC000) for the cartridge boot signature. The
+        // X16 KERNAL checks $C000-$C003 of bank 32 for the "CX16" signature
+        // and enters the cartridge at $C004, so code must start at offset 4
+        // and must not clobber the signature bytes. The output stage
+        // (emit_crt) writes the signature into this gap at emit time. The
+        // reservation runs only when the source declares a `#[crt]` header;
+        // a PRG program keeps full control of the section start.
+        if self.target.cpu == "w65c02" && self.header_is_crt() {
+            if let Some(idx) = self
+                .sections
+                .iter()
+                .position(|s| s.kind == SectionKind::Rom && s.bank == 32 && s.org == 0xC000)
+            {
+                let section = &mut self.sections[idx];
+                if section.data.len() < 4 {
+                    section.data.resize(4, 0);
                 }
             }
         }
@@ -2571,6 +2599,18 @@ impl Codegen {
                     });
                     return;
                 }
+                "crt" => {
+                    let fields: Vec<(String, String)> = attr
+                        .args
+                        .iter()
+                        .map(|a| (a.name.clone(), a.value.trim_matches('"').to_string()))
+                        .collect();
+                    self.header = Some(op_ir::HeaderFields {
+                        format: "crt".to_string(),
+                        fields,
+                    });
+                    return;
+                }
                 "setpad" => {
                     if let Some(arg) = attr.args.first() {
                         let val = arg.value.trim_matches('"');
@@ -4073,12 +4113,14 @@ impl Codegen {
 /// Returns the address where the linker should write the vector entry.
 pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> {
     match cpu {
-        "mos6502" | "mos65sc02" | "rp2A03" | "rp2A07" | "vl65NC02" => match interrupt_name {
-            "reset" => Some(0xFFFC),
-            "nmi" => Some(0xFFFA),
-            "irq" => Some(0xFFF8),
-            _ => None,
-        },
+        "mos6502" | "mos65sc02" | "w65c02" | "rp2A03" | "rp2A07" | "vl65NC02" => {
+            match interrupt_name {
+                "reset" => Some(0xFFFC),
+                "nmi" => Some(0xFFFA),
+                "irq" => Some(0xFFF8),
+                _ => None,
+            }
+        }
         "wdc65c816" => match interrupt_name {
             "reset" => Some(0xFFFC),
             "nmi" => Some(0xFFEA),
