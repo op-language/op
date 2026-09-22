@@ -512,7 +512,7 @@ fn emit_snes(obj: &ObjectFile) -> Vec<u8> {
 /// Compute the SNES checksum and its inverse.
 fn snes_checksum(rom: &[u8]) -> (u16, u16) {
     let mut sum: u16 = 0;
-    for chunk in rom.chunks_exact(2) {
+    for chunk in rom.as_chunks::<2>().0 {
         let word = (chunk[0] as u16) | ((chunk[1] as u16) << 8);
         sum = sum.wrapping_add(word);
     }

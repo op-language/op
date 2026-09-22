@@ -2513,7 +2513,6 @@ pub const ENCODING_SM83: &[EncodingEntry] = &[
 pub const ENCODING_SM83_CB_PAIRS: &[(&str, [u8; 2])] =
     &[("bit_h7", [0xCB, 0x7C]), ("rl_c", [0xCB, 0x11])];
 
-
 // --- CPU family selection ---------------------------------------------------
 
 /// Get the encoding table for a given CPU family name.

@@ -814,7 +814,14 @@ impl Codegen {
                         }
                     }
                 }
-                Item::ConstDecl { name, ty, value, evaluated_value, attributes, .. } => {
+                Item::ConstDecl {
+                    name,
+                    ty,
+                    value,
+                    evaluated_value,
+                    attributes,
+                    ..
+                } => {
                     if self.placed_items.contains(name) {
                         continue;
                     }
@@ -823,8 +830,7 @@ impl Codegen {
                     if locate_addr.is_none() && locate_file.is_none() {
                         continue;
                     }
-                    if let Some(rom_idx) = first_rom
-                    {
+                    if let Some(rom_idx) = first_rom {
                         if let (Some(addr), Some(file)) = (locate_addr, locate_file.clone()) {
                             self.place_const_file(name, addr, &file, rom_idx);
                             self.placed_items.insert(name.clone());
@@ -838,9 +844,11 @@ impl Codegen {
                         self.placed_items.insert(name.clone());
                     }
                 }
-                Item::BlockAttribute { items: block_items, attr, .. }
-                    if attr.path == "rom" || attr.path == "chr" =>
-                {
+                Item::BlockAttribute {
+                    items: block_items,
+                    attr,
+                    ..
+                } if attr.path == "rom" || attr.path == "chr" => {
                     let kind = if attr.path == "rom" {
                         SectionKind::Rom
                     } else {
@@ -870,13 +878,19 @@ impl Codegen {
                                     }
                                 }
                             }
-                            Item::ConstDecl { name, ty, value, evaluated_value, attributes, .. } => {
+                            Item::ConstDecl {
+                                name,
+                                ty,
+                                value,
+                                evaluated_value,
+                                attributes,
+                                ..
+                            } => {
                                 if self.placed_items.contains(name) {
                                     continue;
                                 }
                                 let (locate_addr, locate_file) =
-                                    Self::find_locate_attr(attributes)
-                                        .unwrap_or((None, None));
+                                    Self::find_locate_attr(attributes).unwrap_or((None, None));
                                 if locate_addr.is_none() && locate_file.is_none() {
                                     continue;
                                 }
@@ -889,16 +903,9 @@ impl Codegen {
                                         continue;
                                     }
                                     if locate_addr.is_some() || locate_file.is_some() {
-                                        self.pending_locate =
-                                            (locate_addr, locate_file.clone());
+                                        self.pending_locate = (locate_addr, locate_file.clone());
                                     }
-                                    self.place_const(
-                                        name,
-                                        ty,
-                                        value,
-                                        *evaluated_value,
-                                        rom_idx,
-                                    );
+                                    self.place_const(name, ty, value, *evaluated_value, rom_idx);
                                     self.pending_locate = (None, None);
                                     self.placed_items.insert(name.clone());
                                 }
@@ -3197,8 +3204,7 @@ impl Codegen {
                     let val = eval_expr(value, &self.const_values, &self.symbol_types);
                     // SM83 16-bit register pair loads (LD HL/DE/BC, nn)
                     // use a 2-byte immediate, not 1-byte.
-                    let is_16bit_imm =
-                        matches!(opcode, "ld_hl" | "ld_de" | "ld_bc" | "ld_sp");
+                    let is_16bit_imm = matches!(opcode, "ld_hl" | "ld_de" | "ld_bc" | "ld_sp");
                     match val {
                         Some(v) => {
                             if is_16bit_imm {
