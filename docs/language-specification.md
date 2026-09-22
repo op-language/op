@@ -833,6 +833,34 @@ fn micro_loader() {
 }
 ```
 
+### Commander X16 cartridge header
+
+The `#[crt(...)]` attribute sets the Commander X16 cartridge header fields. The
+attribute applies to the root module.
+
+```
+#[crt(
+    name = "Demo Game",
+    author = "Demo Studio",
+    copyright = "2026",
+    version = "1.0",
+)]
+mod game;
+```
+
+A source that declares `#[crt(...)]` produces a cartridge image. The compiler
+reserves `$C000-$C003` of the bank-32 ROM section for the boot signature. The
+output stage writes the `CX16` signature into the reserved bytes, and the
+X16 KERNAL enters the cartridge at `$C004`. A ROM block with
+`org = 0xC000, bank = 32` is required.
+
+A source without a `#[crt(...)]` attribute produces a PRG image (see
+`file-formats.md`). A PRG program must not declare interrupt vectors: the
+`$FFFA`-`$FFFF` vector area belongs to the system ROM, and the linker
+reports an error when a vector address falls outside every declared ROM
+section. A cartridge program may declare `nmi` and `irq` handlers when it
+declares a ROM section that contains `$FFF8`-`$FFFF`.
+
 ## Control flow
 
 ### if / else
@@ -1195,6 +1223,7 @@ The following table lists the normative triplets.
 | `mos6502-atari-5200` | MOS 6502 | Atari 5200 |
 | `mos6502-atari-7800` | MOS 6502 | Atari 7800 |
 | `vl65nc02-atari-lynx` | VLSI VL65NC02 | Atari Lynx |
+| `w65c02-commander-x16` | WDC W65C02S | Commander X16 |
 | `mos6502-commodore-64` | MOS 6502 | Commodore 64 |
 | `mos6502-nec-pcengine` | MOS 6502 | NEC PC Engine |
 | `rp2A03-nintendo-nes-ntsc` | Ricoh RP2A03 | NES NTSC |
@@ -1457,6 +1486,43 @@ register).
 The 65C816 adds absolute long, absolute long indexed X, direct page, direct
 page indirect, direct page indirect long, stack relative, stack relative
 indirect indexed Y, and block move addressing modes to the 65SC02 set.
+
+### WDC W65C02S
+
+The WDC W65C02S is the CPU in the Commander X16. It is a CMOS 65SC02 core
+with the Rockwell bit-manipulation instructions and the two WDC low-power
+modes. The opcode set and the addressing modes match the MOS 65SC02 plus the
+instructions below. The lib defines `CLOCK_HZ` as 8000000.
+
+#### Additional opcodes
+
+| Mnemonic | Operation |
+|----------|-----------|
+| RMB0-RMB7 | Reset (clear) bit n of a zero-page byte (zero page) |
+| SMB0-SMB7 | Set bit n of a zero-page byte (zero page) |
+| BBR0-BBR7 | Branch on bit n reset (zero page + relative) |
+| BBS0-BBS7 | Branch on bit n set (zero page + relative) |
+| WAI | Wait for interrupt (implied) |
+| STP | Stop processor (implied) |
+
+The bit number is part of the mnemonic. `BBR` and `BBS` are 3-byte
+instructions: an opcode byte, a zero-page address byte, and a relative
+offset byte. The zero-page address and the label are two separate operands.
+
+```
+bbs0 0x20, 'skip
+nop
+'skip: rts
+```
+
+#### Interrupts
+
+The W65C02S uses the 6502-family vector layout. The lib defines the names
+`reset` ($FFFC), `nmi` ($FFFA), and `irq` ($FFF8) for `#[interrupt(...)]`.
+
+The vectors live in the bank-0 system ROM, not in cartridge ROM. A PRG
+program must not declare interrupt vectors (see the Commander X16 cartridge
+header section). A cartridge program may declare `nmi` and `irq` handlers.
 
 ### Motorola 68000
 

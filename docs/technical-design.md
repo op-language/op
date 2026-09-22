@@ -252,6 +252,8 @@ See `file-formats.md` for the full `.opl` format specification.
 | `gb` | Game Boy, Game Boy Color | Cartridge header at offset `0x100`. |
 | `sms` | Master System, Game Gear, SG-1000 | `TMR SEGA` header at offset `0x7FF0`. |
 | `a78` | Atari 7800 | 78-byte `ATARI7800` header. |
+| `prg` | Commander X16 | 2-byte little-endian load address, then the image. |
+| `crt` | Commander X16 | 480-byte cartridge header with bank table, then 16 KB per ROM bank. |
 
 ## opc pipeline stages
 
@@ -612,6 +614,15 @@ product code, region, version, and ROM size.
 
 **Atari 7800:** 78-byte `ATARI7800` header with the cart name, mapper, region,
 and Pokey flags. ROM data follows the header.
+
+**Commander X16 PRG:** 2-byte little-endian load address, then the ROM
+sections in bank order. The load address comes from the `load` header field
+or the first ROM section's `org`.
+
+**Commander X16 CRT:** 480-byte cartridge header (magic, format version,
+name, author, copyright, program version, reserved bytes, bank table), then
+16 KB per ROM bank. The emitter writes the `CX16` boot signature at
+`$C000-$C003` of the bank-32 image.
 
 See `docs/supported-emulators.md` for the complete list of supported
 emulators, ROM formats, and debug-target configuration for each target

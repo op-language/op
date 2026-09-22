@@ -899,7 +899,7 @@ The `header` field is a JSON object with these fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `format` | string | The format name. Valid values: `ines`, `lnx`, `sega`, `snes`, `gb`, `sms`, `a78`. |
+| `format` | string | The format name. Valid values: `ines`, `lnx`, `sega`, `snes`, `gb`, `sms`, `a78`, `crt`. |
 | `fields` | array of pairs | The key-value pairs from the attribute arguments. Each pair is a two-element array of strings. |
 
 ### Post-compile and post-link differences
@@ -999,6 +999,58 @@ into the ROM data at offset `0x3FFC` (`0xFFFC - 0xC000`). The `data`
 array shows `0, 192` at that offset, which is `0xC000` in little-endian
 order. The section is padded to `maxsize` (`16384` bytes) with the
 `pad_byte` value `255`.
+
+## Final ROM image formats
+
+The file output stage writes the final image in the format that the
+target or the `--format` flag selects. The `ines`, `lnx`, `sega`, `snes`,
+`gb`, `sms`, and `a78` formats each write a fixed header, and `raw` and
+`hex` write headerless data. This section defines the two Commander X16
+formats.
+
+### Commander X16 PRG (.prg)
+
+A PRG file is the load address followed by the image bytes.
+
+| Offset | Size | Content |
+|--------|------|---------|
+| 0 | 2 | Load address, little-endian. |
+| 2 | - | Image bytes: every ROM section, in bank order. |
+
+The load address comes from the `load` header field when present, else
+from the first ROM section's `org`.
+The X16 KERNAL `LOAD` routine reads the first two bytes as the destination
+address, and the emulator enters the program at that address. A program
+with no ROM sections emits just the 2-byte header.
+
+### Commander X16 cartridge (.crt)
+
+A CRT file is a 480-byte header followed by 16 KB per ROM bank.
+
+| Offset | Size | Content |
+|--------|------|---------|
+| 0 | 16 | Magic: `CX16 CARTRIDGE\r\n`. |
+| 16 | 16 | Format version: `01.00` space-padded. The emulator rejects any other version string. |
+| 32 | 32 | Description from the `name` header field. Space-padded, truncated to 32 bytes. |
+| 64 | 32 | Author from the `author` header field. Space-padded. |
+| 96 | 32 | Copyright from the `copyright` header field. Space-padded. |
+| 128 | 32 | Program version from the `version` header field. Space-padded. |
+| 160 | 96 | Reserved zeros. |
+| 256 | 224 | Bank table. One byte per cartridge bank (banks 32-255). `0x01` marks a ROM bank that the payload carries; `0x00` marks an absent bank. |
+| 480 | - | Payload: for each flagged bank in ascending order, exactly 16 KB of bank data. |
+
+Cartridge banks are numbered from 32. A ROM section with bank N fills
+cartridge bank N. The section `org` must fall in the `$C000-$FFFF` window;
+the bytes place at `org - 0xC000` within the bank, and the rest of the bank
+fills with the `pad_byte` value. The file output stage writes the `CX16`
+boot signature into `$C000-$C003` of the bank-32 image; the codegen
+reserves those bytes so that code starts at `$C004`, which is where the
+X16 KERNAL enters a cartridge.
+
+A `.crt` build requires a ROM section with `bank = 32`. The emitter
+reports an error when the bank-32 section is missing, when a section bank
+falls outside 32-255, or when a section `org` falls outside the cartridge
+window.
 
 ## Future work
 
