@@ -38,7 +38,9 @@ struct Instruction {
 
 /// Return true when the instruction accesses a memory-mapped I/O
 /// register. On the NES, the PPU registers occupy $2000-$2007 and
-/// APU/IO registers occupy $4000-$4017. Reads and writes to these
+/// APU/IO registers occupy $4000-$4017. On the Commander X16, the
+/// whole IO page $9F00-$9FFF is register-mapped. Reads and writes to
+/// these ranges
 /// addresses have side effects and must not be removed or reordered
 /// by the peephole optimizer.
 fn is_mmio_access(_mnemonic: Option<&str>, mode: Option<&str>, operand: &[u8]) -> bool {
@@ -70,9 +72,15 @@ fn is_mmio_access(_mnemonic: Option<&str>, mode: Option<&str>, operand: &[u8]) -
         u16::from_le_bytes([operand[0], operand[1]])
     };
     // NES PPU registers: $2000-$2007. APU/IO: $4000-$4017.
+    // Commander X16 IO area: $9F00-$9FFF (VERA, VIA, YM2151, banking,
+    // emulator debug registers). Every address in the X16 IO area is a
+    // hardware or emulator register; writes must survive the dead-store
+    // and redundant-store transforms.
     // Use the mnemonic to distinguish loads (reads) from stores (writes),
-    // but treat both as volatile in this range.
-    (0x2000..=0x2007).contains(&addr) || (0x4000..=0x4017).contains(&addr)
+    // but treat both as volatile in these ranges.
+    (0x2000..=0x2007).contains(&addr)
+        || (0x4000..=0x4017).contains(&addr)
+        || (0x9F00..=0x9FFF).contains(&addr)
 }
 
 /// Run the peephole optimizer on all sections in the object file.
