@@ -5,9 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0]
+## [0.13.0]
 
 ### Added
+- `opc`: the `w65c02` CPU family for the WDC W65C02S. The encoding table
+  extends the 65SC02 core with the Rockwell bit-manipulation
+  instructions (`RMB0`-`RMB7`, `SMB0`-`SMB7`, `BBR0`-`BBR7`,
+  `BBS0`-`BBS7`) and the `WAI` and `STP` modes. The lexer knows the new
+  mnemonics.
+- `opc`: the `w65c02` CPU uses the 6502-family interrupt vector layout
+  (reset `$FFFC`, NMI `$FFFA`, IRQ `$FFF8`), and a `#[crt]`-declared
+  bank-32 ROM section reserves `$C000-$C003` for the Commander X16
+  `CX16` cartridge signature, placing cartridge code at `$C004`.
+- `opc`: the `prg` output format. The 2-byte little-endian load address
+  followed by the section data matches the Commander X16 KERNAL LOAD
+  convention. The `w65c02-commander-x16` target defaults to `prg`.
+- `opc`: the `crt` output format. The 480-byte header holds the
+  `CX16 CARTRIDGE` magic, the format version, the name, author,
+  copyright, and program-version text fields, and the 224-entry ROM
+  bank table; the payload holds 16 KB per ROM bank. The `#[crt(...)]`
+  header attribute captures the text fields.
+- `docs/language-specification.md`, `docs/technical-design.md`,
+  `docs/file-formats.md`, and `docs/supported-emulators.md` document
+  the Commander X16 target, the `prg` and `crt` formats, and x16emu.
 - `opc` codegen: a `#[locate(...)]` placement attribute. Declare it on a
   const declaration or on a fn declared inside a ROM block.
   `#[locate(addr = 0x00A8)]` pins the item at that absolute ROM address:
@@ -22,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that CHR section (previously only ROM blocks collected const data).
 
 ### Changed
+- `opc` optimizer: the whole Commander X16 IO page `$9F00-$9FFF` counts
+  as memory-mapped IO, so stores there survive the dead-store and
+  redundant-store peepholes.
 - `opc` codegen: the SM83 (Game Boy) 0x0000-0x014F reservation now runs
   only when the source declares a `#[gb]` header attribute. A raw-format
   program (for example, a boot ROM) keeps full control of $0000-$014F.
