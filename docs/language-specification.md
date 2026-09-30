@@ -926,6 +926,12 @@ do {
 The `loop` statement loops without a condition. A `return` or a jump exits
 the loop.
 
+On SM83 and Z80 targets, the compiler emits the backward jump at the end
+of the body as the 2-byte relative `JR` form when the distance fits the
+signed 8-bit range (-128..=127). When the distance does not fit, or on
+other CPU families, it emits the absolute jump form. This choice is
+silent: it does not produce a diagnostic.
+
 ```
 loop {
     wait_for(6)

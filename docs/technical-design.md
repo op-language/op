@@ -383,7 +383,7 @@ instructions:
 | `if (cond) { body } else { else_body }` | Branch-if-not-condition over body, jump past else_body, else_body follows. |
 | `while (cond) { body }` | Label at top, branch-if-not-condition past body, jump to label at end. |
 | `do { body } while (cond)` | Label at top, body, branch-if-condition to label. |
-| `loop { body }` | Label at top, body, jump to label. |
+| `loop { body }` | Label at top, body, backward JR (SM83/Z80) when the distance fits the signed 8-bit range, else the absolute jump. |
 | `switch (reg) { cases }` | Sequence of compare-and-branch chains. |
 | `return` | Return-from-subroutine instruction. |
 | `fn call()` | Jump-to-subroutine instruction. |

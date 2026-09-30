@@ -3831,12 +3831,25 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP/JP back to loop_start (absolute address = offset + org).
-        // Use the CPU-family-specific jump opcode.
-        let jmp_opcode = self.unconditional_jump_op();
-        self.emit_byte(jmp_opcode);
-        self.emit_byte((loop_abs & 0xFF) as u8);
-        self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
+        // Emit the back jump to loop_start. On SM83/Z80 the relative
+        // JR form (0x18) is 2 bytes when the backward distance fits in
+        // the signed 8-bit displacement (-128..=127); the distance is
+        // section-relative, so it does not involve the org. When the
+        // distance does not fit, or on other CPU families, fall back
+        // to the absolute CPU-family jump (absolute address =
+        // offset + org).
+        let jr_offset = loop_start as i64 - (self.current_data_len() as i64 + 2);
+        let use_relative_jr =
+            matches!(self.target.cpu.as_str(), "sm83" | "z80") && (-128..=127).contains(&jr_offset);
+        if use_relative_jr {
+            self.emit_byte(0x18); // JR
+            self.emit_byte(jr_offset as u8);
+        } else {
+            let jmp_opcode = self.unconditional_jump_op();
+            self.emit_byte(jmp_opcode);
+            self.emit_byte((loop_abs & 0xFF) as u8);
+            self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
+        }
     }
 
     fn compile_switch(&mut self, _register: &str, cases: &[SwitchCase]) {
