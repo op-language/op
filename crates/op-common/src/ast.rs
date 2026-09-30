@@ -194,7 +194,7 @@ pub enum FnStmt {
     },
     IfStmt {
         branch_hint: Option<BranchHint>,
-        condition: Condition,
+        condition: Vec<ConditionClause>,
         then_block: Vec<FnStmt>,
         else_block: Option<Vec<FnStmt>>,
     },
@@ -254,11 +254,25 @@ pub enum Operand {
 
 // --- Conditions and branch hints --------------------------------------------
 
-/// A condition in an if, while, or do-while statement.
+/// A single condition test: the condition of a `while` or `do-while`
+/// statement, or the test of one clause inside the or-chain condition
+/// of an `if` statement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Condition {
     pub modifiers: Vec<String>,
     pub keyword: String,
+}
+
+/// One clause of an or-chain condition in an `if` statement: an
+/// optional brace-delimited statement block plus one condition test.
+/// In the source, clauses are separated by the word `or`, and a chain
+/// of one clause is a plain condition. `while` and `do-while`
+/// statements keep a plain `Condition`; the parser accepts a chain
+/// in `if` conditions only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionClause {
+    pub statements: Vec<FnStmt>,
+    pub condition: Condition,
 }
 
 /// A branch distance hint.

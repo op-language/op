@@ -545,6 +545,121 @@ fn parse_if_else_stmt() {
 }
 
 #[test]
+fn parse_if_or_chain_two_clauses() {
+    // The clause separator `or` lexes as an opcode mnemonic, so the
+    // chain is recognized by token value, not by token kind.
+    let item = parse_one("fn test() { if (zero or set) { nop } }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt { condition, .. } => {
+                assert_eq!(condition.len(), 2);
+                assert!(condition[0].statements.is_empty());
+                assert!(condition[0].condition.modifiers.is_empty());
+                assert_eq!(condition[0].condition.keyword, "zero");
+                assert!(condition[1].statements.is_empty());
+                assert!(condition[1].condition.modifiers.is_empty());
+                assert_eq!(condition[1].condition.keyword, "set");
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_if_or_chain_with_brace_clause() {
+    // A clause statement block is brace-delimited and ends before its
+    // condition keyword.
+    let item = parse_one("fn test() { if (zero or { lda 0 sta PPU::CNT0 } set) { nop } }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt { condition, .. } => {
+                assert_eq!(condition.len(), 2);
+                assert!(condition[0].statements.is_empty());
+                assert_eq!(condition[0].condition.keyword, "zero");
+                assert_eq!(condition[1].statements.len(), 2);
+                assert!(condition[1].condition.modifiers.is_empty());
+                assert_eq!(condition[1].condition.keyword, "set");
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_if_or_chain_semicolon_statements() {
+    // Semicolons separate the statements of an inline brace clause.
+    let item = parse_one("fn test() { if (zero or { lda 0; sta PPU::CNT0 } set) { nop } }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt { condition, .. } => {
+                assert_eq!(condition.len(), 2);
+                assert_eq!(condition[1].statements.len(), 2);
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_if_or_chain_modifiers_per_clause() {
+    // Modifiers attach to their own clause, including `not`.
+    let item = parse_one("fn test() { if (is zero or not set) { nop } }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt { condition, .. } => {
+                assert_eq!(condition.len(), 2);
+                assert_eq!(condition[0].condition.modifiers, vec!["is".to_string()]);
+                assert_eq!(condition[0].condition.keyword, "zero");
+                assert_eq!(condition[1].condition.modifiers, vec!["not".to_string()]);
+                assert_eq!(condition[1].condition.keyword, "set");
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_if_or_chain_with_else() {
+    // The else keyword after the chain is not mistaken for a clause.
+    let item = parse_one("fn test() { if (zero or set) { lda 0 } else { lda 1 } }");
+    match item {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt {
+                condition,
+                else_block,
+                ..
+            } => {
+                assert_eq!(condition.len(), 2);
+                assert!(else_block.is_some());
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_while_and_do_while_reject_or_chains() {
+    // Or-chains are an if-only form: while and do-while keep the
+    // plain single-test condition and reject the chain separator with
+    // the same parse error as before the form existed.
+    for src in [
+        "fn test() { while (zero or set) { nop } }",
+        "fn test() { do { nop } while (zero or set) }",
+    ] {
+        let (_ast, diags) = parse_source("test.op", src, "rp2A03-nintendo-nes-ntsc", &[]);
+        assert!(
+            diags.iter().any(|d| d.code == 200),
+            "expected a parse error for an or-chain outside if: {diags:?}"
+        );
+    }
+}
+
+#[test]
 fn parse_while_stmt() {
     let item = parse_one("fn test() { while (not zero) { dex } }");
     match item {
@@ -1228,7 +1343,8 @@ fn parse_asm_sm83_set_statement() {
 
 #[test]
 fn parse_asm_sm83_set_condition_unaffected() {
-    // Condition parsing inside if statements is unchanged.
+    // Condition parsing inside if statements is unchanged; a plain
+    // condition parses as a one-clause chain.
     let (ast, _diags) = parse_source(
         "test.op",
         "fn f() { if (set) { nop } }",
@@ -1238,8 +1354,10 @@ fn parse_asm_sm83_set_condition_unaffected() {
     match &ast.root.items.first().unwrap() {
         Item::FnDecl { body, .. } => match &body[0] {
             FnStmt::IfStmt { condition, .. } => {
-                assert_eq!(condition.keyword, "set");
-                assert!(condition.modifiers.is_empty());
+                assert_eq!(condition.len(), 1);
+                assert!(condition[0].statements.is_empty());
+                assert_eq!(condition[0].condition.keyword, "set");
+                assert!(condition[0].condition.modifiers.is_empty());
             }
             _ => panic!("expected IfStmt"),
         },

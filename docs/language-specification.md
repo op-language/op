@@ -899,6 +899,23 @@ if (near set) { }
 if (far carry) { }
 ```
 
+The condition of an `if` statement may carry an or-chain of clauses. A
+clause is an optional brace-delimited statement block plus one condition
+test. The word `or` separates the clauses. The compiler runs the clauses
+in order and enters the then-block after the first true clause. Each
+clause keyword tests the flags that its own clause statements left. A
+chain with one clause is a plain condition. `while` and `do-while`
+accept only a plain condition.
+
+```
+if (zero or {
+    lda CNT
+    cmp #0x62
+} zero) {
+    ora 0x0200
+}
+```
+
 ### while
 
 The `while` statement loops while the condition is true. The condition is
@@ -2109,8 +2126,8 @@ selector       ::= IDENTIFIER ('::' IDENTIFIER)* ('.' IDENTIFIER)*
 ### Control-flow productions
 
 ```
-if_stmt        ::= 'if' '(' branch_hint? condition ')' block else_block?
-                 | 'if' '(' branch_hint? condition ')' fn_stmt else_block?
+if_stmt        ::= 'if' '(' branch_hint? if_condition ')' block else_block?
+                 | 'if' '(' branch_hint? if_condition ')' fn_stmt else_block?
 
 branch_hint    ::= 'near' | 'far'
 
@@ -2135,6 +2152,9 @@ switch_case    ::= 'case' expr block
 
 condition      ::= modifier* CONDITION_KEYWORD
 modifier       ::= 'is' | 'has' | 'no' | 'not'
+
+if_condition   ::= condition_clause ( 'or' condition_clause )*
+condition_clause ::= block? condition
 
 block          ::= '{' fn_body '}'
 

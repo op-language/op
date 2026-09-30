@@ -617,7 +617,7 @@ Each element of a `body` array is a FnStmt object with a `kind` field.
 |-------------|--------|-------------|
 | `Label` | `name`, `stmt` | A label definition. `stmt` is the FnStmt that follows the label. |
 | `AsmStmt` | `opcode`, `operands` | An assembly statement. `opcode` is the mnemonic string. `operands` is an array of Operand objects. |
-| `IfStmt` | `branch_hint`, `condition`, `then_block`, `else_block` | An if statement. `branch_hint` is `"Near"` or `"Far"` or `null`. `condition` is a Condition object. `then_block` is an array of FnStmt objects. `else_block` is an array or `null`. |
+| `IfStmt` | `branch_hint`, `condition`, `then_block`, `else_block` | An if statement. `branch_hint` is `"Near"` or `"Far"` or `null`. `condition` is an array of ConditionClause objects; a plain condition is an array with one clause. `then_block` is an array of FnStmt objects. `else_block` is an array or `null`. |
 | `WhileStmt` | `branch_hint`, `condition`, `body` | A while loop. |
 | `DoWhileStmt` | `body`, `branch_hint`, `condition` | A do-while loop. |
 | `LoopStmt` | `body` | An endless loop. |
@@ -634,6 +634,22 @@ A `Condition` object has two fields.
 |-------|------|-------------|
 | `modifiers` | array of strings | The modifier keywords (e.g. `["is"]`). |
 | `keyword` | string | The condition keyword (e.g. `"plus"`, `"carry"`). |
+
+`WhileStmt` and `DoWhileStmt` store a `Condition` object. `IfStmt`
+stores an array of ConditionClause objects.
+
+### ConditionClause object
+
+A `ConditionClause` object has two fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `statements` | array of FnStmt objects | The statements of the clause; `[]` when the clause has none. |
+| `condition` | Condition object | The condition test of the clause. |
+
+The clauses of an `IfStmt` form an or-chain: the then-block runs when
+the first clause condition becomes true. One clause is a plain
+condition.
 
 ### SwitchCase object
 

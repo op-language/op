@@ -8,9 +8,9 @@
 use anyhow::Result;
 use op_common::{
     ast::{
-        Access, AttrArg, Attribute, BinaryOp, BranchHint, Condition, EnumVariant, Expr, Field,
-        FnStmt, InitValue, Item, Module, OffsetOp, Operand, PlacementArg, SwitchCase, Type,
-        UnaryOp, UseRoot, UseTail, UseTree,
+        Access, AttrArg, Attribute, BinaryOp, BranchHint, Condition, ConditionClause, EnumVariant,
+        Expr, Field, FnStmt, InitValue, Item, Module, OffsetOp, Operand, PlacementArg, SwitchCase,
+        Type, UnaryOp, UseRoot, UseTail, UseTree,
     },
     AstFile, TargetTriplet, Token, TokenStream,
 };
@@ -1685,7 +1685,7 @@ impl Parser {
         self.advance(); // 'if'
         let _ = self.expect("Op_lparen"); // (
         let branch_hint = self.parse_branch_hint();
-        let condition = self.parse_condition();
+        let condition = self.parse_if_condition();
         let _ = self.expect("Op_rparen"); // )
 
         let then_block = self.parse_block_or_stmt();
@@ -1807,6 +1807,10 @@ impl Parser {
         }
     }
 
+    /// Parse the plain single-test condition form used by `while` and
+    /// `do-while`: optional modifiers plus one condition keyword. An
+    /// `if` statement parses the or-chain form in `parse_if_condition`
+    /// instead.
     fn parse_condition(&mut self) -> Condition {
         let mut modifiers = Vec::new();
         while self.check_mod() {
@@ -1825,6 +1829,40 @@ impl Parser {
             String::new()
         };
         Condition { modifiers, keyword }
+    }
+
+    /// Parse the condition of an `if` statement as an or-chain of
+    /// clauses. Each clause is an optional brace-delimited statement
+    /// block plus the plain modifier+keyword condition test, and the
+    /// word `or` separates clauses. The token `or` lexes as an opcode
+    /// mnemonic (the 68000 `OR`), so the separator is recognized by
+    /// token value, not token kind; after a condition keyword the word
+    /// `or` was a parse error before, so this form converts only
+    /// previously invalid programs. A chain in a `while` or `do-while`
+    /// condition keeps the plain form and stays a parse error there.
+    fn parse_if_condition(&mut self) -> Vec<ConditionClause> {
+        let mut clauses = Vec::new();
+        loop {
+            // Clause statements live in required braces when present,
+            // so the block ends before the condition keyword and the
+            // keyword and its modifiers are parsed by parse_condition
+            // as usual.
+            let statements = if self.check("Op_lbrace") {
+                self.parse_fn_body()
+            } else {
+                Vec::new()
+            };
+            let condition = self.parse_condition();
+            clauses.push(ConditionClause {
+                statements,
+                condition,
+            });
+            if self.check_value("or") {
+                self.advance(); // 'or': opcode-kind token, matched by value
+            } else {
+                return clauses;
+            }
+        }
     }
 
     /// Parse a block `{ stmts }` or a single statement.
