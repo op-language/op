@@ -1357,6 +1357,14 @@ impl Parser {
             return Some(self.parse_switch_stmt());
         }
 
+        // Assembly statement headed by `set`. The lexer classifies the
+        // keyword `set` as a condition token; in statement position it
+        // is the SM83 bit-set mnemonic. Condition parsing in if, while,
+        // and do statements is unaffected.
+        if kind == "Cond_set" {
+            return Some(self.parse_asm_stmt());
+        }
+
         // Assembly statement: OPCODE
         if kind == "OPCODE" {
             return Some(self.parse_asm_stmt());
@@ -1428,6 +1436,14 @@ impl Parser {
                     break;
                 }
             }
+            // Comma separator between operands of a multi-operand
+            // statement. A comma that continues an indexed operand was
+            // already consumed by parse_operand; this one starts the
+            // next operand.
+            if kind == "Op_comma" {
+                self.advance();
+                continue;
+            }
             if let Some(operand) = self.parse_operand() {
                 operands.push(operand);
             } else {
@@ -1477,6 +1493,28 @@ impl Parser {
         // Parenthesized memory operand: (expr) [, index_reg]
         if self.check("Op_lparen") {
             self.advance(); // (
+
+            // Bounded direct-memory spellings: (hl+) and (hl-) name the
+            // SM83 auto-increment and auto-decrement forms. An `hl`
+            // identifier followed directly by + or - and then the
+            // closing paren cannot otherwise parse as an expression.
+            let hl_inc_dec = if mode_prefix.is_none() {
+                Self::peek_hl_inc_dec(&self.tokens, self.pos)
+            } else {
+                None
+            };
+            if let Some(name) = hl_inc_dec {
+                self.advance(); // hl
+                self.advance(); // + or -
+                let _ = self.expect("Op_rparen");
+                return Some(Operand::MemoryOperand {
+                    mode_prefix: None,
+                    expr: Expr::Ident { name },
+                    index_reg: None,
+                    is_indirect: true,
+                });
+            }
+
             let expr = self.parse_expr();
 
             // Could be (expr, index_reg) or (expr) or (expr), index_reg
@@ -1487,8 +1525,10 @@ impl Parser {
                 idx
             } else {
                 let _ = self.expect("Op_rparen");
-                // Check for trailing , index_reg
-                if self.check("Op_comma") {
+                // Check for trailing , index_reg. Only x and y continue
+                // an indexed operand; any other identifier starts a new
+                // operand of the statement.
+                if self.check("Op_comma") && Self::peek_index_register(&self.tokens, self.pos + 1) {
                     self.advance();
                     self.parse_index_reg()
                 } else {
@@ -1507,8 +1547,10 @@ impl Parser {
         // Expression-based memory operand: expr [, index_reg]
         let expr = self.parse_expr();
 
-        // Check for , index_reg
-        if self.check("Op_comma") {
+        // Check for , index_reg. Only x and y (or cpu::x / cpu::y)
+        // continue the 6502 single indexed-operand form after a
+        // comma; any other identifier starts a new operand.
+        if self.check("Op_comma") && Self::peek_index_register(&self.tokens, self.pos + 1) {
             self.advance();
             let index_reg = self.parse_index_reg();
             return Some(Operand::MemoryOperand {
@@ -1537,6 +1579,45 @@ impl Parser {
             index_reg: None,
             is_indirect: false,
         })
+    }
+
+    /// Whether the token at `at` begins an indexed-operand
+    /// continuation. Only the identifiers `x` and `y` (optionally
+    /// spelled `cpu::x` / `cpu::y`) continue one operand after a
+    /// comma; the 6502 indexed addressing forms need them, and any
+    /// other identifier starts a new operand.
+    fn peek_index_register(tokens: &[Token], at: usize) -> bool {
+        let Some(tok) = tokens.get(at) else {
+            return false;
+        };
+        matches!(tok.value.as_str(), "x" | "y")
+            || (tok.value == "cpu"
+                && matches!(
+                    tokens.get(at + 1).map(|t| t.kind.as_str()),
+                    Some("Op_colon_colon")
+                )
+                && matches!(
+                    tokens
+                        .get(at + 2)
+                        .map(|t| (t.kind.as_str(), t.value.as_str())),
+                    Some(("IDENT", "x")) | Some(("IDENT", "y"))
+                ))
+    }
+
+    /// The normalized name of a bounded `(hl+)` / `(hl-)` direct-memory
+    /// spelling: an `hl` identifier followed directly by + or - and
+    /// then the closing paren. Returns `"hli"` or `"hld"`, the same
+    /// shapes the parenthesized spellings produce.
+    fn peek_hl_inc_dec(tokens: &[Token], at: usize) -> Option<String> {
+        match (
+            tokens.get(at).map(|t| (t.kind.as_str(), t.value.as_str())),
+            tokens.get(at + 1).map(|t| t.kind.as_str()),
+            tokens.get(at + 2).map(|t| t.kind.as_str()),
+        ) {
+            (Some(("IDENT", "hl")), Some("Op_plus"), Some("Op_rparen")) => Some("hli".to_string()),
+            (Some(("IDENT", "hl")), Some("Op_minus"), Some("Op_rparen")) => Some("hld".to_string()),
+            _ => None,
+        }
     }
 
     fn parse_index_reg(&mut self) -> Option<String> {

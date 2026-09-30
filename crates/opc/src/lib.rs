@@ -15,3 +15,4 @@ pub mod linker;
 pub mod optimizer;
 pub mod output;
 pub mod parser;
+pub mod sm83_official;

@@ -1,0 +1,42 @@
+// SM83 flow-control corpus.
+//
+// Exercises every statement-level flow form on SM83: `do {} while`,
+// `if`/`else`, `while`, `loop`, an inline fn call, and an explicit
+// `return`. The integration tests compile this file at optimization
+// levels 0 and 1 and require identical bytes, which proves the
+// peephole optimizer never mangles an SM83 stream.
+
+#[rom(org = 0x0000, bank = 0, maxsize = 0x100)]
+{
+    inline fn tick() {
+        inc_b
+    }
+
+    fn stop_fn() {
+        return
+    }
+
+    noreturn fn main() {
+        ld_hl #0x9FFF
+        ld #0
+        do {
+            ld_hld_a
+            dec_l
+        } while (not zero)
+        ld #0x02
+        if (not zero) {
+            stop_fn()
+        }
+        if (zero) {
+            ld #0x01
+        } else {
+            inc_c
+        }
+        while (not zero) {
+            tick()
+        }
+        loop {
+            halt
+        }
+    }
+}

@@ -319,6 +319,294 @@ fn codegen_return_statement() {
     assert_eq!(data[0], 0x60); // RTS
 }
 
+// === SM83 flow control =====================================================
+//
+// Statement-level flow control on SM83 must emit SM83 opcodes: the
+// unconditional jumps use JP (0xC3) and returns use RET (0xC9).
+// The 6502-family behavior is covered by the tests above and stays
+// byte-identical.
+
+/// Helper: parse and compile a source string with the SM83 target at
+/// the given opt level, returning the object file and all diagnostics.
+fn compile_sm83(src: &str, opt_level: u8) -> (ObjectFile, Vec<op_diagnostics::Diagnostic>) {
+    let (ast, _diags) = parse_source("test.op", src, "sm83-nintendo-gameboy", &[]);
+    let (obj, diags) = compile_source(&ast, opt_level, &[], &[]);
+    (obj, diags)
+}
+
+/// Helper: assert that a compile produced no error diagnostics.
+fn assert_no_compile_errors(diags: &[op_diagnostics::Diagnostic]) {
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "compile errors: {errors:?}");
+}
+
+#[test]
+fn sm83_while_backjump_is_cpu_jump() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { while (not zero) { inc_b } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // JR Z (branch past the body for "not zero") + offset + INC_B (1
+    // byte, branch displacement 1 + 3) + JP nn back to loop start + the
+    // implicit fn RET. Displacement 4: the branch lands after the JP.
+    assert_eq!(
+        data,
+        &[0x28, 0x04, 0x04, 0xC3, 0x00, 0x00, 0xC9],
+        "SM83 while must emit JR Z, INC_B, JP nn back, implicit RET"
+    );
+}
+
+#[test]
+fn sm83_if_else_elsejump_is_cpu_jump() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (zero) { inc_b } else { inc_c } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // JR NZ over then-block, then JP past else-block, else body, RET.
+    // then-block = 1 byte (inc_b), else jump = 3 bytes, displacement 4;
+    // the JP operand is the end of the else block (0x0007).
+    assert_eq!(
+        data,
+        &[0x20, 0x04, 0x04, 0xC3, 0x07, 0x00, 0x0C, 0xC9],
+        "SM83 if/else must emit JR NZ, JP nn, inc_b, inc_c, RET"
+    );
+}
+
+#[test]
+fn sm83_return_emits_ret() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { return } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    assert_eq!(
+        data,
+        &[0xC9],
+        "SM83 return must be RET 0xC9, not the 6502 RTS 0x60"
+    );
+}
+
+#[test]
+fn sm83_do_while_backward_branch_unchanged() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { do { inc_b } while (not zero) } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // INC_B + JR NZ (branch if not zero) - 3 bytes back to loop start +
+    // the implicit RET after the loop statement.
+    assert_eq!(
+        data,
+        &[0x04, 0x20, 0xFD, 0xC9],
+        "backward conditional JR must be unchanged"
+    );
+}
+
+#[test]
+fn sm83_loop_emits_cpu_jump() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { loop { inc_b } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    assert_eq!(
+        data,
+        &[0x04, 0xC3, 0x00, 0x00],
+        "SM83 loop back-jump must be JP nn"
+    );
+}
+
+#[test]
+fn sm83_if_branch_out_of_range_errors() {
+    // A then-block far beyond 127 bytes cannot be encoded as a JR with
+    // a signed 8-bit offset; the compiler must report E308 instead of
+    // silently wrapping the displacement.
+    let mut body = String::new();
+    for _ in 0..256 {
+        body.push_str("inc_b ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ if (zero) {{ {body} }} }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    let e308 = diags.iter().find(|d| {
+        d.severity == op_diagnostics::Severity::Error
+            && d.code == 308
+            && d.message.contains("if")
+            && d.message.contains("fn 'f'")
+    });
+    assert!(
+        e308.is_some(),
+        "expected an E308 branch-distance error: {diags:?}"
+    );
+}
+
+#[test]
+fn sm83_do_while_backward_distance_out_of_range_errors() {
+    let mut body = String::new();
+    for _ in 0..200 {
+        body.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ do {{ {body} }} while (set) }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    let e308 = diags.iter().find(|d| {
+        d.severity == op_diagnostics::Severity::Error
+            && d.code == 308
+            && d.message.contains("do-while")
+            && d.message.contains("fn 'f'")
+    });
+    assert!(
+        e308.is_some(),
+        "expected an E308 branch-distance error: {diags:?}"
+    );
+}
+
+#[test]
+fn sm83_while_branch_out_of_range_errors() {
+    // A body region plus the 3-byte back-jump that exceeds the JR
+    // envelope must report E308 like the if and do-while paths.
+    let mut body = String::new();
+    for _ in 0..128 {
+        body.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ while (set) {{ {body} }} }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    let e308 = diags.iter().find(|d| {
+        d.severity == op_diagnostics::Severity::Error
+            && d.code == 308
+            && d.message.contains("while")
+            && d.message.contains("fn 'f'")
+    });
+    assert!(
+        e308.is_some(),
+        "expected an E308 branch-distance error: {diags:?}"
+    );
+}
+
+#[test]
+fn sm83_branch_distance_boundaries() {
+    // Displacements exactly 127 (forward) and -128 (backward) must
+    // compile clean; one past each boundary must report E308.
+    let mut in_range = String::new();
+    for _ in 0..127 {
+        in_range.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ if (zero) {{ {in_range} }} }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    assert_no_compile_errors(&diags); // then-block of 127 bytes = displacement 127
+
+    let mut out_of_range = String::new();
+    for _ in 0..128 {
+        out_of_range.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ if (zero) {{ {out_of_range} }} }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    assert!(
+        diags.iter().any(|d| d.code == 308),
+        "128 must exceed the range: {diags:?}"
+    );
+
+    let mut in_range = String::new();
+    for _ in 0..126 {
+        in_range.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ do {{ {in_range} }} while (set) }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    assert_no_compile_errors(&diags); // offset = -(126 + 2) = -128
+
+    let mut out_of_range = String::new();
+    for _ in 0..127 {
+        out_of_range.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ do {{ {out_of_range} }} while (set) }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    assert!(
+        diags.iter().any(|d| d.code == 308),
+        "-129 must exceed the range: {diags:?}"
+    );
+}
+
+#[test]
+fn sm83_if_empty_then_block_errors() {
+    // With and without an else block: an empty then-block must error
+    // (E309) instead of leaving the placeholder displacement in place.
+    for src in [
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (zero) { } } }",
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (zero) { } else { inc_b } } }",
+    ] {
+        let (_obj, diags) = compile_sm83(src, 0);
+        let e309 = diags.iter().find(|d| {
+            d.severity == op_diagnostics::Severity::Error
+                && d.code == 309
+                && d.message.contains("empty then-block")
+                && d.message.contains("fn 'f'")
+        });
+        assert!(
+            e309.is_some(),
+            "expected an E309 empty-then-block error: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn sm83_switch_errors_unsupported_cpu() {
+    let (_obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { switch (a) { case 1 { nop } } } }",
+        0,
+    );
+    let e310 = diags.iter().find(|d| {
+        d.severity == op_diagnostics::Severity::Error
+            && d.code == 310
+            && d.message.contains("switch")
+            && d.message.contains("fn 'f'")
+            && d.message.contains("sm83")
+    });
+    assert!(
+        e310.is_some(),
+        "expected an E310 unsupported-switch error: {diags:?}"
+    );
+}
+
+#[test]
+fn mos6502_switch_still_emits_compare_pairs() {
+    // The switch lowering is 6502-family only; its existing byte shape
+    // must not change. Asserted at -O0 so the (existing) optimizer
+    // behavior does not remove the not-yet-patched BEQ placeholder.
+    let obj = compile_with_opt(
+        "#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] { fn f() { switch (a) { case 1 { nop } } } }",
+        0,
+    );
+    let data = &obj.sections[0].data;
+    // CMP #1 then BEQ.
+    assert_eq!(data[0], 0xC9); // CMP immediate
+    assert_eq!(data[1], 0x01);
+    assert_eq!(data[2], 0xF0); // BEQ
+    assert_eq!(data[3], 0x00); // placeholder displacement (unpatched today)
+    assert_eq!(data[4], 0xEA); // case body: nop
+}
+
 // === Inline fn expansion ==================================================
 
 #[test]
@@ -438,7 +726,7 @@ fn optimizer_skips_chr_sections() {
         relocations: Vec::new(),
         data: chr_bytes.clone(),
     }];
-    optimize(&mut sections, 1);
+    optimize(&mut sections, 1, "mos6502");
     // The CHR data must equal the input bytes exactly. The optimizer must
     // not remove or change any byte.
     assert_eq!(sections[0].data, chr_bytes, "optimizer corrupted CHR data");
@@ -466,7 +754,7 @@ fn optimizer_skips_ram_sections() {
         relocations: Vec::new(),
         data: ram_bytes.clone(),
     }];
-    optimize(&mut sections, 1);
+    optimize(&mut sections, 1, "mos6502");
     assert_eq!(sections[0].data, ram_bytes, "optimizer corrupted RAM data");
 }
 
@@ -556,7 +844,7 @@ fn optimizer_changes_rom_but_not_chr() {
         },
     ];
 
-    optimize(&mut sections, 1);
+    optimize(&mut sections, 1, "mos6502");
 
     // The ROM section must change: the redundant lda #0 pair collapses to
     // a single lda #0 (2 bytes instead of 4).
@@ -580,6 +868,65 @@ fn optimizer_changes_rom_but_not_chr() {
         chr_bytes.len(),
         "CHR section length must not change"
     );
+}
+
+#[test]
+fn optimizer_skips_non_6502_cpu_families() {
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::{is_6502_family_cpu, optimize};
+
+    // The 6502-family CPUs (all base their encoding table on the 6502).
+    assert!(is_6502_family_cpu("mos6502"));
+    assert!(is_6502_family_cpu("mos65sc02"));
+    assert!(is_6502_family_cpu("wdc65c816"));
+    assert!(is_6502_family_cpu("rp2A03"));
+    assert!(is_6502_family_cpu("rp2A07"));
+    assert!(is_6502_family_cpu("vl65NC02"));
+    assert!(is_6502_family_cpu("w65c02"));
+    // Non-6502 families and unknown CPUs.
+    assert!(!is_6502_family_cpu("sm83"));
+    assert!(!is_6502_family_cpu("z80"));
+    assert!(!is_6502_family_cpu("m68000"));
+    assert!(!is_6502_family_cpu(""));
+
+    // The redundant lda #0 pair folds on a 6502-family CPU.
+    let rom_bytes: Vec<u8> = vec![0xA9, 0x00, 0xA9, 0x00];
+    let mut sections = vec![Section {
+        name: "rom_bank0_6502".to_string(),
+        kind: SectionKind::Rom,
+        org: 0xC000,
+        bank: 0,
+        maxsize: 0x4000,
+        symbols: Vec::new(),
+        relocations: Vec::new(),
+        data: rom_bytes.clone(),
+    }];
+    optimize(&mut sections, 1, "mos6502");
+    assert_eq!(
+        sections[0].data.len(),
+        2,
+        "6502-family targets keep the passes"
+    );
+
+    // The same bytes must pass through untouched for CPUs whose
+    // instruction streams the 6502 decoder does not understand.
+    for cpu in ["sm83", "z80", "m68000"] {
+        let mut sections = vec![Section {
+            name: "rom_bank0_other".to_string(),
+            kind: SectionKind::Rom,
+            org: 0xC000,
+            bank: 0,
+            maxsize: 0x4000,
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+            data: rom_bytes.clone(),
+        }];
+        optimize(&mut sections, 1, cpu);
+        assert_eq!(
+            sections[0].data, rom_bytes,
+            "optimizer must skip {cpu} sections"
+        );
+    }
 }
 
 // === Other CPU families ===================================================
@@ -1099,7 +1446,7 @@ fn w65c02_no_crt_header_starts_at_offset_0() {
     assert_eq!(main_sym.unwrap().offset, 0);
 }
 
-// === Phase 0: array const placement ========================================
+// === Array const placement =================================================
 
 #[test]
 fn array_const_placed_in_rom() {
@@ -1143,7 +1490,7 @@ fn array_const_len_resolves() {
     let _ = obj;
 }
 
-// === Phase 0: struct const field resolution ================================
+// === Struct const field resolution =========================================
 
 #[test]
 fn struct_const_scalar_field_in_const_values() {
@@ -1160,4 +1507,195 @@ fn struct_const_scalar_field_in_const_values() {
     let tile_count = tables.const_values.get("MYFONT::tile_count");
     assert_eq!(tile_count, Some(&102));
     let _ = obj;
+}
+
+// === SM83 official statement syntax ========================================
+
+#[test]
+fn sm83_official_spellings_golden_bytes() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
+            fn f() {
+                xor a
+                xor_a
+                ld (hli), a
+                bit 7, h
+                set 3, c
+                ld sp, #0xFFFE
+                ldh (0x47), a
+            }
+            noreturn fn g() { jr nz, 'L 'L: inc b }
+        }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // f: xor a and xor_a (0xAF), ld (hli), a (0x22), bit 7, h (CB 7C),
+    // set 3, c (CB D9), ld sp, #0xFFFE, ldh (0x47), a, and the
+    // implicit RET. g: JR NZ with a zero displacement to 'L, then
+    // INC B, with no trailing RET because g is noreturn.
+    assert_eq!(
+        data,
+        &[
+            0xAF, 0xAF, 0x22, 0xCB, 0x7C, 0xCB, 0xD9, 0x31, 0xFE, 0xFF, 0xE0, 0x47, 0xC9, 0x20,
+            0x00, 0x04,
+        ],
+        "official SM83 statements must emit exact bytes"
+    );
+}
+
+#[test]
+fn sm83_official_address_and_load_rows() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
+            noreturn fn f() {
+                ld sp, #0xFFFE
+                ld b, #0x12
+                ld bc, #0x1234
+                ld a, (0x2134)
+                ld (0x2134), a
+                ld a, (bc)
+                ld (bc), a
+                ld sp, hl
+                inc l
+                inc (hl)
+                ld l, c
+                ld (hl), #0x7F
+                jp 'End
+'End:
+                halt
+            }
+        }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    assert_eq!(
+        data,
+        &[
+            0x31, 0xFE, 0xFF, // ld sp, #0xFFFE
+            0x06, 0x12, // ld b, #0x12
+            0x01, 0x34, 0x12, // ld bc, #0x1234
+            0xFA, 0x34, 0x21, // ld a, (0x2134)
+            0xEA, 0x34, 0x21, // ld (0x2134), a
+            0x0A, // ld a, (bc)
+            0x02, // ld (bc), a
+            0xF9, // ld sp, hl
+            0x2C, // inc l
+            0x34, // inc (hl)
+            0x69, // ld l, c
+            0x36, 0x7F, // ld (hl), #0x7F
+            0xC3, 0x00, 0x00, // jp 'End (Abs16 relocation, resolved at link)
+            0x76, // 'End: halt
+        ],
+        "official address-row and load-row statements must emit exact bytes"
+    );
+}
+
+#[test]
+fn sm83_mixed_styles_match_all_snake_twin() {
+    // The official spellings and the snake_case pseudo-mnemonics are
+    // interchangeable: the two-styles source, the all-legacy twin, and
+    // the all-official twin compile to identical bytes.
+    let mixed = "#[rom(org = 0, bank = 0, maxsize = 0x100)]
+        {
+            noreturn fn f() {
+            ld_sp #0xFFFE
+            xor a
+            ld_hl #0x9FFF
+            ld (hld), a
+            bit_h7
+'Loop:
+            rl_c
+            inc c
+            jr_nz 'Loop
+            ld a, #0x80
+            ldh (0x47)
+            call Helper
+            jr 'Tail
+'Tail:
+            halt
+        }
+        fn Helper() {
+            nop
+        }";
+    let all_legacy = "#[rom(org = 0, bank = 0, maxsize = 0x100)]
+        {
+            noreturn fn f() {
+            ld_sp #0xFFFE
+            xor_a
+            ld_hl #0x9FFF
+            ld_hld_a
+            bit_h7
+'Loop:
+            rl_c
+            inc_c
+            jr_nz 'Loop
+            ld #0x80
+            ldh (0x47)
+            call Helper
+            jr 'Tail
+'Tail:
+            halt
+        }
+        fn Helper() {
+            nop
+        }";
+    let all_official = "#[rom(org = 0, bank = 0, maxsize = 0x100)]
+        {
+            noreturn fn f() {
+            ld sp, #0xFFFE
+            xor a
+            ld hl, #0x9FFF
+            ld (hld), a
+            bit 7, h
+'Loop:
+            rl c
+            inc c
+            jr nz, 'Loop
+            ld a, #0x80
+            ldh (0x47), a
+            call Helper
+            jr 'Tail
+'Tail:
+            halt
+        }
+        fn Helper() {
+            nop
+        }";
+    let mixed_obj = compile_sm83(mixed, 0);
+    let legacy_obj = compile_sm83(all_legacy, 0);
+    let official_obj = compile_sm83(all_official, 0);
+    assert_no_compile_errors(&mixed_obj.1);
+    assert_no_compile_errors(&legacy_obj.1);
+    assert_no_compile_errors(&official_obj.1);
+    let mixed_data = &mixed_obj.0.sections[0].data;
+    assert_eq!(
+        mixed_data, &legacy_obj.0.sections[0].data,
+        "the mixed-styles twin must match the all-legacy twin"
+    );
+    assert_eq!(
+        mixed_data, &official_obj.0.sections[0].data,
+        "the mixed-styles twin must match the all-official twin"
+    );
+}
+
+#[test]
+fn mos6502_indexed_operand_remains_single() {
+    // The 6502 indexed addressing forms keep their exact bytes: they
+    // stay a single operand, and the comma gate must not split them.
+    let obj =
+        compile("#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] { fn f() { lda 0x2000, x } }");
+    assert_eq!(
+        &obj.sections[0].data[..3],
+        &[0xBD, 0x00, 0x20],
+        "LDA absolute,X must stay byte-identical"
+    );
+    let obj =
+        compile("#[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] { fn f() { sta (0x20), y } }");
+    assert_eq!(
+        &obj.sections[0].data[..2],
+        &[0x91, 0x20],
+        "STA (zp),Y must stay byte-identical"
+    );
 }

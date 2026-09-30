@@ -7,7 +7,9 @@
 //! The optimizer respects volatile variables. It must not remove a load
 //! or store of a volatile variable.
 //!
-//! The optimizer runs only when the opt level is 1 or higher.
+//! The optimizer runs only when the opt level is 1 or higher. It runs
+//! only on 6502-family targets: its decoder knows 6502 mnemonics only,
+//! and decoding SM83/Z80/68000 bytes as 6502 would corrupt them.
 
 use op_ir::{Relocation, Section, SectionKind, SymbolKind};
 
@@ -83,14 +85,34 @@ fn is_mmio_access(_mnemonic: Option<&str>, mode: Option<&str>, operand: &[u8]) -
         || (0x9F00..=0x9FFF).contains(&addr)
 }
 
+/// Return true when `cpu` is a 6502-family CPU: a CPU whose base
+/// encoding table is the 6502 table (`mos6502`, `mos65sc02`,
+/// `wdc65c816`, `rp2A03`, `rp2A07`, `vl65NC02`, `w65c02`). Only these
+/// targets emit plain-6502 instruction streams for statement-level
+/// flow control, which is what the peephole decoder understands.
+///
+/// The peephole optimizer must skip every other CPU family (SM83, Z80,
+/// 68000, and unknown CPUs): decoding their bytes as 6502 mnemonics
+/// reassembles valid code into corrupted output.
+pub fn is_6502_family_cpu(cpu: &str) -> bool {
+    matches!(
+        cpu,
+        "mos6502" | "mos65sc02" | "wdc65c816" | "rp2A03" | "rp2A07" | "vl65NC02" | "w65c02"
+    )
+}
+
 /// Run the peephole optimizer on all sections in the object file.
-/// The optimizer runs only when `opt_level >= 1`.
+/// The optimizer runs only when `opt_level >= 1` and only on
+/// 6502-family target CPUs (see [`is_6502_family_cpu`]).
 ///
 /// Only ROM sections hold code. CHR and RAM sections hold data tables and
 /// variables. The optimizer must not run on data sections because it
 /// decodes data bytes as 6502 instructions and may drop them.
-pub fn optimize(sections: &mut [Section], opt_level: u8) {
+pub fn optimize(sections: &mut [Section], opt_level: u8, cpu: &str) {
     if opt_level < 1 {
+        return;
+    }
+    if !is_6502_family_cpu(cpu) {
         return;
     }
     for section in sections.iter_mut() {

@@ -1055,6 +1055,150 @@ The `::` operator accesses a module or enum constant. The `.` operator accesses
 a struct field. The `+` and `-` operators add or subtract a constant offset
 from a base address.
 
+The parser collects the operands of an assembly statement as one
+comma-separated list. After a comma that follows an expression operand or a
+parenthesized operand, the parser continues the operand as one indexed form
+only when the identifier after the comma is `x` or `y` (or `cpu::x` or
+`cpu::y`). Any other identifier after a comma starts a new operand. The
+paren-internal indexed form `(0x20, x)` is unchanged. This rule keeps the 6502
+indexed addressing forms and gives two-operand statements on the SM83
+targets their comma separators.
+
+### Official SM83 statement syntax
+
+This subsection defines the official assembly statement syntax for the Sharp
+SM83 targets. The compiler applies this syntax when the target CPU family is
+`sm83`. The syntax follows the Nintendo SM83 programming manual. Other
+targets keep the operand forms that the preceding subsections define.
+
+An SM83 assembly statement begins with an official SM83 mnemonic and carries
+a comma-separated operand list. Each operand is a register atom, a
+direct-memory form, a condition word, an immediate, a label reference, or a
+selector.
+
+#### Register atoms
+
+A register atom is a bare identifier that names a register. The spelling is
+lower case.
+
+| Atom | Size | Meaning |
+|------|------|---------|
+| `a` | 1 byte | The accumulator register A |
+| `b`, `c`, `d`, `e`, `h`, `l` | 1 byte | The 8-bit general registers |
+| `af`, `bc`, `de`, `hl` | 2 bytes | The 16-bit register-pair registers |
+| `sp` | 2 bytes | The stack pointer register SP |
+
+#### Direct-memory forms
+
+A direct-memory form is a parenthesized operand. The parser accepts the
+following forms.
+
+| Form | Meaning |
+|------|---------|
+| `(hl)` | The byte at the address in HL |
+| `(hli)` | The byte at the address in HL, then HL increments after the operation |
+| `(hld)` | The byte at the address in HL, then HL decrements after the operation |
+| `(hl+)` | The same statement as `(hli)` |
+| `(hl-)` | The same statement as `(hld)` |
+| `(bc)` | The byte at the address in BC |
+| `(de)` | The byte at the address in DE |
+| `(c)` | The I/O port at 0xFF00 + C |
+
+#### Immediates, labels, and conditions
+
+An immediate operand uses the `#` prefix, and a label target uses the
+single-quote prefix. Both forms are the forms that the general statement
+grammar defines.
+
+| Operand | Meaning | Example |
+|---------|---------|---------|
+| `#expr` | An immediate byte (a byte pair for a register-pair load) | `ld a, #0x34` |
+| `'label` | A label reference as a branch target | `jr 'Restart` |
+| `nz` | The Z flag is clear | `jr nz, 'Retry` |
+| `z` | The Z flag is set | `ret z` |
+| `nc` | The C flag is clear | `jr nc, 'Copy` |
+| `c` | The C flag is set | `jp c, 'Loop` |
+
+The condition words `nz`, `z`, `nc`, and `c` appear only as the first
+operand of `jr`, `jp`, and `ret`.
+
+#### Statement forms
+
+The compiler resolves the following mnemonic groups.
+
+- Implied statements: `nop`, `halt`, `stop`, `di`, `ei`, `daa`, `cpl`,
+  `ccf`, `scf`, `rlca`, `rrca`, `rla`, `rra`.
+- Loads: register to register (`ld a, b`), a direct-memory form
+  (`ld (hli), a`), an immediate (`ld a, #0x34`), a register pair
+  immediate (`ld bc, #0x1234`), the register-pair form `ld sp, hl`, an
+  address-form load or store (`ld a, (0xFF40)`, `ld (0xFF40), a`), and
+  the high-memory `ldh` forms (`ldh (0x47), a`, `ldh a, (0x44)`).
+- ALU statements: `add`, `adc`, `sub`, `sbc`, `and`, `xor`, `or`, and
+  `cp`, in either the accumulator form (`add a, e`, `sub a, (hl)`) or
+  the implied form (`add e`, `cp (hl)`, `xor a`).
+- Increment and decrement: `inc` and `dec` of an 8-bit register, a
+  register pair, or `(hl)`.
+- The CB-family statements: `rlc`, `rrc`, `rl`, `rr`, `sla`, `sra`,
+  `swap`, `srl` of a register or of `(hl)`, and `bit`, `res`, `set`
+  with a bit number and a register.
+- Stack statements: `push` and `pop` of a register pair.
+- Jump statements: `jp` and `jr`, with or without a first condition
+  operand.
+- Return statements: `ret`, `reti`, and `ret` with a first condition
+  operand.
+- Calls and restarts: `call 'Routine`, and `rst` with its restart
+  number.
+
+The explicit accumulator operand of an ALU statement is optional: the
+statement `add a, e` and the statement `add e` are the same instruction.
+
+The `set 3, c` statement sets bit 3 of register `c`. The word `set`
+begins an assembly statement even though the language also uses `set` as a
+condition keyword. Condition parsing in `if`, `while`, and `do`
+statements is unchanged.
+
+#### Examples
+
+```
+ld a, #0x34
+ld (hli), a
+jr nz, 'PrepareScroll
+bit 7, h
+ldh (0x47), a
+xor a
+```
+
+#### Pseudo-mnemonic aliases
+
+The snake_case pseudo-mnemonics remain valid aliases. A program may mix the
+two styles in the same function body. The statement `xor a` and the
+statement `xor_a` emit the byte 0xAF. The statement `bit 7, h` and the
+statement `bit_h7` emit the byte pair CB 7C. The `ldi` and `ldd`
+shorthands have no official form; the compiler keeps them as legacy
+aliases. `ldi` emits the byte that `ld (hli), a` emits. `ldd` keeps its
+own legacy encoding (the load-direction form), which the official store
+form `ld (hld), a` does not replace.
+
+#### Error behavior
+
+The compiler resolves an official SM83 mnemonic before it consults the
+legacy encoding tables. A statement that begins with an official mnemonic
+and whose operand forms match no form in the opcode matrix produces a
+compile error. The compiler does not fall through to a legacy entry for
+such a statement. A statement whose mnemonic is not an official SM83
+mnemonic keeps the legacy path, so existing pseudo-mnemonic spellings emit
+the same bytes.
+
+The opcode matrix does **not** cover the following forms. An SM83
+statement with one of these forms is an error. A future revision may add
+them.
+
+- `ld hl, sp + expr`
+- `add sp, expr`
+- `jp (hl)`
+- `ld (nn), sp`
+- the conditional call form `call cc, 'target`
+
 ## File inclusion
 
 ### Source inclusion
@@ -1809,6 +1953,10 @@ The SM83 does **not** support the alternate register set, the `EXX`
 instruction, the `RLD` and `RRD` instructions, and the interrupt mode
 selection is simplified.
 
+A source file for this target may use the official SM83 statement syntax
+that the Assembly statements section defines. The snake_case
+pseudo-mnemonics remain valid aliases for that syntax.
+
 #### Interrupts
 
 The SM83 uses fixed vector addresses. The hardware jumps to the vector
@@ -1921,8 +2069,10 @@ fn_stmt        ::= label
 label          ::= '\'' IDENTIFIER ':' assembly_stmt
                  | '\'' IDENTIFIER ':' control_stmt
 
-assembly_stmt  ::= OPCODE operand*
+assembly_stmt  ::= OPCODE operand_list
                  | OPCODE
+
+operand_list   ::= operand (',' operand)*
 
 operand        ::= immediate
                  | memory_operand

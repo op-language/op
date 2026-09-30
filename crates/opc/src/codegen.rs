@@ -139,9 +139,11 @@ pub fn compile_source_with_tables(
         const_values: codegen.const_values.clone(),
     };
 
-    // Run the peephole optimizer on the sections.
+    // Run the peephole optimizer on the sections. The target CPU lets
+    // the optimizer skip non-6502-family targets, whose bytes would be
+    // decoded as 6502 mnemonics and corrupted.
     let mut sections = codegen.sections;
-    crate::optimizer::optimize(&mut sections, opt_level);
+    crate::optimizer::optimize(&mut sections, opt_level, &codegen.target.cpu);
 
     let obj = ObjectFile {
         version: 1,
@@ -174,6 +176,7 @@ fn build_codegen(
     Codegen {
         target: triplet,
         opt_level,
+        current_fn: String::new(),
         encoding_table,
         sections: Vec::new(),
         current_section: None,
@@ -306,6 +309,10 @@ struct InlineFn {
 struct Codegen {
     target: TargetTriplet,
     opt_level: u8,
+    /// Name of the fn whose body is currently being compiled. The
+    /// flow-control diagnostics name this fn. Inline fn bodies keep
+    /// the name of the fn whose call site is being expanded.
+    current_fn: String,
     encoding_table: Vec<&'static crate::encoding::EncodingEntry>,
     sections: Vec<Section>,
     current_section: Option<usize>,
@@ -2913,6 +2920,11 @@ impl Codegen {
     }
 
     fn compile_fn(&mut self, name: &str, body: &[FnStmt], is_noreturn: bool) {
+        // Name the fn for the flow-control diagnostics, and restore
+        // the previous name on exit: inline fn bodies are compiled
+        // inside the enclosing fn and keep reporting it.
+        let saved_fn = std::mem::replace(&mut self.current_fn, name.to_string());
+
         // Record the function symbol at the current offset.
         let offset = if let Some(idx) = self.current_section {
             self.sections[idx].data.len() as u32
@@ -2931,12 +2943,7 @@ impl Codegen {
         // explicit `return` falls through into whatever follows it in the
         // section.
         if !Self::body_ends_control_flow(body) && !is_noreturn {
-            // Emit the CPU-family-specific return instruction.
-            let ret_opcode = match self.target.cpu.as_str() {
-                "sm83" | "z80" => 0xC9, // RET
-                _ => 0x60,              // RTS (6502)
-            };
-            self.emit_byte(ret_opcode);
+            self.emit_byte(self.return_op());
         }
 
         let end_offset = if let Some(idx) = self.current_section {
@@ -2955,6 +2962,8 @@ impl Codegen {
                 is_pub: false,
             });
         }
+
+        self.current_fn = saved_fn;
     }
 
     /// Return true when the last statement of a function body ends control
@@ -3062,7 +3071,7 @@ impl Codegen {
                 self.compile_fn_call(name, args);
             }
             FnStmt::ReturnStmt => {
-                self.emit_byte(0x60); // RTS
+                self.emit_byte(self.return_op());
             }
             FnStmt::Label { name, stmt } => {
                 // Record the label at the current offset.
@@ -3168,6 +3177,29 @@ impl Codegen {
     // --- Assembly encoding ---------------------------------------------------
 
     fn compile_asm(&mut self, opcode: &str, operands: &[Operand]) {
+        // Official Nintendo-manual SM83 spellings resolve first, and
+        // only for the SM83 target. Shapes the resolver does not
+        // cover keep the legacy paths byte for byte; a decode
+        // diagnostic must not fall through, because the legacy path
+        // reads only the first operand of the statement.
+        if self.target.cpu == "sm83" {
+            match crate::sm83_official::resolve(opcode, operands) {
+                crate::sm83_official::Resolution::Resolved(resolved) => {
+                    self.compile_resolved_sm83(resolved, operands);
+                    return;
+                }
+                crate::sm83_official::Resolution::DecodeError(message) => {
+                    let fn_name = self.diag_fn_name();
+                    self.error(
+                        311,
+                        format!("fn '{fn_name}': official SM83 statement '{opcode}': {message}"),
+                    );
+                    return;
+                }
+                crate::sm83_official::Resolution::NotOfficial => {}
+            }
+        }
+
         // Handle implied/accumulator mode (no operands).
         if operands.is_empty() {
             // SM83 CB-prefix pairs (e.g. BIT 7,H = CB 7C) are two bytes.
@@ -3373,6 +3405,130 @@ impl Codegen {
         }
     }
 
+    /// Emit a statement resolved through the official SM83 matrix:
+    /// the matrix bytes first, then the dynamic operand role.
+    fn compile_resolved_sm83(
+        &mut self,
+        resolved: crate::sm83_official::Resolved,
+        operands: &[Operand],
+    ) {
+        for byte in &resolved.bytes {
+            self.emit_byte(*byte);
+        }
+        let Some((index, role)) = resolved.trailing else {
+            return;
+        };
+        let Some(operand) = operands.get(index) else {
+            self.error(
+                311,
+                format!(
+                    "official SM83 statement '{}': operand index out of range",
+                    resolved.form
+                ),
+            );
+            return;
+        };
+        match role {
+            crate::sm83_official::Trailing::Value8 => {
+                self.emit_sm83_value8(operand, &resolved.form);
+            }
+            crate::sm83_official::Trailing::Value16 => {
+                self.emit_sm83_value16(operand, &resolved.form);
+            }
+            crate::sm83_official::Trailing::Branch8 => {
+                if let Operand::LabelRef { name } = operand {
+                    self.emit_byte(0); // placeholder displacement
+                    self.add_relocation(1, RelocKind::Branch8, name, 0);
+                } else {
+                    self.error(
+                        311,
+                        format!(
+                            "official SM83 statement '{}' needs a label operand \
+                             for the relative branch",
+                            resolved.form
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Emit one little-endian byte for a resolved statement's value
+    /// operand: a folded constant, or a byte-sized relocation against
+    /// its symbol. This mirrors the immediate-operand path of the
+    /// legacy encoding.
+    fn emit_sm83_value8(&mut self, operand: &Operand, form: &str) {
+        if let Operand::LabelRef { .. } = operand {
+            self.error(
+                311,
+                format!("official SM83 statement '{form}': labels have no byte value"),
+            );
+            return;
+        }
+        let Some(expr) = operand_expr(operand) else {
+            self.error(
+                311,
+                format!("official SM83 statement '{form}' needs a value operand"),
+            );
+            return;
+        };
+        match eval_expr(expr, &self.const_values, &self.symbol_types) {
+            Some(value) => self.emit_byte((value & 0xFF) as u8),
+            None => match self.classify_immediate(expr) {
+                Some((sym, kind, addend)) => {
+                    self.emit_byte(0);
+                    self.add_relocation(1, kind, &sym, addend);
+                }
+                None => self.error(
+                    311,
+                    format!(
+                        "official SM83 statement '{form}': the operand is \
+                         neither a constant nor a symbol"
+                    ),
+                ),
+            },
+        }
+    }
+
+    /// Emit two little-endian bytes for a resolved statement's value
+    /// operand: a folded constant, or a 16-bit absolute relocation
+    /// against its symbol. A label target relocates against its name.
+    fn emit_sm83_value16(&mut self, operand: &Operand, form: &str) {
+        if let Operand::LabelRef { name } = operand {
+            self.emit_byte(0);
+            self.emit_byte(0);
+            self.add_relocation(2, RelocKind::Abs16, name, 0);
+            return;
+        }
+        let Some(expr) = operand_expr(operand) else {
+            self.error(
+                311,
+                format!("official SM83 statement '{form}' needs a value operand"),
+            );
+            return;
+        };
+        match eval_expr(expr, &self.const_values, &self.symbol_types) {
+            Some(value) => {
+                self.emit_byte((value & 0xFF) as u8);
+                self.emit_byte(((value >> 8) & 0xFF) as u8);
+            }
+            None => match self.classify_immediate(expr) {
+                Some((symbol, _kind, addend)) => {
+                    self.emit_byte(0);
+                    self.emit_byte(0);
+                    self.add_relocation(2, RelocKind::Abs16, &symbol, addend);
+                }
+                None => self.error(
+                    311,
+                    format!(
+                        "official SM83 statement '{form}': the operand is \
+                         neither a constant nor a symbol"
+                    ),
+                ),
+            },
+        }
+    }
+
     fn compile_memory_operand(
         &mut self,
         opcode: &str,
@@ -3504,12 +3660,75 @@ impl Codegen {
 
     // --- Control flow -------------------------------------------------------
 
+    /// The unconditional absolute jump opcode for the target CPU
+    /// family: `JP nn` on SM83/Z80, `JMP absolute` on the 6502 family.
+    fn unconditional_jump_op(&self) -> u8 {
+        match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC3, // JP
+            _ => 0x4C,              // JMP
+        }
+    }
+
+    /// The return opcode for the target CPU family: `RET` on SM83/Z80,
+    /// `RTS` on the 6502 family. Used by the implicit return in
+    /// `compile_fn` and by an explicit `return` statement.
+    fn return_op(&self) -> u8 {
+        match self.target.cpu.as_str() {
+            "sm83" | "z80" => 0xC9, // RET
+            _ => 0x60,              // RTS
+        }
+    }
+
+    /// The fn name to quote in a flow-control diagnostic. Statements
+    /// compiled outside a fn body report `<top-level>`.
+    fn diag_fn_name(&self) -> String {
+        if self.current_fn.is_empty() {
+            "<top-level>".to_string()
+        } else {
+            self.current_fn.clone()
+        }
+    }
+
+    /// Report E308 when a statement-level branch displacement does not
+    /// fit in the signed 8-bit offset (-128..=127) that the conditional
+    /// branches on every supported CPU (and the SM83/Z80 `JR`) encode.
+    /// Without the check the displacement silently wraps during the
+    /// `u8` cast and branches into random code.
+    fn check_branch_distance(&mut self, distance: i64, stmt_kind: &str) {
+        if !(-128..=127).contains(&distance) {
+            let fn_name = self.diag_fn_name();
+            self.error(
+                308,
+                format!(
+                    "branch distance {distance} exceeds the signed 8-bit \
+                     range (-128..=127) for the {stmt_kind} statement in fn '{fn_name}'"
+                ),
+            );
+        }
+    }
+
     fn compile_if(
         &mut self,
         condition: &Condition,
         then_block: &[FnStmt],
         else_block: &Option<Vec<FnStmt>>,
     ) {
+        // An empty then-block would leave the placeholder offset
+        // pointing at degenerate code: the patch value 0 makes the
+        // conditional branch jump to the next instruction and the
+        // condition test is dead. Fail instead of emitting it.
+        if then_block.is_empty() {
+            let fn_name = self.diag_fn_name();
+            self.error(
+                309,
+                format!(
+                    "'if' statement in fn '{fn_name}' has an empty \
+                     then-block; the conditional branch has no target"
+                ),
+            );
+            return;
+        }
+
         // Emit branch-if-not-condition over the then-block.
         let branch_op = self.condition_to_branch_op(condition, false);
         self.emit_byte(branch_op);
@@ -3522,14 +3741,16 @@ impl Codegen {
         }
 
         if let Some(else_blk) = else_block {
-            // Emit jump past the else-block.
-            self.emit_byte(0x4C); // JMP absolute
+            // Emit jump past the else-block with the CPU-family jump.
+            let jump_op = self.unconditional_jump_op();
+            self.emit_byte(jump_op);
             let else_jump_patch = self.current_data_len();
             self.emit_byte(0);
             self.emit_byte(0);
 
             // Patch the branch to skip over the then-block + JMP.
             let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
+            self.check_branch_distance(then_size, "if");
             if then_size >= 0 {
                 self.patch_byte(patch_offset, then_size as u8);
             }
@@ -3546,6 +3767,7 @@ impl Codegen {
         } else {
             // Patch the branch to skip over the then-block.
             let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
+            self.check_branch_distance(then_size, "if");
             if then_size >= 0 {
                 self.patch_byte(patch_offset, then_size as u8);
             }
@@ -3568,13 +3790,16 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP back to loop_start (absolute address = offset + org).
-        self.emit_byte(0x4C); // JMP absolute
+        // Emit the unconditional back-jump to loop_start with the
+        // CPU-family jump opcode (absolute address = offset + org).
+        let jump_op = self.unconditional_jump_op();
+        self.emit_byte(jump_op);
         self.emit_byte((loop_abs & 0xFF) as u8);
         self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
 
-        // Patch the branch to skip over the body + JMP.
+        // Patch the branch to skip over the body + jump.
         let body_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
+        self.check_branch_distance(body_size, "while");
         if body_size >= 0 {
             self.patch_byte(patch_offset, body_size as u8);
         }
@@ -3592,6 +3817,7 @@ impl Codegen {
         let branch_op = self.condition_to_branch_op(condition, true);
         self.emit_byte(branch_op);
         let offset = loop_start as i64 - (self.current_data_len() as i64 + 1);
+        self.check_branch_distance(offset, "do-while");
         self.emit_byte(offset as u8);
     }
 
@@ -3607,16 +3833,25 @@ impl Codegen {
 
         // Emit JMP/JP back to loop_start (absolute address = offset + org).
         // Use the CPU-family-specific jump opcode.
-        let jmp_opcode = match self.target.cpu.as_str() {
-            "sm83" | "z80" => 0xC3, // JP nn
-            _ => 0x4C,              // JMP absolute (6502)
-        };
+        let jmp_opcode = self.unconditional_jump_op();
         self.emit_byte(jmp_opcode);
         self.emit_byte((loop_abs & 0xFF) as u8);
         self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
     }
 
     fn compile_switch(&mut self, _register: &str, cases: &[SwitchCase]) {
+        // The switch lowering emits CMP #imm / BEQ pairs, which are
+        // 6502-family encodings. Other CPU families have no switch
+        // lowering yet: fail instead of emitting wrong bytes.
+        if !crate::optimizer::is_6502_family_cpu(&self.target.cpu) {
+            let fn_name = self.diag_fn_name();
+            let cpu = self.target.cpu.clone();
+            self.error(
+                310,
+                format!("'switch' statement in fn '{fn_name}' is not supported on CPU '{cpu}'"),
+            );
+            return;
+        }
         // For each case, emit CMP #value then BEQ to the case body.
         let mut case_patches: Vec<(usize, u32)> = Vec::new();
 
@@ -4432,6 +4667,18 @@ fn eval_const_expr_simple(expr: &Expr) -> Option<i64> {
     }
 }
 
+/// The value expression of an assembly operand: the expression after
+/// `#` for an immediate, or the parenthesized address expression for
+/// a memory operand. A label operand carries a name instead of an
+/// expression.
+fn operand_expr(operand: &Operand) -> Option<&Expr> {
+    match operand {
+        Operand::Immediate { value } => Some(value),
+        Operand::MemoryOperand { expr, .. } => Some(expr),
+        _ => None,
+    }
+}
+
 /// Extract a symbol name from an expression, if it references one.
 fn expr_to_symbol(expr: &Expr) -> Option<String> {
     match expr {
@@ -4674,6 +4921,7 @@ mod tests {
         Codegen {
             target,
             opt_level: 0,
+            current_fn: String::new(),
             encoding_table: get_full_encoding_table("rp2A03"),
             sections: Vec::new(),
             current_section: None,
