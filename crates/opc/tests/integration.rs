@@ -656,7 +656,8 @@ fn full_pipeline_std_nes_game() {
     assert!(errors.is_empty(), "codegen errors: {:?}", errors);
 
     // The CHR section data must equal the font bytes byte for byte, even
-    // at the default optimization level (Phase 1 fix).
+    // at the default optimization level: the optimizer must not run on
+    // data sections.
     let font_bytes: Vec<u8> = font.to_vec();
     let chr = obj
         .sections
@@ -669,9 +670,8 @@ fn full_pipeline_std_nes_game() {
         "CHR section data must match font.chr byte for byte"
     );
 
-    // The previously-unreferenced vars (paddr, msgbuf, scroll, oam) were
-    // removed from nes.op in Phase 6, so there should be no dead-data
-    // warnings.
+    // There are no unreferenced vars in nes.op, so there should be no
+    // dead-data warnings.
     let dead_data = codegen_diags
         .iter()
         .filter(|d| d.code == 306)
@@ -711,11 +711,102 @@ fn full_pipeline_std_nes_game() {
     );
 }
 
-// === Phase 7: new automated tests ==========================================
+// === SM83 corpus: -O0 vs -O1 byte identity =================================
+
+#[test]
+fn sm83_corpus_output_identical_at_o0_and_o1() {
+    // The peephole optimizer decodes bytes as 6502 instructions. On
+    // SM83 (and every non-6502-family target) it must skip all passes,
+    // so an SM83 corpus compiles byte-for-byte identically at -O0 and
+    // -O1.
+    use op_ir::SectionKind;
+    use opc::codegen::compile_source;
+
+    let source = include_str!("data/sm83_flow.op");
+    let (ast, _parse_diags) =
+        parse_source("data/sm83_flow.op", source, "sm83-nintendo-gameboy", &[]);
+    let (obj0, codegen_diags0) = compile_source(&ast, 0, &[], &[]);
+    let errors: Vec<_> = codegen_diags0
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors at -O0: {errors:?}");
+
+    let (ast, _parse_diags) =
+        parse_source("data/sm83_flow.op", source, "sm83-nintendo-gameboy", &[]);
+    let (obj1, codegen_diags1) = compile_source(&ast, 1, &[], &[]);
+    let errors: Vec<_> = codegen_diags1
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "codegen errors at -O1: {errors:?}");
+
+    let rom0 = &obj0
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("object must have a ROM section");
+    let rom1 = &obj1
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("object must have a ROM section");
+    assert!(
+        !rom0.data.is_empty(),
+        "the SM83 corpus must produce ROM bytes"
+    );
+    assert!(
+        rom0.data.contains(&0xC3),
+        "the corpus must exercise SM83 JP jumps"
+    );
+    assert_eq!(
+        rom0.data, rom1.data,
+        "SM83 output must be byte-identical at -O0 and -O1"
+    );
+}
+
+#[test]
+fn sm83_std_font_compiles_without_flow_diagnostics() {
+    // Compat gate: the SM83 std font corpus must compile with no
+    // branch-distance (E308), empty-then-block (E309), or unsupported
+    // switch (E310) diagnostic. The 6502 corpus is gated at -O1 by the
+    // existing full-pipeline NES tests.
+    use opc::codegen::compile_source;
+
+    let Some(std_root) = std_root() else {
+        eprintln!("skipping: std library not found (set OP_STD_PATH)");
+        return;
+    };
+
+    let source = include_str!("../../../../std/src/font/gameboy.op");
+    let (ast, parse_diags) = parse_source(
+        "std/src/font/gameboy.op",
+        source,
+        "sm83-nintendo-gameboy",
+        &[],
+    );
+    let parse_errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(parse_errors.is_empty(), "parser errors: {parse_errors:?}");
+
+    let (_obj, codegen_diags) =
+        compile_source(&ast, 0, &[std_root.to_string_lossy().into_owned()], &[]);
+    let flow_diags: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| (308..=310).contains(&d.code))
+        .collect();
+    assert!(
+        flow_diags.is_empty(),
+        "flow-control diagnostics in the std SM83 font corpus: {flow_diags:#?}"
+    );
+}
+
+// === Parser and pipeline regression tests ==================================
 
 /// A function call on a new line after an assembly instruction must become a
 /// separate `FnStmt::FnCall`, not a second operand of the assembly statement.
-/// This is the Phase 2 parser fix.
 #[test]
 fn parser_inline_call_new_line() {
     use op_common::ast::{FnStmt, Item};
@@ -754,7 +845,7 @@ fn parser_inline_call_new_line() {
 /// The stage flags must chain through intermediate files: `--lex` reads
 /// source and writes a `.opx`; `--parse` reads the `.opx` and writes a `.opa`;
 /// `--compile` reads the `.opa` and writes a `.opl`; `--link` reads the `.opl`
-/// and writes a linked `.opl`. This is the Phase 4 fix.
+/// and writes a linked `.opl`.
 #[test]
 fn stage_chaining() {
     use clap::Parser;
@@ -836,8 +927,7 @@ fn stage_chaining() {
 
 /// The `--output-stages` flag must write every intermediate envelope file
 /// (`.opx`, `.opa`, `.opl`, `.linked.opl`) alongside the final binary, and the
-/// final binary must match the standard in-memory pipeline output. This is
-/// the Phase 5 feature.
+/// final binary must match the standard in-memory pipeline output.
 #[test]
 fn output_stages_flag() {
     let dir = std::env::temp_dir().join(format!("opc-output-stages-{}", std::process::id()));
@@ -916,4 +1006,71 @@ fn output_stages_flag() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// === SM83 official resolver regression gates ===============================
+
+#[test]
+fn sm83_bootrom_fixture_still_byte_exact() {
+    // The pre-rewrite boot ROM source compiles through the official
+    // resolver dispatch to the exact reference bytes. The resolver
+    // classifies the legacy spellings byte-equal to the legacy paths
+    // (`LDH (n)` stays on the legacy path) or resolves them to the
+    // same bytes, and reports no decode diagnostic.
+    use opc::codegen::compile_source;
+    use opc::linker::link_source;
+    use opc::output::emit_linked;
+    use sha2::Digest;
+
+    let source = include_str!("data/bootrom.op");
+    // The reference digest, in `sha256sum` output form: the hex hash,
+    // two spaces, and the name of the original fixture file.
+    let expected_hash = include_str!("data/dmg-rom.bin.sha256");
+
+    let (ast, parse_diags) = parse_source("data/bootrom.op", source, "sm83-nintendo-gameboy", &[]);
+    let parse_errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(parse_errors.is_empty(), "parser errors: {parse_errors:?}");
+
+    let (obj, codegen_diags) = compile_source(&ast, 0, &[], &[]);
+    let codegen_errors: Vec<_> = codegen_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(
+        codegen_errors.is_empty(),
+        "codegen errors: {codegen_errors:?}"
+    );
+    let decode_diags = codegen_diags
+        .iter()
+        .filter(|d| d.code == 311)
+        .collect::<Vec<_>>();
+    assert!(
+        decode_diags.is_empty(),
+        "official resolver decode diagnostics on the legacy boot ROM: {decode_diags:#?}"
+    );
+
+    let (linked, link_diags) = link_source(&obj);
+    let link_errors: Vec<_> = link_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(link_errors.is_empty(), "linker errors: {link_errors:?}");
+
+    let bytes = emit_linked(&linked, "raw").expect("raw emit failed");
+    assert_eq!(bytes.len(), 256, "the boot ROM must stay 256 bytes");
+    let digest: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let expected = expected_hash
+        .split_whitespace()
+        .next()
+        .expect("the sha256 fixture must carry the digest");
+    assert_eq!(
+        digest, expected,
+        "the legacy boot ROM must stay byte-identical through the resolver dispatch"
+    );
 }

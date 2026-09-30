@@ -340,6 +340,40 @@ For each instruction, the code generator:
 5. Records a relocation entry if the operand references a symbol whose address
    is not yet known.
 
+#### SM83 official opcode resolver
+
+For the Sharp SM83 target, the code generator applies an official opcode
+resolver before the legacy encoding tables. The resolver is the module
+`crates/opc/src/sm83_official.rs`. The module holds the Nintendo SM83
+opcode matrix as constant tables and exposes pure classifier functions.
+It holds no compiler state. A classifier takes a mnemonic and the
+statement's operand list and returns one of three outcomes: the opcode
+bytes, `None`, or a decode diagnostic.
+
+| Outcome | Meaning |
+|---------|---------|
+| Opcode bytes | The statement is an official form. The code generator emits the opcode bytes. |
+| `None` | The statement is not an official form. The legacy tables encode it. |
+| Decode diagnostic | The statement begins with an official mnemonic and its operand forms match no matrix form. The code generator reports a structured error (E311) and encodes nothing. |
+
+The dispatch order in `compile_asm` is:
+
+1. When the target CPU is SM83, the official resolver runs first.
+2. The legacy `ENCODING_SM83` table encodes each shape for which the
+   resolver returned `None`. The two-byte `ENCODING_SM83_CB_PAIRS`
+   forms precede it in the operand-less path, where the resolver
+   rejects every statement.
+3. The `ENCODING_SM83_CB_PAIRS` table provides the two-byte CB-prefix
+   forms.
+
+The resolver must run before the legacy lookup. The legacy path consumes
+only the first operand of the statement, so it cannot see an official
+two-operand form such as `ld a, #0x34`; only the resolver reads the
+complete comma-separated operand list. Because the resolver classifies as
+official only the shapes that the matrix covers and returns `None` for
+every pseudo-mnemonic and every operand-less spelling, the legacy tables
+keep every existing spelling and emit byte-identical output.
+
 For each control-flow construct, the code generator emits branch and label
 instructions:
 

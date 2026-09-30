@@ -888,7 +888,7 @@ fn parse_do_while_with_modifier() {
     }
 }
 
-// === Phase 0: cfg combinators ==============================================
+// === Cfg combinators ======================================================
 
 #[test]
 fn cfg_all_combinator_keeps_item_when_both_match() {
@@ -953,7 +953,7 @@ fn cfg_nested_combinators() {
     assert_eq!(items.len(), 1);
 }
 
-// === Phase 0: ines.mapper cfg key ===========================================
+// === Ines mapper cfg key ==================================================
 
 #[test]
 fn cfg_ines_mapper_named_matches() {
@@ -975,7 +975,7 @@ fn cfg_ines_mapper_named_does_not_match() {
     assert_eq!(items.len(), 0);
 }
 
-// === Phase 0: statement-level cfg ==========================================
+// === Statement-level cfg ===================================================
 
 #[test]
 fn cfg_on_statement_inside_fn_body_keeps_when_true() {
@@ -1011,7 +1011,7 @@ fn cfg_on_statement_inside_fn_body_drops_when_false() {
     }
 }
 
-// === Phase 0: compile_error! macro ==========================================
+// === Compile-time error macros =============================================
 
 #[test]
 fn compile_error_lexes_as_macro() {
@@ -1034,7 +1034,7 @@ fn compile_error_parses_in_item_position() {
     assert!(items.len() <= 1);
 }
 
-// === Phase 0: array literal syntax =========================================
+// === Array literal syntax ==================================================
 
 #[test]
 fn parse_array_literal_expr() {
@@ -1058,7 +1058,7 @@ fn parse_array_literal_in_expression() {
     let _ = ast;
 }
 
-// === Phase 0: struct literal syntax ========================================
+// === Struct literal syntax =================================================
 
 #[test]
 fn parse_struct_literal_expr() {
@@ -1077,7 +1077,7 @@ fn parse_struct_literal_expr() {
     }
 }
 
-// === Phase 0: debug_assert! defined feature warning =========================
+// === Debug-assert feature warning ==========================================
 
 #[test]
 fn debug_assert_warns_when_feature_not_defined() {
@@ -1119,4 +1119,183 @@ fn debug_assert_no_warning_when_feature_defined() {
         "expected no debug_assert! warning when debug is defined, got: {:?}",
         warnings
     );
+}
+
+// === Official SM83 assembly operands =======================================
+
+/// Helper: parse an SM83 source and return the body statements of
+/// the first top-level fn.
+fn parse_sm83_fn_body(src: &str) -> Vec<FnStmt> {
+    let (ast, diags) = parse_source("test.op", src, "sm83-nintendo-gameboy", &[]);
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "parser errors: {errors:?}");
+    match ast.root.items.into_iter().next().unwrap() {
+        Item::FnDecl { body, .. } => body,
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+/// Assert that the operand is a bare identifier atom (registers,
+/// pairs, and condition words are bare identifiers).
+fn assert_atom(operand: &Operand, name: &str) {
+    match operand {
+        Operand::MemoryOperand {
+            expr: Expr::Ident { name: ident },
+            index_reg: None,
+            is_indirect: false,
+            ..
+        } => assert_eq!(ident, name, "expected the bare identifier '{name}'"),
+        _ => panic!("expected the bare identifier '{name}', got {operand:?}"),
+    };
+}
+
+#[test]
+fn parse_asm_sm83_comma_separated_operands() {
+    let body = parse_sm83_fn_body("fn f() { ld a, #0x34 }");
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        FnStmt::AsmStmt { opcode, operands } => {
+            assert_eq!(opcode, "ld");
+            assert_eq!(operands.len(), 2, "one operand per comma separator");
+            assert_atom(&operands[0], "a");
+            assert!(matches!(&operands[1], Operand::Immediate { .. }));
+        }
+        _ => panic!("expected AsmStmt"),
+    }
+}
+
+#[test]
+fn parse_asm_sm83_direct_memory_forms() {
+    // (hli) is a direct-memory operand followed by a new operand.
+    let body = parse_sm83_fn_body("fn f() { ld (hli), a }");
+    match &body[0] {
+        FnStmt::AsmStmt { operands, .. } => {
+            assert_eq!(operands.len(), 2);
+            match &operands[0] {
+                Operand::MemoryOperand {
+                    expr: Expr::Ident { name },
+                    index_reg: None,
+                    is_indirect: true,
+                    ..
+                } => assert_eq!(name, "hli"),
+                _ => panic!("expected a direct-memory operand"),
+            }
+            assert_atom(&operands[1], "a");
+        }
+        _ => panic!("expected AsmStmt"),
+    }
+
+    // The (hl+) and (hl-) spellings normalize to (hli) and (hld).
+    for (spelling, normalized) in [("(hl+)", "hli"), ("(hl-)", "hld")] {
+        let body = parse_sm83_fn_body(&format!("fn f() {{ ld {spelling}, a }}"));
+        match &body[0] {
+            FnStmt::AsmStmt { operands, .. } => {
+                assert_eq!(operands.len(), 2);
+                match &operands[0] {
+                    Operand::MemoryOperand {
+                        expr: Expr::Ident { name },
+                        index_reg: None,
+                        is_indirect: true,
+                        ..
+                    } => assert_eq!(name, normalized, "the {spelling} spelling"),
+                    _ => panic!("expected a direct-memory operand"),
+                }
+                assert_atom(&operands[1], "a");
+            }
+            _ => panic!("expected AsmStmt"),
+        }
+    }
+}
+
+#[test]
+fn parse_asm_sm83_set_statement() {
+    // The `set` mnemonic begins an assembly statement even though
+    // the lexer classifies it as a condition keyword.
+    let body = parse_sm83_fn_body("fn f() { set 3, c }");
+    assert_eq!(body.len(), 1);
+    match &body[0] {
+        FnStmt::AsmStmt { opcode, operands } => {
+            assert_eq!(opcode, "set");
+            assert_eq!(operands.len(), 2);
+            assert_atom(&operands[1], "c");
+        }
+        _ => panic!("expected AsmStmt"),
+    }
+}
+
+#[test]
+fn parse_asm_sm83_set_condition_unaffected() {
+    // Condition parsing inside if statements is unchanged.
+    let (ast, _diags) = parse_source(
+        "test.op",
+        "fn f() { if (set) { nop } }",
+        "sm83-nintendo-gameboy",
+        &[],
+    );
+    match &ast.root.items.first().unwrap() {
+        Item::FnDecl { body, .. } => match &body[0] {
+            FnStmt::IfStmt { condition, .. } => {
+                assert_eq!(condition.keyword, "set");
+                assert!(condition.modifiers.is_empty());
+            }
+            _ => panic!("expected IfStmt"),
+        },
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_asm_comma_gate_other_identifiers_start_operands() {
+    // After a comma, only x and y continue one indexed operand; any
+    // other identifier starts a new operand on both targets.
+    let body = parse_sm83_fn_body("fn f() { jr nz, 'Boot }");
+    match &body[0] {
+        FnStmt::AsmStmt { opcode, operands } => {
+            assert_eq!(opcode, "jr");
+            assert_eq!(operands.len(), 2);
+            assert_atom(&operands[0], "nz");
+            match &operands[1] {
+                Operand::LabelRef { name } => assert_eq!(name, "Boot"),
+                _ => panic!("expected a label operand"),
+            }
+        }
+        _ => panic!("expected AsmStmt"),
+    }
+}
+
+#[test]
+fn parse_asm_6502_indexed_operand_is_single() {
+    // The 6502 indexed-operand forms survive the comma gate.
+    for (src, expected_index) in [
+        ("lda 0x2000, x", "x"),
+        ("lda 0x2000, y", "y"),
+        ("lda 0x2000, cpu::x", "cpu::x"),
+        ("sta (0x2000), y", "y"),
+    ] {
+        let (ast, _diags) = parse_source(
+            "test.op",
+            &format!("fn f() {{ {src} }}"),
+            "rp2A03-nintendo-nes-ntsc",
+            &[],
+        );
+        match &ast.root.items.first().unwrap() {
+            Item::FnDecl { body, .. } => match &body[0] {
+                FnStmt::AsmStmt { operands, .. } => {
+                    assert_eq!(operands.len(), 1, "{src} stays one operand");
+                    match &operands[0] {
+                        Operand::MemoryOperand { index_reg, .. } => match index_reg {
+                            Some(index) => assert_eq!(index, expected_index),
+                            None => panic!("expected the index register"),
+                        },
+                        _ => panic!("expected a memory operand"),
+                    }
+                }
+                _ => panic!("expected AsmStmt"),
+            },
+            _ => panic!("expected FnDecl"),
+        }
+    }
 }

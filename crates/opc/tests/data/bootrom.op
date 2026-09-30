@@ -1,0 +1,230 @@
+// DMG Boot ROM — reconstructed Op source.
+//
+// Recompiles to the exact 256 bytes of the original Game Boy (DMG) boot
+// ROM. See ../dmg_rom.s for the annotated byte listing.
+//
+// Layout (one ROM block; #[locate] pins make code/data/code exact):
+//   $0000-$00A7  code   startup, audio, logo decode, tilemap, scroll
+//   $00A8-$00D7  data   Nintendo logo bitmap
+//   $00D8-$00DF  data   registered-mark glyph
+//   $00E0-$00FF  code   header verify + boot ROM unmap
+//
+// Build:  cart build --debug
+// Verify: cmp dmg_rom.bin target/sm83-nintendo-gameboy/dmg-rom.bin
+
+#[rom(org = 0x0000, bank = 0, maxsize = 0x100)] {
+    // ------------------------------------------------------------------
+    // $0000-$000B: reset. SP to the top of HRAM; clear 8 KiB VRAM down
+    // from $9FFF to $8000.
+    // ------------------------------------------------------------------
+    noreturn fn reset() {
+        ld_sp #0xFFFE
+        xor_a
+        ld_hl #0x9FFF
+        'ClearVRAM:
+        ld_hld_a
+        bit_h7
+        jr_nz 'ClearVRAM
+
+        // --------------------------------------------------------------
+        // $000C-$0020: APU power-on + channel 1 jingle setup + NR50 +
+        // BGP. HL walks NR52 -> NR51 -> NR50; C walks NR11 -> NR12.
+        // --------------------------------------------------------------
+        ld_hl #0xFF26
+        ld_c #0x11
+        ld #0x80
+        ld_hld_a
+        ld_c_a
+        inc_c
+        ld #0xF3
+        ld_c_a
+        ld_hld_a
+        ld #0x77
+        ld_hl_a
+        ld #0xFC
+        ldh (0x47)
+
+        // --------------------------------------------------------------
+        // $0021-$0033: decode 48 cart-header logo bytes into VRAM tiles
+        // at $8010. The decode helpers expand one nibble each.
+        // --------------------------------------------------------------
+        ld_de #0x0104
+        ld_hl #0x8010
+        'DecodeLogoLoop:
+        ld_a_de
+        call DecodeNibble1
+        call DecodeNibble2
+        inc_de
+        ld_ae
+        cp #0x34
+        jr_nz 'DecodeLogoLoop
+
+        // --------------------------------------------------------------
+        // $0034-$003F: copy the registered-mark glyph (8 rows).
+        // --------------------------------------------------------------
+        ld_de #0x00D8
+        ld_b #0x08
+        'CopyRGlyphLoop:
+        ld_a_de
+        inc_de
+        ldi
+        inc_hl
+        dec_b
+        jr_nz 'CopyRGlyphLoop
+
+        // --------------------------------------------------------------
+        // $0040-$0054: tilemap. Tile $19 (the mark) at $9910; fill the
+        // digit field with tiles $18.. down toward $992F.
+        // --------------------------------------------------------------
+        ld #0x19
+        ld_addr (0x9910)
+        ld_hl #0x992F
+        'TilemapRows:
+        ld_c #0x0C
+        'TilemapCols:
+        dec_a
+        jr_z 'PrepareScroll
+        ld_hld_a
+        dec_c
+        jr_nz 'TilemapCols
+        ld_l #0x0F
+        jr 'TilemapRows
+
+        // --------------------------------------------------------------
+        // $0055-$0094: logo scroll + boot jingle. Pass 1: 100 frames
+        // with B=1. Pass 2: 32 silent frames with B=0. Then the header
+        // check.
+        // --------------------------------------------------------------
+      'PrepareScroll:
+        ld_ha
+        ld #0x64
+        ld_da
+        ldh (0x42)
+        ld #0x91
+        ldh (0x40)
+        inc_b
+
+      'ScrollFrame:
+        ld_e #0x02
+
+      'LoadC:
+        ld_c #0x0C
+
+      'WaitLY144:
+        ldh #0x44
+        cp #0x90
+        jr_nz 'WaitLY144
+        dec_c
+        jr_nz 'WaitLY144
+        dec_e
+        jr_nz 'LoadC
+        ld_c #0x13
+        inc_h
+        ld_ah
+        ld_e #0x83
+        cp #0x62
+        jr_z 'PlayNote
+        ld_e #0xC1
+        cp #0x64
+        jr_nz 'NextFrame
+
+      'PlayNote:
+        ld_ae
+        ld_c_a
+        inc_c
+        ld #0x87
+        ld_c_a
+
+      'NextFrame:
+        ldh #0x42
+        sub_b
+        ldh (0x42)
+        dec_d
+        jr_nz 'ScrollFrame
+        dec_b
+        jr_nz 'HeaderCheck
+        ld_d #0x20
+        jr 'ScrollFrame
+    }
+
+    // ------------------------------------------------------------------
+    // $0095-$00A7: logo nibble expansion helpers. Each call expands one
+    // nibble of C into A (bit doubled) and writes two tile rows.
+    // ------------------------------------------------------------------
+    // Falls through into DecodeNibble2: the second CALL enters one byte
+    // in, past the single-byte prologue.
+    #[locate(addr = 0x0095)]
+    noreturn fn DecodeNibble1() {
+        ld_ca
+    }
+
+    #[locate(addr = 0x0096)]
+    fn DecodeNibble2() {
+        ld_b #0x04
+
+      'BitDoubleLoop:
+        push
+        rl_c
+        rla
+        pop
+        rl_c
+        rla
+        dec_b
+        jr_nz 'BitDoubleLoop
+        ldi
+        inc_hl
+        ldi
+        inc_hl
+        ret
+    }
+
+    // ---------------- $00A8-$00DF: data pins --------------------------
+    #[locate(addr = 0x00A8)]
+    const LOGO_DATA: [u8; 48] = [
+        0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B,
+        0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+        0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E,
+        0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+        0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC,
+        0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+    ];
+
+    #[locate(addr = 0x00D8)]
+    const R_GLYPH: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+
+    // ------------------------------------------------------------------
+    // $00E0-$00FF: verify cart header logo + checksum, then unmap the
+    // boot ROM so the cartridge executes at $0100.
+    // ------------------------------------------------------------------
+    #[locate(addr = 0x00E0)]
+    noreturn fn HeaderCheck() {
+        ld_hl #0x0104
+        ld_de #0x00A8
+
+      'HeaderCmpLoop:
+        ld_a_de
+        inc_de
+        cp_hl
+
+      'HeaderLockup:
+        jr_nz 'HeaderLockup
+        inc_hl
+        ld_al
+        cp #0x34
+        jr_nz 'HeaderCmpLoop
+        ld_b #0x19
+        ld_ab
+
+      'ChecksumLoop:
+        add_a_hl
+        inc_hl
+        dec_b
+        jr_nz 'ChecksumLoop
+        add_a_hl
+
+      'ChecksumLockup:
+        jr_nz 'ChecksumLockup
+        ld #0x01
+        ldh (0x50)
+    }
+}

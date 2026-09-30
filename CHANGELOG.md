@@ -40,11 +40,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references it.
 - `opc` codegen: consts declared inside `#[chr]` blocks now emit into
   that CHR section (previously only ROM blocks collected const data).
+- `opc`: the official Nintendo-manual SM83 assembly statement syntax. An
+  SM83 assembly statement is a mnemonic plus a comma-separated operand
+  list. The operands are register atoms (`a`, `b`, `c`, `d`, `e`, `h`,
+  `l`, `af`, `bc`, `de`, `hl`, `sp`), direct-memory forms (`(hl)`,
+  `(hli)`, `(hld)`, `(hl+)`, `(hl-)`, `(bc)`, `(de)`, `(c)`), condition
+  words (`nz`, `z`, `nc`, `c`) as the first operand of `jr`, `jp`, and
+  `ret`, immediates (`#expr`), and label targets (`'label`). The covered
+  mnemonics: `ld` (register, direct-memory, immediate, register-pair,
+  `(nn)` load/store, and `ld sp, hl` forms, plus `ldh`), the ALU ops
+  (`add`, `adc`, `sub`, `sbc`, `and`, `xor`, `or`, `cp`) with or without
+  the accumulator operand, `inc`/`dec` of registers, pairs, and `(hl)`,
+  the CB family (`rlc`, `rrc`, `rl`, `rr`, `sla`, `sra`, `swap`, `srl`,
+  and `bit`/`res`/`set n, r`), `push`/`pop` of pairs, `jp`/`jr` with or
+  without conditions, `call`, `ret`, `reti`, `ret cc`, `rst n`, and the
+  implied entries (`nop`, `halt`, `stop`, `di`, `ei`, `daa`, `cpl`,
+  `ccf`, `scf`, `rlca`, `rrca`, `rla`, `rra`). The lexer adds the `xor`
+  mnemonic; the snake_case alias `xor_a` remains.
+- `opc`: the SM83 official opcode resolver in
+  `crates/opc/src/sm83_official.rs`. The module holds the opcode matrix
+  as const tables and pure classifier functions. In the code generator,
+  it dispatches before the legacy `ENCODING_SM83` table and
+  `ENCODING_SM83_CB_PAIRS`, and only for the SM83 target. An official
+  mnemonic whose operand forms match no matrix form fails with the E311
+  decode diagnostic and does not fall through to a legacy entry. The
+  snake_case pseudo-mnemonics stay valid aliases, and shapes the
+  resolver does not classify as official keep byte-identical output.
+- `docs`: the language specification documents the official SM83
+  statement syntax (operand grammar, statement forms, examples, alias
+  behavior, and error behavior), and the technical design documents the
+  resolver layering.
 
 ### Changed
 - `opc` optimizer: the whole Commander X16 IO page `$9F00-$9FFF` counts
   as memory-mapped IO, so stores there survive the dead-store and
   redundant-store peepholes.
+- `opc` parser: assembly statements collect their operands as one
+  comma-separated list. After a comma that follows an expression or a
+  parenthesized operand, the parser continues the operand as one indexed
+  form only when the identifier after the comma is `x` or `y` (or
+  `cpu::x`/`cpu::y`); any other identifier starts a new operand. The
+  x/y gate preserves the 6502 indexed forms, and the paren-internal
+  form `(expr, x)` is unchanged.
+- `opc` parser: the direct-memory forms `(hl+)` and `(hl-)` parse
+  through a bounded special case, an `hl` identifier directly followed
+  by `+` or `-` and then `)` inside a paren group, and normalize to
+  the `(hli)` and `(hld)` forms. The `(hl)`, `(hli)`, `(hld)`, `(bc)`,
+  `(de)`, and `(c)` forms parse as plain parenthesized operands.
+- `opc` parser: a `set` token, which lexes as a condition keyword, may
+  now begin an assembly statement, so the SM83 form `set n, r` parses.
+  Condition parsing in `if`, `while`, and `do` statements is
+  unaffected.
+- `opc` lexer: `xor` joins the opcode-mnemonic list, so `xor` lexes as
+  an OPCODE token for every CPU target. The snake_case alias `xor_a`
+  remains.
 - `opc` codegen: the SM83 (Game Boy) 0x0000-0x014F reservation now runs
   only when the source declares a `#[gb]` header attribute. A raw-format
   program (for example, a boot ROM) keeps full control of $0000-$014F.
