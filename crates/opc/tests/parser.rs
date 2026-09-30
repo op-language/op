@@ -772,33 +772,49 @@ fn parse_standalone_attribute() {
     }
 }
 
-// === Placement macros ======================================================
+// === Placement attribute ====================================================
 
 #[test]
-fn parse_placement_locate_fn() {
-    let items = parse_items("locate_fn!(nes_code::main);");
+fn parse_locate_attr_on_const() {
+    let items = parse_items("#[locate(addr = 0x00A8)]\nconst TABLE: [u8; 4] = [1, 2, 3, 4];");
     assert_eq!(items.len(), 1);
     match &items[0] {
-        Item::Placement {
-            macro_name,
-            argument,
-            ..
+        Item::ConstDecl {
+            name, attributes, ..
         } => {
-            assert_eq!(macro_name, "locate_fn");
-            match argument {
-                op_common::ast::PlacementArg::Path { segments } => {
-                    assert_eq!(segments, &["nes_code", "main"]);
-                }
-                _ => panic!("expected Path argument"),
-            }
+            assert_eq!(name, "TABLE");
+            assert_eq!(attributes.len(), 1);
+            assert_eq!(attributes[0].path, "locate");
+            assert_eq!(attributes[0].args[0].name, "addr");
+            assert_eq!(attributes[0].args[0].value, "0x00A8");
         }
-        _ => panic!("expected Placement"),
+        _ => panic!("expected ConstDecl"),
     }
 }
 
 #[test]
-fn parse_placement_locate_bytes() {
-    let items = parse_items("locate_bytes!(\"font.chr\")");
+fn parse_locate_attr_on_fn() {
+    let items = parse_items("#[locate(addr = 0x0040, file = \"blob.bin\")]\nfn h() { }");
+    assert_eq!(items.len(), 1);
+    match &items[0] {
+        Item::FnDecl {
+            name, attributes, ..
+        } => {
+            assert_eq!(name, "h");
+            let attr = &attributes[0];
+            assert_eq!(attr.path, "locate");
+            let addr = attr.args.iter().find(|a| a.name == "addr").unwrap();
+            assert_eq!(addr.value, "0x0040");
+            let file = attr.args.iter().find(|a| a.name == "file").unwrap();
+            assert_eq!(file.value, "\"blob.bin\"");
+        }
+        _ => panic!("expected FnDecl"),
+    }
+}
+
+#[test]
+fn parse_locate_str_inclusion() {
+    let items = parse_items("locate_str!(\"module.op\");");
     assert_eq!(items.len(), 1);
     match &items[0] {
         Item::Placement {
@@ -806,10 +822,10 @@ fn parse_placement_locate_bytes() {
             argument,
             ..
         } => {
-            assert_eq!(macro_name, "locate_bytes");
+            assert_eq!(macro_name, "locate_str");
             match argument {
                 op_common::ast::PlacementArg::String_ { value } => {
-                    assert_eq!(value, "\"font.chr\"");
+                    assert_eq!(value, "\"module.op\"");
                 }
                 _ => panic!("expected String argument"),
             }

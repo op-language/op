@@ -133,15 +133,13 @@ const COMPILE_MACROS: &[(&str, TokenType)] = &[
 
 /// Include macro names and their corresponding token types.
 const INCLUDE_MACROS: &[(&str, TokenType)] = &[
-    ("locate_bytes", TokenType::Include_locate_bytes),
     ("locate_str", TokenType::Include_locate_str),
-    ("locate_fn", TokenType::Include_locate_fn),
     ("font_load", TokenType::Include_font_load),
 ];
 
 /// All CPU opcode mnemonics in lowercase. The lexer matches opcodes
-/// case-insensitively. This includes the 6502, 65SC02, 65C816, 68000,
-/// Z80, and LR35902 CPU families.
+/// case-insensitively. This includes the 6502, 65SC02, W65C02, 65C816,
+/// 68000, Z80, and LR35902 CPU families.
 const OPCODES: &[&str] = &[
     // 6502
     "adc", "and", "asl", "bcc", "bcs", "beq", "bit", "bmi", "bne", "bpl", "brk", "bvc", "bvs",
@@ -151,7 +149,12 @@ const OPCODES: &[&str] = &[
     "tsx", "txa", "txs", "tya", // 6502 undocumented
     "alr", "anc", "ane", "arr", "dcp", "isc", "las", "lax", "lxa", "rla", "rra", "sax", "sha",
     "shx", "shy", "slo", "sre", "tas", "usbc", // 65SC02
-    "bra", "phx", "phy", "plx", "ply", "stz", "tsb", "trb", "ina", "dea", // 65C816
+    // W65C02 Rockwell bit ops (wai and stp are already listed with the
+    // 65C816 group below; the W65C02S shares them)
+    "bra", "phx", "phy", "plx", "ply", "stz", "tsb", "trb", "ina", "dea", "rmb0", "rmb1", "rmb2",
+    "rmb3", "rmb4", "rmb5", "rmb6", "rmb7", "smb0", "smb1", "smb2", "smb3", "smb4", "smb5", "smb6",
+    "smb7", "bbr0", "bbr1", "bbr2", "bbr3", "bbr4", "bbr5", "bbr6", "bbr7", "bbs0", "bbs1", "bbs2",
+    "bbs3", "bbs4", "bbs5", "bbs6", "bbs7", // 65C816
     "rep", "sep", "xba", "xce", "tcd", "tdc", "tcs", "tsc", "txy", "tyx", "mvn", "mvp", "pea",
     "pei", "per", "jml", "jsl", "rtl", "cop", "wai", "stp", // 68000
     "move", "moveq", "movem", "lea", "clr", "not", "or", "eor", "add", "adda", "addi", "addq",
@@ -167,8 +170,10 @@ const OPCODES: &[&str] = &[
     "stop", "ldh", // SM83 register-pair pseudo-instructions
     "inc_hl", "inc_de", "inc_bc", "ld_hl", "ld_de", "ld_bc", "ld_a_hl", "ld_a_bc", "ld_a_de",
     "ld_ba", "ld_ca", "ld_da", "ld_ea", "ld_ha", "ld_la", "ld_ab", "ld_ac", "ld_ad", "ld_ae",
-    "ld_ah", "ld_al",
-    "ld_a", "ld_addr",
+    "ld_ah", "ld_al", "ld_a", "ld_addr", "ld_sp", "ld_hl_a", "ld_hld_a", "ld_c_a", "ld_b", "ld_c",
+    "ld_d", "ld_e", "ld_h", "ld_l", "inc_b", "inc_c", "inc_d", "inc_e", "inc_h", "inc_l", "inc_a",
+    "dec_b", "dec_c", "dec_d", "dec_e", "dec_h", "dec_l", "dec_a", "add_a_hl", "sub_b", "xor_a",
+    "bit_h7", "rl_c", "cp_hl", "jr_nz", "jr_z", "jr_nc", "jr_c",
 ];
 
 /// Multi-character operators, sorted longest-first for longest-match.

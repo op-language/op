@@ -16,6 +16,7 @@ file format, the install command, and the debug-target configuration.
 | Atari 2600 | Raw binary | `.bin`/`.a26` | No header (bankswitch auto-detected) |
 | Atari 5200 | Raw binary | `.bin`/`.a52` | No header; requires `5200.rom` BIOS |
 | Atari 7800 | A78 | `.a78` | 78-byte `ATARI7800` header |
+| Commander X16 | PRG / CRT | `.prg`/`.crt` | PRG 2-byte load address; CRT 480-byte cartridge header |
 | Commodore 64 | PRG/D64/CRT | `.prg`/`.d64`/`.crt` | PRG 2-byte load address; CRT 16-byte header |
 | NEC PC Engine | Raw binary | `.pce` | No header for cart images |
 | Neo Geo AES | MAME zip / .neo | `.zip`/`.neo` | MAME ROM set; .neo has 5-row header |
@@ -43,6 +44,7 @@ file format, the install command, and the debug-target configuration.
 | Atari 2600 | Stella | `stella -debug game.bin` |
 | Atari 5200 | MAME | `mame a5200 -cart game.bin -debug` |
 | Atari 7800 | MAME | `mame a7800 -cart game.a78 -debug` |
+| Commander X16 | x16emu | `x16emu -cart game.crt` or `x16emu -prg game.prg,0801 -run` |
 | Commodore 64 | VICE | `x64sc -binarymonitor game.prg` |
 | NEC PC Engine | Mednafen | `mednafen game.pce` |
 | Neo Geo AES | MAME | `mame aes -cart game.zip -debug` |
@@ -146,6 +148,27 @@ file format, the install command, and the debug-target configuration.
   `mame a7800 -cart game.a78 -debug`.
 - **Required BIOS**: `7800 BIOS (NTSC).a78` or PAL BIOS. Place in the
   emulator ROM directory.
+
+### Commander X16
+
+- **Emulators**: x16emu (https://github.com/X16Community/x16-emulator),
+  X16 Emulator (web, same repository)
+- **ROM format**: `.prg` (2-byte little-endian load address + bytes) or
+  `.crt` (480-byte cartridge header with bank table, then 16 KB per ROM
+  bank).
+- **Install**: download a release from the X16Community releases page for
+  Linux, macOS, or Windows. The release ships `rom.bin` (the system ROM)
+  next to the emulator binary; no other BIOS is needed.
+- **Launch**: cartridge: `x16emu -cart game.crt`. PRG machine code:
+  `x16emu -prg game.prg,0801 -run` (the comma form makes the emulator
+  `SYS` into the code instead of `RUN`, which the BASIC interpreter
+  would parse as a BASIC program).
+- **Debug target**: x16emu has a built-in debugger behind the `-debug`
+  flag. Press F12 to break, F10/F11 to step. The emulator also exposes
+  debug registers `$9FB0-$9FBB`; a write to `$9FBB` prints one character
+  on the host console, which is useful for headless tests.
+- **Required BIOS**: `rom.bin` from the emulator release. Place it in the
+  emulator directory or pass `-rom <path>`.
 
 ### Commodore 64
 

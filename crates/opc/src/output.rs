@@ -3,7 +3,7 @@
 //! When `opc` runs without a stage flag, the file output stage reads the
 //! linked object data and writes the final ROM or binary image. The output
 //! format depends on the target or the `--format` flag: `ines`, `lnx`,
-//! `raw`, `hex`, `sega`, `snes`, `gb`, `sms`, or `a78`.
+//! `raw`, `hex`, `sega`, `snes`, `gb`, `sms`, `a78`, `prg`, or `crt`.
 
 use anyhow::Result;
 use op_ir::{ObjectFile, Section, SectionKind};
@@ -67,6 +67,11 @@ pub fn default_format_for_target(target: &str) -> &'static str {
         "gamegear" | "gg" => "sms",
         "sg1000" => "sms",
         "a7800" | "atari7800" => "a78",
+        // Commander X16: a PRG image loads through the KERNAL LOAD
+        // entry (x16emu -prg), which is the common case. Cartridge
+        // images select the crt format explicitly. The machine
+        // component of the triplet is "x16".
+        "x16" | "cx16" => "prg",
         // Apple II, Atari 800, C64, PCE, Neo Geo, ZX, TI-85: raw binary.
         _ => {
             // Lynx can also be detected by cpu when machine is missing.
@@ -95,6 +100,8 @@ pub fn emit_linked(obj: &ObjectFile, format: &str) -> Result<Vec<u8>> {
         "gb" => Ok(emit_gb(obj)),
         "sms" => Ok(emit_sms(obj)),
         "a78" => emit_a78(obj),
+        "prg" => emit_prg(obj),
+        "crt" => emit_crt(obj),
         other => Err(anyhow::anyhow!("unknown output format: '{}'", other)),
     }
 }
@@ -197,9 +204,8 @@ fn emit_ines(obj: &ObjectFile) -> Result<Vec<u8>> {
     }
     // Mirroring: per the iNES spec, bit 0 = 1 means vertical mirroring,
     // bit 0 = 0 means horizontal mirroring.
-    match header_field(obj, "mirroring") {
-        Some("vertical") => flags6 |= 0x01,
-        _ => {}
+    if let Some("vertical") = header_field(obj, "mirroring") {
+        flags6 |= 0x01;
     }
 
     // Flags 7: upper mapper nibble. NES 1.0 leaves the rest as 0.
@@ -513,7 +519,7 @@ fn emit_snes(obj: &ObjectFile) -> Vec<u8> {
 /// Compute the SNES checksum and its inverse.
 fn snes_checksum(rom: &[u8]) -> (u16, u16) {
     let mut sum: u16 = 0;
-    for chunk in rom.chunks_exact(2) {
+    for chunk in rom.as_chunks::<2>().0 {
         let word = (chunk[0] as u16) | ((chunk[1] as u16) << 8);
         sum = sum.wrapping_add(word);
     }
@@ -757,6 +763,157 @@ fn emit_a78(obj: &ObjectFile) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// --- Commander X16 PRG format ----------------------------------------------
+
+/// Emit a Commander X16 PRG file.
+///
+/// The file is a 2-byte little-endian load address followed by the image
+/// bytes. The X16 KERNAL LOAD routine reads the first two bytes as the
+/// destination address (when the secondary address has bit 0 clear), and
+/// the emulator's `-prg` option runs the program at that address. The
+/// load address comes from the `load` header field when present, else
+/// from the first ROM section's `org`. A program with no ROM sections
+/// emits just the 2-byte header (a valid empty program).
+fn emit_prg(obj: &ObjectFile) -> Result<Vec<u8>> {
+    let roms = rom_sections(obj);
+
+    let load = header_field_u32(obj, "load")
+        .or_else(|| roms.first().map(|s| s.org))
+        .unwrap_or(0);
+
+    let body_bytes: Vec<u8> = roms.iter().flat_map(|s| s.data.iter().copied()).collect();
+
+    let mut out = Vec::with_capacity(2 + body_bytes.len());
+    out.push((load & 0xFF) as u8);
+    out.push(((load >> 8) & 0xFF) as u8);
+    out.extend_from_slice(&body_bytes);
+    Ok(out)
+}
+
+// --- Commander X16 CRT cartridge format ------------------------------------
+
+/// The 16-byte magic of the Commander X16 cartridge format.
+const CRT_MAGIC: &[u8; 16] = b"CX16 CARTRIDGE\r\n";
+
+/// The cartridge format version the emulator accepts. The loader rejects
+/// any other 16-byte version string, so this must match exactly.
+const CRT_FORMAT_VERSION: &[u8; 16] = b"01.00           ";
+
+/// The first cartridge ROM bank visible at $C000.
+const CRT_FIRST_BANK: u32 = 32;
+
+/// The number of cartridge banks (banks 32..=255).
+const CRT_BANK_COUNT: u32 = 224;
+
+/// The bank flag value for a 16 KB write-protected ROM bank.
+const CRT_BANK_ROM: u8 = 0x01;
+
+/// The size of one cartridge bank (16 KB).
+const CRT_BANK_SIZE: usize = 0x4000;
+
+/// Copy `value` into a fixed-size field, truncating and padding with
+/// spaces. The emulator space-pads these text fields and trims trailing
+/// spaces on load, so a short value and an absent value are equivalent.
+fn crt_text_field(value: Option<&str>, len: usize) -> Vec<u8> {
+    let mut field = vec![b' '; len];
+    if let Some(v) = value {
+        let bytes = v.as_bytes();
+        let n = bytes.len().min(len);
+        field[..n].copy_from_slice(&bytes[..n]);
+    }
+    field
+}
+
+/// Emit a Commander X16 cartridge (.crt) file.
+///
+/// The 480-byte header holds the magic, the format version, four
+/// space-padded text fields, 96 reserved bytes, and a 224-entry bank
+/// table. The payload holds exactly 16 KB per ROM bank, in bank order.
+/// Cartridge banks are numbered from 32; a section with bank N places at
+/// cartridge bank N, and its `org` must fall in the $C000-$FFFF window.
+fn emit_crt(obj: &ObjectFile) -> Result<Vec<u8>> {
+    let roms = rom_sections(obj);
+
+    // The bank-32 image must exist: the KERNAL only boots cartridges
+    // from bank 32, and the entry point must be reachable there.
+    if !roms.iter().any(|s| s.bank == CRT_FIRST_BANK) {
+        anyhow::bail!(
+            "crt format requires a ROM section with bank = 32 (the boot bank); none was found"
+        );
+    }
+
+    // Place every ROM section into its 16 KB cartridge bank image.
+    let mut banks = vec![Vec::new(); CRT_BANK_COUNT as usize];
+    for section in &roms {
+        if section.bank < CRT_FIRST_BANK {
+            anyhow::bail!(
+                "crt format: ROM section '{}' has bank {} which is below the first cartridge \
+                 bank 32",
+                section.name,
+                section.bank
+            );
+        }
+        if section.bank >= CRT_FIRST_BANK + CRT_BANK_COUNT {
+            anyhow::bail!(
+                "crt format: ROM section '{}' has bank {} above the last cartridge bank 255",
+                section.name,
+                section.bank
+            );
+        }
+        if !(0xC000..0x10000).contains(&section.org) {
+            anyhow::bail!(
+                "crt format: ROM section '{}' has org 0x{:04X} outside the $C000-$FFFF \
+                 cartridge window",
+                section.name,
+                section.org
+            );
+        }
+        let idx = (section.bank - CRT_FIRST_BANK) as usize;
+        let offset = (section.org - 0xC000) as usize;
+        let bank = &mut banks[idx];
+        let needed = offset + section.data.len();
+        if bank.len() < needed {
+            bank.resize(needed, obj.pad_byte);
+        }
+        bank[offset..offset + section.data.len()].copy_from_slice(&section.data);
+    }
+
+    // Build the 480-byte header.
+    let mut header = Vec::with_capacity(480);
+    header.extend_from_slice(CRT_MAGIC);
+    header.extend_from_slice(CRT_FORMAT_VERSION);
+    header.extend_from_slice(&crt_text_field(header_field(obj, "name"), 32));
+    header.extend_from_slice(&crt_text_field(header_field(obj, "author"), 32));
+    header.extend_from_slice(&crt_text_field(header_field(obj, "copyright"), 32));
+    header.extend_from_slice(&crt_text_field(header_field(obj, "version"), 32));
+    header.extend_from_slice(&[0u8; 96]);
+
+    // Write the boot signature into the first 4 bytes of the bank-32
+    // image. The codegen reserves $C000-$C003 for it; without the
+    // signature the KERNAL does not boot the cartridge.
+    banks[0][0..4].copy_from_slice(b"CX16");
+
+    // Bank table: 0x01 (ROM) for each bank the image occupies, 0x00 for
+    // absent banks. The payload carries data only for the flagged banks.
+    let mut flags = vec![0u8; CRT_BANK_COUNT as usize];
+    let mut payload = Vec::new();
+    for (idx, bank) in banks.iter().enumerate() {
+        if bank.is_empty() {
+            continue;
+        }
+        flags[idx] = CRT_BANK_ROM;
+        let mut bank_bytes = bank.clone();
+        let padded = bank_bytes.len().next_multiple_of(CRT_BANK_SIZE);
+        bank_bytes.resize(padded, obj.pad_byte);
+        payload.extend_from_slice(&bank_bytes);
+    }
+    header.extend_from_slice(&flags);
+
+    let mut out = header;
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
 // --- Tests ----------------------------------------------------------------
 
 #[cfg(test)]
@@ -899,6 +1056,164 @@ mod tests {
     #[test]
     fn default_format_for_unknown_is_raw() {
         assert_eq!(default_format_for_target("mos6502-none-none-ntsc"), "raw");
+    }
+
+    // --- Commander X16 PRG format ------------------------------------------
+
+    #[test]
+    fn prg_format_writes_load_address_and_data() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![
+                rom_section(0, 0xC000, vec![0xAA; 4]),
+                rom_section(1, 0xC000, vec![0xBB; 4]),
+            ],
+        );
+        let bytes = emit_linked(&obj, "prg").unwrap();
+        // Load address 0xC000 little-endian, then the concatenated data.
+        assert_eq!(
+            bytes,
+            vec![0x00, 0xC0, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB]
+        );
+    }
+
+    #[test]
+    fn prg_format_load_field_overrides_org() {
+        let mut obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0x01])],
+        );
+        obj.header = Some(HeaderFields {
+            format: "prg".into(),
+            fields: vec![("load".into(), "0x0801".into())],
+        });
+        let bytes = emit_linked(&obj, "prg").unwrap();
+        assert_eq!(bytes, vec![0x01, 0x08, 0x01]);
+    }
+
+    #[test]
+    fn prg_format_with_no_rom_sections_is_header_only() {
+        let obj = make_obj("w65c02-commander-x16", vec![]);
+        let bytes = emit_linked(&obj, "prg").unwrap();
+        assert_eq!(bytes, vec![0x00, 0x00]);
+    }
+
+    #[test]
+    fn default_format_for_x16_is_prg() {
+        assert_eq!(default_format_for_target("w65c02-commander-x16"), "prg");
+    }
+
+    // --- Commander X16 CRT format ------------------------------------------
+
+    #[test]
+    fn crt_format_writes_magic_and_version() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0x00; 16 * 1024])],
+        );
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        assert_eq!(&bytes[0..16], b"CX16 CARTRIDGE\r\n");
+        assert_eq!(&bytes[16..32], b"01.00           ");
+        // Header: 16 + 16 + 4*32 + 96 + 224.
+        assert_eq!(bytes.len(), 480 + 16 * 1024);
+    }
+
+    #[test]
+    fn crt_format_writes_boot_signature_in_bank_32_gap() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0x00; 16 * 1024])],
+        );
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        // The payload starts at 480; $C000-$C003 must hold the "CX16"
+        // signature the KERNAL boot check requires.
+        assert_eq!(&bytes[480..484], b"CX16");
+    }
+
+    #[test]
+    fn crt_format_flags_bank_32_rom() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0x00; 16 * 1024])],
+        );
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        // The bank table starts at header offset 256 (16 magic + 16
+        // version + 4*32 text + 96 reserved) and has 224 entries;
+        // cartridge bank 32 is entry 0.
+        assert_eq!(bytes[256], 0x01);
+        // No other bank is flagged.
+        assert!(bytes[257..256 + 224].iter().all(|&b| b == 0x00));
+        // The payload starts right after the bank table; its first 4
+        // bytes hold the boot signature.
+        assert_eq!(&bytes[480..484], b"CX16");
+    }
+
+    #[test]
+    fn crt_format_pads_bank_payload_to_16k() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0xAA; 16])],
+        );
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        // One flagged bank: the payload is exactly 16 KB.
+        assert_eq!(bytes.len(), 480 + 16 * 1024);
+        // The signature occupies the first 4 bytes; the section data
+        // follows it (the source placed at $C000, so it overlaps the
+        // signature region and the signature overwrites its first 4
+        // bytes, which is the documented crt contract).
+        assert_eq!(&bytes[480..484], b"CX16");
+        assert_eq!(&bytes[484..496], &[0xAA; 12]);
+        // The rest of the bank is pad-byte filled.
+        assert_eq!(bytes[480 + 16], 0x00);
+    }
+
+    #[test]
+    fn crt_format_places_section_data_at_org_offset() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC004, vec![0xBB; 8])],
+        );
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        // org $C004 maps to payload offset 4 within the bank.
+        assert_eq!(&bytes[480 + 4..480 + 12], &[0xBB; 8]);
+        // The $C000-$C003 gap holds the boot signature.
+        assert_eq!(&bytes[480..484], b"CX16");
+    }
+
+    #[test]
+    fn crt_format_truncates_description_at_32_bytes() {
+        let mut obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0xC000, vec![0x00; 16 * 1024])],
+        );
+        obj.header = Some(HeaderFields {
+            format: "crt".into(),
+            fields: vec![("name".into(), "X".repeat(40))],
+        });
+        let bytes = emit_linked(&obj, "crt").unwrap();
+        // Description field at offset 32: the first 32 bytes survive and
+        // the field is not space-padded past them.
+        assert_eq!(&bytes[32..64], &[b'X'; 32]);
+    }
+
+    #[test]
+    fn crt_format_rejects_missing_boot_bank() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(33, 0xC000, vec![0x00; 16 * 1024])],
+        );
+        let result = emit_linked(&obj, "crt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn crt_format_rejects_org_outside_cartridge_window() {
+        let obj = make_obj(
+            "w65c02-commander-x16",
+            vec![rom_section(32, 0x8000, vec![0x00; 16])],
+        );
+        let result = emit_linked(&obj, "crt");
+        assert!(result.is_err());
     }
 
     /// Helper trait to construct an ObjectFile with sections inline.

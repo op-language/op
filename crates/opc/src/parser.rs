@@ -37,7 +37,7 @@ pub fn run(args: &OpcArgs) -> Result<()> {
     let stream: TokenStream = op_common::from_json(&json)?;
     // The token stream's `file` field holds the original source path. Use it
     // so the AST carries the source path forward to the codegen, which needs
-    // it to resolve `locate_bytes!`/`locate_str!` paths and the standard
+    // it to resolve `#[locate(file = ...)]`/`locate_str!` paths and the standard
     // library relative to the source directory.
     let (ast, diags) = parse_token_stream_full(
         &stream.file.clone(),
@@ -496,7 +496,7 @@ impl Parser {
             return self.parse_block_attribute_item(attrs);
         }
 
-        // Placement macros: locate_bytes!(...), locate_fn!(...)
+        // Source-inclusion macro: locate_str!("file.op")
         if kind.starts_with("Include_") {
             return Some(self.parse_placement(attrs));
         }
@@ -555,6 +555,12 @@ impl Parser {
                     // pub fn is public
                     item
                 }
+                // `pub` may precede fn prefix keywords: `pub noreturn fn`.
+                "noreturn" => self.parse_fn_decl(true, attrs),
+                "inline" => self.parse_inline_fn_decl(attrs),
+                // `pub` may also prefix a const or volatile var.
+                "const" => self.parse_const_decl(attrs),
+                "volatile" => self.parse_var_decl(attrs),
                 _ => {
                     self.error(201, format!("unexpected keyword after 'pub': {}", kw));
                     self.advance();

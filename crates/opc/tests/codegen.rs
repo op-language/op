@@ -925,6 +925,180 @@ fn rp2a07_interrupt_vector_irq() {
     assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFF8));
 }
 
+// === W65C02 CPU tests -------------------------------------------------------
+
+#[test]
+fn w65c02_encoding_table_superset_of_65sc02() {
+    use opc::encoding::{get_encoding_table, get_full_encoding_table};
+    let base = get_encoding_table("w65c02");
+    assert!(!base.is_empty());
+    // The base table lists only the opcodes beyond the 65SC02 core.
+    assert_eq!(base.len(), opc::encoding::ENCODING_W65C02.len());
+
+    let full = get_full_encoding_table("w65c02");
+    // Base 6502 + 65SC02 + W65C02 tables.
+    assert_eq!(
+        full.len(),
+        opc::encoding::ENCODING_6502.len()
+            + opc::encoding::ENCODING_65SC02.len()
+            + opc::encoding::ENCODING_W65C02.len()
+    );
+}
+
+#[test]
+fn w65c02_full_table_has_65sc02_and_w65c02_entries() {
+    use opc::encoding::{get_full_encoding_table, AddrMode};
+    let table = get_full_encoding_table("w65c02");
+    // 65SC02 core entry present (BRA relative).
+    assert!(table.iter().any(|e| e.mnemonic.eq_ignore_ascii_case("bra")
+        && matches!(e.mode, AddrMode::Relative)
+        && e.opcode == 0x80));
+    // WDC low-power modes.
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("wai") && e.opcode == 0xCB));
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("stp") && e.opcode == 0xDB));
+    // Rockwell bit manipulation.
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("smb0") && e.opcode == 0x87));
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("rmb7") && e.opcode == 0x77));
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("bbr0") && e.opcode == 0x0F));
+    assert!(table
+        .iter()
+        .any(|e| e.mnemonic.eq_ignore_ascii_case("bbs7") && e.opcode == 0xFF));
+}
+
+/// Helper: parse and compile a source string with the W65C02 target.
+fn compile_w65c02(src: &str) -> ObjectFile {
+    let (ast, _diags) = parse_source("test.op", src, "w65c02-commander-x16", &[]);
+    let (obj, _codegen_diags) = compile_source(&ast, 1, &[], &[]);
+    obj
+}
+
+#[test]
+fn w65c02_target_uses_w65c02_encodings() {
+    let obj =
+        compile_w65c02("#[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { wai } }");
+    let rom = obj.sections.iter().find(|s| s.kind == SectionKind::Rom);
+    assert!(rom.is_some());
+    // WAI assembles to the single byte 0xCB, followed by the implicit
+    // RTS the codegen appends to a fn that does not end control flow.
+    assert_eq!(rom.unwrap().data, vec![0xCB, 0x60]);
+}
+
+#[test]
+fn w65c02_smb0_emits_zeropage_form() {
+    let obj = compile_w65c02(
+        "#[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { smb0 0x20 } }",
+    );
+    let rom = obj.sections.iter().find(|s| s.kind == SectionKind::Rom);
+    // SMB0 $20 -> 87 20, then the implicit RTS.
+    assert_eq!(rom.unwrap().data, vec![0x87, 0x20, 0x60]);
+}
+
+#[test]
+fn w65c02_bbs0_branches_to_label() {
+    let obj = compile_w65c02(
+        "#[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] {
+            fn main() {
+                bbs0 0x20, 'skip
+                nop
+                'skip: rts
+            }
+        }",
+    );
+    let rom = obj.sections.iter().find(|s| s.kind == SectionKind::Rom);
+    let rom = rom.unwrap();
+    // BBS0 $20,'skip -> 8F 20 <placeholder offset>.
+    assert_eq!(rom.data[0], 0x8F);
+    assert_eq!(rom.data[1], 0x20);
+    // The branch offset is a Branch8 relocation against the 'skip
+    // label at the third instruction byte. The linker computes the
+    // relative displacement.
+    let branch = rom
+        .relocations
+        .iter()
+        .find(|r| r.kind == op_ir::RelocKind::Branch8 && r.symbol == "skip");
+    assert!(
+        branch.is_some(),
+        "no Branch8 reloc for 'skip: {:?}",
+        rom.relocations
+    );
+    let branch = branch.unwrap();
+    assert_eq!(branch.offset, 2);
+    assert_eq!(rom.data[3], 0xEA); // NOP
+    assert_eq!(rom.data[4], 0x60); // RTS at the 'skip label
+}
+
+// === W65C02 Commander X16 vectors and cartridge placement ===================
+
+#[test]
+fn vector_address_w65c02() {
+    use opc::codegen::interrupt_vector_address;
+    assert_eq!(interrupt_vector_address("w65c02", "reset"), Some(0xFFFC));
+    assert_eq!(interrupt_vector_address("w65c02", "nmi"), Some(0xFFFA));
+    assert_eq!(interrupt_vector_address("w65c02", "irq"), Some(0xFFF8));
+    // The W65C02S has no other vector names.
+    assert_eq!(interrupt_vector_address("w65c02", "vblank"), None);
+}
+
+#[test]
+fn vector_encoding_w65c02_is_pointer2() {
+    use op_ir::VectorEncoding;
+    use opc::codegen::vector_encoding_for;
+    // The W65C02S uses the 6502-family 2-byte little-endian vector
+    // entries, which is the encoding_for default.
+    assert_eq!(vector_encoding_for("w65c02"), VectorEncoding::Pointer2);
+}
+
+#[test]
+fn w65c02_crt_reservation_places_entry_at_offset_4() {
+    let obj = compile_w65c02(
+        "#[crt(name = \"TEST\")]
+        #[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { nop } }",
+    );
+    let rom = obj
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom && s.bank == 32);
+    let rom = rom.unwrap();
+    // The first 4 bytes hold the cartridge boot signature written at
+    // emit time; code starts at offset 4 ($C004).
+    let main_sym = rom.symbols.iter().find(|s| s.name == "main");
+    assert!(
+        main_sym.is_some(),
+        "main symbol not found: {:?}",
+        rom.symbols
+    );
+    assert_eq!(main_sym.unwrap().offset, 4);
+    assert_eq!(rom.data[0], 0x00);
+    assert_eq!(rom.data[4], 0xEA); // the fn body: nop
+    assert_eq!(rom.data[5], 0x60); // implicit RTS
+}
+
+#[test]
+fn w65c02_no_crt_header_starts_at_offset_0() {
+    let obj =
+        compile_w65c02("#[rom(org = 0xC000, bank = 32, maxsize = 0x4000)] { fn main() { nop } }");
+    let rom = obj
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom && s.bank == 32);
+    let rom = rom.unwrap();
+    // Without a #[crt] header the program keeps full control of the
+    // section start (a PRG program).
+    let main_sym = rom.symbols.iter().find(|s| s.name == "main");
+    assert!(main_sym.is_some());
+    assert_eq!(main_sym.unwrap().offset, 0);
+}
+
 // === Phase 0: array const placement ========================================
 
 #[test]

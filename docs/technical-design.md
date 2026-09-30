@@ -252,6 +252,8 @@ See `file-formats.md` for the full `.opl` format specification.
 | `gb` | Game Boy, Game Boy Color | Cartridge header at offset `0x100`. |
 | `sms` | Master System, Game Gear, SG-1000 | `TMR SEGA` header at offset `0x7FF0`. |
 | `a78` | Atari 7800 | 78-byte `ATARI7800` header. |
+| `prg` | Commander X16 | 2-byte little-endian load address, then the image. |
+| `crt` | Commander X16 | 480-byte cartridge header with bank table, then 16 KB per ROM bank. |
 
 ## opc pipeline stages
 
@@ -271,8 +273,8 @@ lib lists it.
 
 The lexer writes the token stream as JSON (.opx).
 
-The lexer does **not** follow `mod` declarations, `locate_bytes!` macros,
-`locate_str!` macros, or `locate_fn!` macros. The lexer emits the keywords and
+The lexer does **not** follow `mod` declarations, `locate_str!` macros, or
+`#[locate]` attributes. The lexer emits the keywords and
 the arguments as tokens. The parser stage resolves modules and includes.
 
 ### Stage 2: parser
@@ -365,14 +367,16 @@ For each `#[interrupt(name)]` function, the code generator records the
 interrupt vector entry. The linker writes the vector entry into the vector
 table.
 
-For each `locate_bytes!("file")` macro, the code generator reads the binary
-file and emits the bytes into the current section.
+For each `#[locate(...)]` attribute on a const, the code generator pins the
+data bytes at the `addr` argument's address: it fills the gap from the
+current block end to the pin address with the pad byte and records the
+symbol at the pin offset. With a `file` argument, the code generator reads
+the binary file and emits its bytes instead of the const's own value bytes.
+A pin is a placement directive: the item places even without a reference.
 
-For each `locate_fn!(path::name)` macro, the code generator locates the named
-function in the referenced module, compiles its body, and emits the
-instructions into the current ROM section at the current offset. If the
-`locate_fn!` call has an `#[interrupt(...)]` attribute, the code generator
-records the interrupt vector entry.
+For each `#[locate(addr = ...)]` attribute on a fn declared inside a
+`#[rom]` block, the placer moves the body start to the pin address before
+the fn compiles.
 
 For each `#[ines(...)]` or `#[lnx(...)]` attribute, the code generator records
 the header fields. The linker writes the header into the output file.
@@ -388,8 +392,8 @@ contains a `lib.op` file is the std crate root.
 The code generator caches parsed std modules by absolute file path. When
 multiple `use` declarations reference the same module, the cache returns the
 already-parsed AST. The cache also records the directory of each std module
-file so that `locate_bytes!` and `locate_str!` inside a std module resolve
-paths relative to the std file.
+file so that `#[locate(file = ...)]` and `locate_str!` inside a std module
+resolve paths relative to the std file.
 
 The code generator resolves use trees recursively. A glob import (`use
 std::cpu::*`) imports all public items from the target module. A single-item
@@ -458,8 +462,8 @@ following roots, in declaration order:
 
 1. A non-inline `fn` with an `#[interrupt(name)]` attribute on its
    definition. The placer places the fn in the first `#[rom]` block.
-2. A `fn` declared directly inside a `#[rom]` block.
-3. A `fn` pinned by a `locate_fn!` placement inside a `#[rom]` block.
+2. A `fn` declared directly inside a `#[rom]` block. A `#[locate(addr = ...)]`
+   pin on the fn moves its body start to that absolute address.
 
 The placer walks each root's body, expanding inline fns with parameter
 substitution, and records edges to called non-inline fns and referenced
@@ -610,6 +614,15 @@ product code, region, version, and ROM size.
 
 **Atari 7800:** 78-byte `ATARI7800` header with the cart name, mapper, region,
 and Pokey flags. ROM data follows the header.
+
+**Commander X16 PRG:** 2-byte little-endian load address, then the ROM
+sections in bank order. The load address comes from the `load` header field
+or the first ROM section's `org`.
+
+**Commander X16 CRT:** 480-byte cartridge header (magic, format version,
+name, author, copyright, program version, reserved bytes, bank table), then
+16 KB per ROM bank. The emitter writes the `CX16` boot signature at
+`$C000-$C003` of the bank-32 image.
 
 See `docs/supported-emulators.md` for the complete list of supported
 emulators, ROM formats, and debug-target configuration for each target

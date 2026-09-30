@@ -18,7 +18,7 @@ pub struct AstFile {
     pub version: u32,
     pub target: String,
     /// Path of the root source file. Used by the codegen to resolve
-    /// `locate_bytes!` and `locate_str!` paths relative to the source
+    /// `#[locate(file = ...)]` and `locate_str!` paths relative to the source
     /// directory. Empty when the AST was not parsed from a file.
     #[serde(default)]
     pub file: String,
@@ -425,14 +425,14 @@ pub enum InitValue {
     String_ { value: String },
 }
 
-/// An argument to a placement macro (`locate_bytes!`, `locate_str!`,
-/// `locate_fn!`).
+/// An argument to a placement macro (`locate_str!`,
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum PlacementArg {
-    /// A string literal argument (for `locate_bytes!` and `locate_str!`).
+    /// A string literal argument (for `locate_str!`).
     String_ { value: String },
-    /// A module path argument (for `locate_fn!`).
+    /// A module path argument.
     Path { segments: Vec<String> },
 }
 
