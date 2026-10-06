@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0]
+
+### Added
+- `opc`: or-chain `if` conditions. The condition of an `if` statement
+  carries one or more clauses separated by the word `or`. Each clause is
+  an optional brace-delimited statement block plus the ordinary
+  modifier+keyword condition test. The compiler runs the clauses in
+  order, emits a forward short-circuit guard per clause before the last,
+  and patches the last clause past the then-block. Each clause keyword
+  tests the flags that its own statements left. A one-clause chain emits
+  the same bytes as a plain `if`. Or-chains are accepted in `if`
+  conditions only. `while` and `do-while` keep the single-test form.
+- `opc`: the `.opa` condition serialization changed shape. `IfStmt`
+  stores an array of `ConditionClause` objects instead of one `Condition`
+  object. `.opa` files written by 0.13.x fail to deserialize against
+  0.14.0. See `docs/file-formats.md` for the new forms.
+
+### Changed
+- `opc` codegen: the `loop { }` back edge on SM83 and Z80 targets emits
+  the 2-byte relative `JR` (`0x18` + displacement) when the backward
+  distance fits -128..=127, and the absolute jump otherwise. The
+  fallback is silent and produces no diagnostic.
+
 ## [0.13.0]
 
 ### Added

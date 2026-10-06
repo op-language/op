@@ -564,7 +564,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "op-common"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "op-diagnostics"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "op-ir"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "op-common",
  "op-target",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "op-target"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "op-common",
  "serde",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "opc"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "opfont"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "clap",

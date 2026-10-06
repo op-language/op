@@ -11,9 +11,9 @@ pub mod target;
 pub mod tokens;
 
 pub use ast::{
-    Access, AstFile, AttrArg, Attribute, BinaryOp, BranchHint, Condition, EnumVariant, Expr, Field,
-    FnStmt, InitValue, Item, Module, OffsetOp, Operand, PlacementArg, SwitchCase, Type, UnaryOp,
-    UseRoot, UseTail, UseTree,
+    Access, AstFile, AttrArg, Attribute, BinaryOp, BranchHint, Condition, ConditionClause,
+    EnumVariant, Expr, Field, FnStmt, InitValue, Item, Module, OffsetOp, Operand, PlacementArg,
+    SwitchCase, Type, UnaryOp, UseRoot, UseTail, UseTree,
 };
 pub use envelope::{from_json, to_json, Envelope};
 pub use target::{TargetTriplet, TripletError};

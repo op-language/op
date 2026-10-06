@@ -309,6 +309,25 @@ fn codegen_loop_statement() {
 }
 
 #[test]
+fn codegen_or_chain_statement() {
+    let obj = compile(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
+            fn f() { if (zero or { inx } nonzero) { dex } }
+        }",
+    );
+    let data = &obj.sections[0].data;
+    // Clause 1 without statements: BEQ +3 branches into the then-block
+    // when the Z flag is set. Clause 2 runs INX and BEQ +1 branches
+    // past the 1-byte then-block when N is clear (clause true when
+    // nonzero). DEX is the then-block and RTS the implicit return.
+    assert_eq!(
+        data,
+        &[0xF0, 0x03, 0xE8, 0xF0, 0x01, 0xCA, 0x60],
+        "6502 or-chain must emit per-clause short-circuit guards"
+    );
+}
+
+#[test]
 fn codegen_return_statement() {
     let obj = compile(
         "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
@@ -322,8 +341,10 @@ fn codegen_return_statement() {
 // === SM83 flow control =====================================================
 //
 // Statement-level flow control on SM83 must emit SM83 opcodes: the
-// unconditional jumps use JP (0xC3) and returns use RET (0xC9).
-// The 6502-family behavior is covered by the tests above and stays
+// unconditional statement-level jumps use JP (0xC3) and returns use
+// RET (0xC9). The `loop` back edge uses the 2-byte relative JR (0x18)
+// when its distance fits -128..=127 and JP nn otherwise. The
+// 6502-family behavior is covered by the tests above and stays
 // byte-identical.
 
 /// Helper: parse and compile a source string with the SM83 target at
@@ -412,17 +433,202 @@ fn sm83_do_while_backward_branch_unchanged() {
 }
 
 #[test]
-fn sm83_loop_emits_cpu_jump() {
+fn sm83_loop_backedge_emits_jr_in_range() {
     let (obj, diags) = compile_sm83(
         "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { loop { inc_b } } }",
         0,
     );
     assert_no_compile_errors(&diags);
     let data = &obj.sections[0].data;
+    // INC_B (1 byte) + JR back with displacement -(1 + 2) = -3 (0xFD).
+    // The loop ends the fn body, so no implicit RET follows.
     assert_eq!(
         data,
-        &[0x04, 0xC3, 0x00, 0x00],
-        "SM83 loop back-jump must be JP nn"
+        &[0x04, 0x18, 0xFD],
+        "SM83 loop back edge must be the 2-byte JR when in range"
+    );
+}
+
+#[test]
+fn sm83_loop_backedge_falls_back_to_jp() {
+    // A body of 127 NOPs puts the JR displacement at -129, beyond the
+    // signed 8-bit range; the back edge must fall back to the 3-byte
+    // absolute JP nn, silently.
+    let mut body = String::new();
+    for _ in 0..127 {
+        body.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ loop {{ {body} }} }} }}"
+    );
+    let (obj, diags) = compile_sm83(&src, 0);
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // 127 NOPs (0x00) + JP nn back to the fn start at 0x0000.
+    let mut expected = vec![0x00; 127];
+    expected.extend_from_slice(&[0xC3, 0x00, 0x00]);
+    assert_eq!(
+        data, &expected,
+        "an out-of-range loop distance must fall back to JP nn"
+    );
+}
+
+#[test]
+fn sm83_loop_backedge_distance_boundaries() {
+    // A body of 126 bytes puts the JR displacement at exactly -128
+    // (0x80), still in range; one more body byte puts it at -129 and
+    // drops the back edge to the 3-byte absolute JP nn.
+    let cases: [(usize, &[u8]); 2] = [(126, &[0x18, 0x80]), (127, &[0xC3, 0x00, 0x00])];
+    for (body_len, tail) in cases {
+        let mut body = String::new();
+        for _ in 0..body_len {
+            body.push_str("nop ");
+        }
+        let src = format!(
+            "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ loop {{ {body} }} }} }}"
+        );
+        let (obj, diags) = compile_sm83(&src, 0);
+        assert_no_compile_errors(&diags);
+        let data = &obj.sections[0].data;
+        assert_eq!(
+            &data[data.len() - tail.len()..],
+            tail,
+            "a loop with a body of {body_len} NOPs must end with {tail:?}"
+        );
+    }
+}
+
+#[test]
+fn sm83_empty_loop_emits_jr() {
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { loop { } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // An empty body gives displacement -2 (0xFE): a 2-byte spin.
+    assert_eq!(
+        data,
+        &[0x18, 0xFE],
+        "an empty SM83 loop must be the 2-byte JR spin"
+    );
+}
+
+#[test]
+fn sm83_or_chain_one_clause_matches_plain_if() {
+    // A one-clause chain must emit exactly the plain-if bytes, with
+    // and without clause statements.
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (zero) { inc_b } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // JR NZ +1 over INC_B, then the implicit RET.
+    assert_eq!(
+        data,
+        &[0x20, 0x01, 0x04, 0xC9],
+        "a one-clause chain must reduce to the plain-if guard"
+    );
+
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if ({ inc_b } zero) { nop } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // INC_B, JR NZ +1 past NOP (clause false -> skip the 1-byte
+    // block), NOP, implicit RET.
+    assert_eq!(
+        data,
+        &[0x04, 0x20, 0x01, 0x00, 0xC9],
+        "a one-clause chain with statements must guard past the block"
+    );
+}
+
+#[test]
+fn sm83_or_chain_two_clause_jingle_bytes() {
+    // The dmg bootrom jingle skip: a keyword-only clause guards into
+    // the then-block, a brace clause runs its statements and retests.
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { cp #0x62; if (zero or { ld e, #0xC1; cp #0x64 } zero) { ld a, e; ld (c), a; inc c; ld a, #0x87; ld (c), a } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // CP $62; JR Z +6 (clause 1 true -> then-block); LD E,$C1; CP $64;
+    // JR NZ +6 (clause 2 false -> past the then-block); the 6-byte
+    // play body; implicit RET.
+    assert_eq!(
+        data,
+        &[
+            0xFE, 0x62, 0x28, 0x06, 0x1E, 0xC1, 0xFE, 0x64, 0x20, 0x06, 0x7B, 0xE2, 0x0C, 0x3E,
+            0x87, 0xE2, 0xC9
+        ],
+        "two-clause or-chain must match the bootrom jingle bytes"
+    );
+}
+
+#[test]
+fn sm83_or_chain_three_clause() {
+    // Two short-circuit guards plus the final guard over the block.
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (zero or { inc_b } carry or { inc_c } equal) { nop } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // JR Z +6 (clause 1 -> then-block); INC_B; JR C +3 (clause 2 ->
+    // then-block); INC_C; JR NZ +1 (clause 3 false -> past the 1-byte
+    // block); NOP; implicit RET.
+    assert_eq!(
+        data,
+        &[0x28, 0x06, 0x04, 0x38, 0x03, 0x0C, 0x20, 0x01, 0x00, 0xC9],
+        "three-clause or-chain must chain the guards in order"
+    );
+}
+
+#[test]
+fn sm83_or_chain_not_modifier_polarity() {
+    // The `not` modifier inverts only its own clause: the leading
+    // guard branches into the block when NOT Z, the final guard skips
+    // the block on Z.
+    let (obj, diags) = compile_sm83(
+        "#[rom(org = 0, bank = 0, maxsize = 0x100)] { fn f() { if (not zero or { inc_b } not zero) { nop } } }",
+        0,
+    );
+    assert_no_compile_errors(&diags);
+    let data = &obj.sections[0].data;
+    // JR NZ +3 (clause 1 true -> then-block); INC_B; JR Z +1 (clause
+    // 2 false -> past the 1-byte block); NOP; implicit RET.
+    assert_eq!(
+        data,
+        &[0x20, 0x03, 0x04, 0x28, 0x01, 0x00, 0xC9],
+        "`not` must invert only the clause it prefixes"
+    );
+}
+
+#[test]
+fn sm83_or_chain_out_of_range_errors() {
+    // A clause block that pushes a short-circuit guard past the
+    // signed 8-bit range must report E308 instead of wrapping.
+    let mut body = String::new();
+    for _ in 0..130 {
+        body.push_str("nop ");
+    }
+    let src = format!(
+        "#[rom(org = 0, bank = 0, maxsize = 0x10000)] {{ fn f() {{ if (zero or {{ {body} }} set) {{ nop }} }} }}"
+    );
+    let (_obj, diags) = compile_sm83(&src, 0);
+    let e308 = diags.iter().find(|d| {
+        d.severity == op_diagnostics::Severity::Error
+            && d.code == 308
+            && d.message.contains("if")
+            && d.message.contains("fn 'f'")
+    });
+    assert!(
+        e308.is_some(),
+        "expected an E308 branch-distance error: {diags:?}"
     );
 }
 

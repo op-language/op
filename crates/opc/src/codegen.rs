@@ -8,8 +8,8 @@
 
 use anyhow::Result;
 use op_common::ast::{
-    Access, Attribute, Condition, Expr, FnStmt, InitValue, Item, Module, OffsetOp, Operand,
-    PlacementArg, SwitchCase, Type, UseRoot, UseTail, UseTree,
+    Access, Attribute, Condition, ConditionClause, Expr, FnStmt, InitValue, Item, Module, OffsetOp,
+    Operand, PlacementArg, SwitchCase, Type, UseRoot, UseTail, UseTree,
 };
 use op_common::{AstFile, TargetTriplet};
 use op_diagnostics::{Diagnostic, Severity};
@@ -1377,10 +1377,21 @@ impl Codegen {
                 self.analyze_stmt(stmt, params, callees, data_refs, enum_refs, inline_calls);
             }
             FnStmt::IfStmt {
+                condition,
                 then_block,
                 else_block,
                 ..
             } => {
+                for clause in condition {
+                    self.analyze_stmts(
+                        &clause.statements,
+                        params,
+                        callees,
+                        data_refs,
+                        enum_refs,
+                        inline_calls,
+                    );
+                }
                 self.analyze_stmts(
                     then_block,
                     params,
@@ -3709,7 +3720,7 @@ impl Codegen {
 
     fn compile_if(
         &mut self,
-        condition: &Condition,
+        clauses: &[ConditionClause],
         then_block: &[FnStmt],
         else_block: &Option<Vec<FnStmt>>,
     ) {
@@ -3729,11 +3740,42 @@ impl Codegen {
             return;
         }
 
-        // Emit branch-if-not-condition over the then-block.
-        let branch_op = self.condition_to_branch_op(condition, false);
-        self.emit_byte(branch_op);
-        let patch_offset = self.current_data_len();
-        self.emit_byte(0); // placeholder branch offset
+        // Emit the or-chain of clause guards. Every clause but the
+        // last compiles its statements and emits a
+        // branch-if-condition placeholder; a true clause
+        // short-circuits into the then-block. The last clause compiles
+        // its statements and emits a branch-if-not-condition
+        // placeholder patched past the then-block, which is exactly
+        // the plain-if guard when the chain has one clause.
+        let mut chain_patches: Vec<usize> = Vec::new();
+        let mut last_patch_offset: Option<usize> = None;
+        for (index, clause) in clauses.iter().enumerate() {
+            for stmt in &clause.statements {
+                self.compile_stmt(stmt);
+            }
+            let is_last = index + 1 == clauses.len();
+            let branch_op = self.condition_to_branch_op(&clause.condition, !is_last);
+            self.emit_byte(branch_op);
+            let patch_offset = self.current_data_len();
+            self.emit_byte(0); // placeholder branch offset
+            if is_last {
+                last_patch_offset = Some(patch_offset);
+            } else {
+                chain_patches.push(patch_offset);
+            }
+        }
+
+        // Patch the short-circuit guards to the then-block start. The
+        // distance spans the remaining clause bytes before the block;
+        // the E308 check keeps a long chain from silently wrapping.
+        let then_start = self.current_data_len();
+        for patch_offset in chain_patches {
+            let distance = then_start as i64 - patch_offset as i64 - 1;
+            self.check_branch_distance(distance, "if");
+            if distance >= 0 {
+                self.patch_byte(patch_offset, distance as u8);
+            }
+        }
 
         // Compile the then-block.
         for stmt in then_block {
@@ -3748,11 +3790,13 @@ impl Codegen {
             self.emit_byte(0);
             self.emit_byte(0);
 
-            // Patch the branch to skip over the then-block + JMP.
-            let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
-            self.check_branch_distance(then_size, "if");
-            if then_size >= 0 {
-                self.patch_byte(patch_offset, then_size as u8);
+            // Patch the last guard to skip over the then-block + JMP.
+            if let Some(patch_offset) = last_patch_offset {
+                let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
+                self.check_branch_distance(then_size, "if");
+                if then_size >= 0 {
+                    self.patch_byte(patch_offset, then_size as u8);
+                }
             }
 
             // Compile the else-block.
@@ -3765,11 +3809,13 @@ impl Codegen {
             self.patch_byte(else_jump_patch, (else_end & 0xFF) as u8);
             self.patch_byte(else_jump_patch + 1, ((else_end >> 8) & 0xFF) as u8);
         } else {
-            // Patch the branch to skip over the then-block.
-            let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
-            self.check_branch_distance(then_size, "if");
-            if then_size >= 0 {
-                self.patch_byte(patch_offset, then_size as u8);
+            // Patch the last guard to skip over the then-block.
+            if let Some(patch_offset) = last_patch_offset {
+                let then_size = self.current_data_len() as i64 - patch_offset as i64 - 1;
+                self.check_branch_distance(then_size, "if");
+                if then_size >= 0 {
+                    self.patch_byte(patch_offset, then_size as u8);
+                }
             }
         }
     }
@@ -3831,12 +3877,25 @@ impl Codegen {
             self.compile_stmt(stmt);
         }
 
-        // Emit JMP/JP back to loop_start (absolute address = offset + org).
-        // Use the CPU-family-specific jump opcode.
-        let jmp_opcode = self.unconditional_jump_op();
-        self.emit_byte(jmp_opcode);
-        self.emit_byte((loop_abs & 0xFF) as u8);
-        self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
+        // Emit the back jump to loop_start. On SM83/Z80 the relative
+        // JR form (0x18) is 2 bytes when the backward distance fits in
+        // the signed 8-bit displacement (-128..=127); the distance is
+        // section-relative, so it does not involve the org. When the
+        // distance does not fit, or on other CPU families, fall back
+        // to the absolute CPU-family jump (absolute address =
+        // offset + org).
+        let jr_offset = loop_start as i64 - (self.current_data_len() as i64 + 2);
+        let use_relative_jr =
+            matches!(self.target.cpu.as_str(), "sm83" | "z80") && (-128..=127).contains(&jr_offset);
+        if use_relative_jr {
+            self.emit_byte(0x18); // JR
+            self.emit_byte(jr_offset as u8);
+        } else {
+            let jmp_opcode = self.unconditional_jump_op();
+            self.emit_byte(jmp_opcode);
+            self.emit_byte((loop_abs & 0xFF) as u8);
+            self.emit_byte(((loop_abs >> 8) & 0xFF) as u8);
+        }
     }
 
     fn compile_switch(&mut self, _register: &str, cases: &[SwitchCase]) {
@@ -4002,7 +4061,13 @@ impl Codegen {
                 else_block,
             } => FnStmt::IfStmt {
                 branch_hint: *branch_hint,
-                condition: condition.clone(),
+                condition: condition
+                    .iter()
+                    .map(|clause| ConditionClause {
+                        statements: self.substitute_block(&clause.statements, params, args),
+                        condition: clause.condition.clone(),
+                    })
+                    .collect(),
                 then_block: self.substitute_block(then_block, params, args),
                 else_block: else_block
                     .as_ref()
