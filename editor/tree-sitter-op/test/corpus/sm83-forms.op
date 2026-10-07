@@ -1,0 +1,41 @@
+//! SM83 official assembly forms
+//!
+//! Official SM83 statements with comma-separated operands and the register
+//! atom spellings the compiler normalizes: (hl), (hli), (hld), (hl+),
+//! (hl-), (bc), (de), and (c).
+
+const LINE: u8 = 0x10;
+
+fn boot() {
+  ld sp, #0xFFFE
+  ld hl, #0x9FFF
+  ld de, #0xC000
+  xor a
+  ld (hl), a
+  inc (hl)
+  ld (hl+), a
+  ld (hld), a
+  ld a, (hli)
+  ld (hl-), a
+  ldh (LCD::LINE), a
+  cp #0x34
+  jr nc, 'clear
+  jr z, 'tick
+  'clear:
+  ld a, (bc)
+  ld a, (de)
+  ld a, (c)
+  set 4, b
+  stop
+}
+
+fn tick() {
+  if (is zero) {
+    xor a
+  }
+  while (is carry_clear) {
+    inc hl
+    ld a, (hl+)
+    return
+  }
+}

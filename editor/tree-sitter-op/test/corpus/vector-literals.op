@@ -1,0 +1,24 @@
+//! Vector literals
+//!
+//! Annotated array consts with bracket initializers and struct literals in
+//! expression position.
+
+#[cfg(cpu = "rp2A03")]
+const DATA: [u8; 4] = [1, 2, 3, 4];
+
+const TILES: [u8] = [0x10, 0x20,];
+
+struct point {
+  x: u16,
+  y: u16,
+}
+
+const ORIGIN: point = point { x: 0, y: 0 };
+
+fn draw() {
+  p: point = point { x: 1, y: 2 };
+  blit([1, 2, 3])
+  blit(point { x: 1, y: 2 })
+  assert!(len!(TILES) > 1);
+  return
+}

@@ -1,0 +1,56 @@
+//! W65C02 Rockwell and 65C816 extras
+//!
+//! The Rockwell bit operations, the 65C816 mnemonics, the standard CPU
+//! library extras (phb phd phk plb pld tad tda tsa wdm), and the shared
+//! wai, stp, jml, and jsl statements.
+
+const BANK: u8 = 0x01;
+
+fn core() {
+  rep #0x20
+  sep #0x30
+  xba
+  xce
+  phb
+  plb
+  phd
+  pld
+  phk
+  tad
+  tda
+  tsa
+  wdm
+  pea #0x0000
+  pei (BANK)
+  per 'table
+  jml (0x0200)
+  jsl 'far
+  rtl
+}
+
+fn far() {
+  rmb0 0x40
+  smb7 0x40
+  bbr3 0x40, 'set
+  bbs6 0x40, 'exit
+  cop #0x04
+  wai
+  stp
+  bra 'far
+  'set:
+  tyx
+  bit #0x10
+  'exit:
+  return
+}
+
+fn table() {
+  mvn #1, #2
+  mvp #1, #2
+  tcd #0x00
+  tdc
+  tcs #0x00
+  tsc
+  txy
+  return
+}

@@ -43,19 +43,25 @@ use nes_code::*;
 #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
 
     #[interrupt(reset)]
-    include_fn!(nes_code::main);
+    noreturn fn main() {
+        rts
+    }
 
     #[interrupt(nmi)]
-    include_fn!(nes_code::nmi_handler);
+    fn nmi_handler() {
+        rti
+    }
 
     #[interrupt(irq)]
-    include_fn!(nes_code::irq_handler);
+    fn irq_handler() {
+        rti
+    }
 }
 
 // --- CHR data (pattern tables) ---------------------------------------------
 
 #[chr(bank = 0)] {
-    include_bytes!("font.chr")
+    font_load!("font.chr")
 }
 
 // --- filler/padding --------------------------------------------------------

@@ -1,0 +1,26 @@
+//! Or-chain conditions
+//!
+//! Or-chain `if` conditions with and without clause blocks, with a branch
+//! hint, plus a plain `if` condition, next to a `while` that keeps the
+//! single-test condition form.
+
+const VBLANK: u8 = 1;
+
+fn poll() {
+  ticks: u8 = 0;
+  if (is zero or is carry_set) {
+    return
+  }
+  if ({ inc ticks } is zero or is positive) {
+    return
+  }
+  if (near is plus or { dec ticks } is nonzero) {
+    return
+  }
+  if (is minus) {
+    return
+  }
+  while (is negative) {
+    return
+  }
+}
