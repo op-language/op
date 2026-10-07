@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stores an array of `ConditionClause` objects instead of one `Condition`
   object. `.opa` files written by 0.13.x fail to deserialize against
   0.14.0. See `docs/file-formats.md` for the new forms.
+- `editor`: the complete Neovim syntax file and the install tooling
+  under `editor/`. The syntax file `editor/syntax/op.vim` covers the
+  seven CPU families (6502, 65SC02, W65C02, 65C816, 68000, Z80, SM83).
+  The coverage includes the 6502 undocumented set, the W65C02 Rockwell
+  bit instructions, the 65C816 std-lib extras, and the SM83 underscore
+  pseudo-instructions. The script `editor/install.sh` installs the
+  syntax file and the filetype detector into the Neovim config. The
+  script `editor/uninstall.sh` removes those two files.
+  `editor/README.md` documents the install steps and the coverage.
+- `editor`: tree-sitter grammar, query, and corpus updates in
+  `editor/tree-sitter-op`. The grammar adds the new opcode families,
+  the or-chain condition rules, and the assembly operand list with the
+  SM83 official forms. It also accepts vector literals, struct
+  literals, and the complete macro and attribute vocabulary. The
+  highlight query colors the `or` separator in or-chain conditions.
+  Four new corpus files cover the new forms.
 
 ### Changed
 - `opc` codegen: the `loop { }` back edge on SM83 and Z80 targets emits
