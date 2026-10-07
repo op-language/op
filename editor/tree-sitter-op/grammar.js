@@ -1,13 +1,15 @@
 // Op grammar for tree-sitter
 //
 // Models the normalized LR(1) grammar in
-// `op/docs/language-specification.md` (lines 1552-1729).
+// `op/docs/language-specification.md` (lines 1999-2190) and matches the
+// compiler in `op/crates/opc/`.
 //
 // Op is a high-level assembler for retro game consoles. Source files use
-// the `.op` extension. The lexer classifies a statement-leading identifier
-// as an opcode if it matches the hard-coded CPU-family keyword set. Libs
-// may define further opcodes; unknown statement-leading identifiers fall
-// back to a generic `identifier` node so the grammar still parses.
+// the `.op` extension. A statement-leading word parses as an opcode when it
+// matches one of the CPU-family mnemonic sets in the lexer's OPCODES list;
+// the grammar models the lowercase forms. Any other statement-leading word
+// takes the variable-declaration reading, like the compiler's statement
+// dispatch.
 
 const OPCODE_6502 = [
   'adc', 'and', 'asl', 'bcc', 'bcs', 'beq', 'bit', 'bmi', 'bne', 'bpl', 'brk',
@@ -25,9 +27,20 @@ const OPCODE_65SC02 = [
   'bra', 'phx', 'phy', 'plx', 'ply', 'stz', 'tsb', 'trb', 'ina', 'dea',
 ];
 
+const OPCODE_W65C02 = [
+  // W65C02 Rockwell bit operations (wai and stp are shared with the 65C816)
+  'rmb0', 'rmb1', 'rmb2', 'rmb3', 'rmb4', 'rmb5', 'rmb6', 'rmb7',
+  'smb0', 'smb1', 'smb2', 'smb3', 'smb4', 'smb5', 'smb6', 'smb7',
+  'bbr0', 'bbr1', 'bbr2', 'bbr3', 'bbr4', 'bbr5', 'bbr6', 'bbr7',
+  'bbs0', 'bbs1', 'bbs2', 'bbs3', 'bbs4', 'bbs5', 'bbs6', 'bbs7',
+];
+
 const OPCODE_65C816 = [
   'rep', 'sep', 'xba', 'xce', 'tcd', 'tdc', 'tcs', 'tsc', 'txy', 'tyx', 'mvn',
   'mvp', 'pea', 'pei', 'per', 'jml', 'jsl', 'rtl', 'cop', 'wai', 'stp',
+  // Declared by the W65C816 std CPU library only, not yet lexer opcode
+  // tokens; kept in the grammar so library sources parse.
+  'phb', 'phd', 'phk', 'plb', 'pld', 'tad', 'tda', 'tsa', 'wdm',
 ];
 
 const OPCODE_68000 = [
@@ -45,16 +58,26 @@ const OPCODE_Z80 = [
   'scf', 'halt', 'di', 'ei', 'im', 'rlc', 'rl', 'rrc', 'rr', 'sla', 'sra',
   'sll', 'srl', 'rld', 'rrd', 'rlca', 'rrca', 'rra', 'jp', 'jr', 'djnz',
   'call', 'ret', 'reti', 'retn', 'rst', 'in', 'out', 'ini', 'inir', 'ind',
-  'indr', 'outi', 'otir', 'outd', 'otdr', 'bit', 'set', 'res',
+  'indr', 'outi', 'otir', 'outd', 'otdr', 'bit', 'set', 'res', 'xor',
 ];
 
 const OPCODE_LR35902 = [
   'stop', 'ldi', 'ldd', 'ldh',
+  // SM83 register-pair underscore pseudo-instructions
+  'inc_hl', 'inc_de', 'inc_bc', 'ld_hl', 'ld_de', 'ld_bc', 'ld_a_hl',
+  'ld_a_bc', 'ld_a_de', 'ld_ba', 'ld_ca', 'ld_da', 'ld_ea', 'ld_ha', 'ld_la',
+  'ld_ab', 'ld_ac', 'ld_ad', 'ld_ae', 'ld_ah', 'ld_al', 'ld_a', 'ld_addr',
+  'ld_sp', 'ld_hl_a', 'ld_hld_a', 'ld_c_a', 'ld_b', 'ld_c', 'ld_d', 'ld_e',
+  'ld_h', 'ld_l', 'inc_b', 'inc_c', 'inc_d', 'inc_e', 'inc_h', 'inc_l',
+  'inc_a', 'dec_b', 'dec_c', 'dec_d', 'dec_e', 'dec_h', 'dec_l', 'dec_a',
+  'add_a_hl', 'sub_b', 'xor_a', 'bit_h7', 'rl_c', 'cp_hl', 'jr_nz', 'jr_z',
+  'jr_nc', 'jr_c',
 ];
 
 const OPCODES = [
   ...OPCODE_6502,
   ...OPCODE_65SC02,
+  ...OPCODE_W65C02,
   ...OPCODE_65C816,
   ...OPCODE_68000,
   ...OPCODE_Z80,
@@ -72,8 +95,7 @@ const CONDITION_KEYWORDS = [
   // z80
   'not_zero', 'no_carry', 'parity_even', 'parity_odd', 'sign_positive',
   'sign_negative',
-  // shared
-  'true', 'false',
+  // true and false are keywords in the compiler and never condition tokens
 ];
 
 const CONDITION_MODIFIERS = ['is', 'has', 'no', 'not'];
@@ -90,17 +112,20 @@ const PRIMITIVE_TYPES = [
 
 const MODE_PREFIXES = ['zp', 'abs', 'rel', 'ind', 'idx', 'ind_l', 'ind_idx'];
 
+// Reference data for the attribute vocabulary. The `attr_path` rule stays
+// identifier-driven; this const is kept for documentation and tooling.
 const ATTR_NAMES = [
-  'cfg', 'interrupt', 'addr', 'rom', 'ram', 'chr', 'align', 'setpad', 'ines',
-  'lnx', 'loader',
+  'cfg', 'crash_handler', 'interrupt', 'addr', 'rom', 'ram', 'chr', 'align',
+  'setpad', 'ines', 'lnx', 'loader', 'gb', 'snes', 'sega', 'sms', 'a78',
+  'crt', 'locate',
 ];
 
-const COMPILE_MACROS = ['lo', 'hi', 'nylo', 'nyhi', 'sizeof'];
-
-const INCLUDE_MACROS = [
-  'locate_bytes', 'locate_str', 'locate_fn',
-  'include_bytes', 'include_str', 'include_fn',
+const COMPILE_MACROS = [
+  'lo', 'hi', 'nylo', 'nyhi', 'sizeof', 'len', 'compile_error', 'assert',
+  'assert_eq', 'debug_assert', 'debug_assert_eq', 'panic',
 ];
+
+const INCLUDE_MACROS = ['locate_str', 'font_load'];
 
 module.exports = grammar({
   name: 'op',
@@ -116,11 +141,16 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
-    [$.path, $._primary],
     [$.assembly_stmt, $.assembly_stmt],
+    // A `, index_reg` continuation and a new operand both start at the same
+    // comma after an indexed operand; the compiler binds only x, y, cpu::x,
+    // and cpu::y, so both readings stay alive and the dynamic precedence
+    // below picks the bound reading.
+    [$.memory_operand, $.memory_operand],
+    [$.memory_operand, $._primary],
     [$.init_list, $._primary],
     [$._operand, $._primary],
-    [$.memory_operand, $._primary],
+    [$._selector_start, $.path],
   ],
 
   rules: {
@@ -161,10 +191,33 @@ module.exports = grammar({
     _attr_path_segment: $ => $.identifier,
 
     attr_args: $ => seq('(', sep1($.attr_arg, ','), optional(','), ')'),
+
     attr_arg: $ => choice(
       $.identifier,
       $.literal,
+      $.attr_dotted_key,
       seq($.identifier, '=', $.literal),
+      $.attr_combinator,
+    ),
+
+    // Dotted attribute keys such as ines.mapper; a dotted name may carry the
+    // key=value form the cfg predicates use for header fields (for example
+    // ines.mapper = "nrom").
+    attr_dotted_key: $ => seq(
+      $.identifier,
+      repeat1(seq('.', $.identifier)),
+      optional(seq('=', $.literal)),
+    ),
+
+    // Combinator arguments with nested argument lists; `not` reaches the
+    // parser as a modifier token, so it needs a literal form beside bare
+    // identifiers (the compiler accepts the shape for any name).
+    attr_combinator: $ => seq(
+      choice($.identifier, 'not'),
+      '(',
+      sep1($.attr_arg, ','),
+      optional(','),
+      ')',
     ),
 
     block_attribute: $ => seq(
@@ -182,6 +235,7 @@ module.exports = grammar({
     // --- Declarations -------------------------------------------------------
 
     const_decl: $ => seq(
+      optional('pub'),
       'const',
       field('name', $.identifier),
       ':',
@@ -192,6 +246,7 @@ module.exports = grammar({
     ),
 
     var_decl: $ => seq(
+      optional('pub'),
       optional('volatile'),
       field('name', $.identifier),
       ':',
@@ -222,6 +277,7 @@ module.exports = grammar({
     )),
 
     fn_decl: $ => seq(
+      optional('pub'),
       optional('noreturn'),
       'fn',
       field('name', $.identifier),
@@ -231,6 +287,7 @@ module.exports = grammar({
     ),
 
     inline_fn_decl: $ => seq(
+      optional('pub'),
       'inline',
       'fn',
       field('name', $.identifier),
@@ -380,11 +437,13 @@ module.exports = grammar({
       $.fn_call,
       $.return_stmt,
       $.var_decl,
+      $.macro_stmt,
     ),
 
     label: $ => seq(
       $.label_def,
       choice(
+        $.label,
         $.assembly_stmt,
         $.if_stmt,
         $.while_stmt,
@@ -394,6 +453,7 @@ module.exports = grammar({
         $.fn_call,
         $.return_stmt,
         $.var_decl,
+        $.macro_stmt,
       ),
     ),
 
@@ -403,10 +463,12 @@ module.exports = grammar({
 
     // --- Assembly -----------------------------------------------------------
 
-    assembly_stmt: $ => seq(
-      $.opcode,
-      repeat($._operand),
-    ),
+    // Operands are separated by commas; each operand may carry a trailing
+    // comma. The shapes that bind `, index_reg` into the memory operand take
+    // precedence over list separation, matching the compiler, where only
+    // x, y, cpu::x, and cpu::y continue a memory operand after a comma. The
+    // trailing semicolon is tolerated, as in the compiler's asm statement.
+    assembly_stmt: $ => seq($.opcode, repeat(seq($._operand, optional(','))), optional(';')),
 
     opcode: $ => choice(...OPCODES),
 
@@ -421,30 +483,60 @@ module.exports = grammar({
 
     immediate: $ => seq('#', $._expr),
 
-    memory_operand: $ => prec(3, choice(
-      seq(optional($.mode_prefix), $._expr),
-      seq(optional($.mode_prefix), '(', $._expr, ')', optional($.index_reg)),
-      seq(optional($.mode_prefix), $._expr, ',', $.index_reg),
-      seq(optional($.mode_prefix), '(', $._expr, ',', $.index_reg, ')'),
-      seq(optional($.mode_prefix), '(', $._expr, ')', ',', $.index_reg),
-    )),
+    memory_operand: $ => choice(
+      prec(3, seq(optional($.mode_prefix), $._expr)),
+      prec(3, seq(optional($.mode_prefix), '(', $._expr, ')')),
+      prec.dynamic(1, prec(3, seq(optional($.mode_prefix), $._expr, ',', $.index_reg))),
+      prec(4, seq(optional($.mode_prefix), '(', $._expr, ',', $._index_operand_reg, ')')),
+      prec.dynamic(1, prec(3, seq(optional($.mode_prefix), '(', $._expr, ')', ',', $.index_reg))),
+      // SM83 register-atom spellings the compiler normalizes: (hl+) and
+      // (hl-). The bump spelling is one token, so `hl+` and `hl-` are not
+      // extracted as keywords and the word `hl` stays readable as the
+      // parenthesized expression in `ld (hl), a`.
+      $._hl_inc_dec_atom,
+    ),
+
+    _hl_inc_dec_atom: $ => seq('(', token(choice('hl+', 'hl-')), ')'),
 
     mode_prefix: $ => choice(...MODE_PREFIXES),
 
-    index_reg: $ => choice($.register_ref, $.identifier),
+    // The `, index_reg` continuation after a statement operand matches the
+    // compiler's gated continuation: only x, y, cpu::x, and cpu::y bind into
+    // the indexed operand, and any other identifier starts a new operand.
+    // Inside a parenthesized memory operand the compiler instead accepts any
+    // identifier or cpu::register as the index (parse_index_reg), so that
+    // position stays broad.
+    index_reg: $ => choice($.index_register, $.cpu_index_reg),
+
+    index_register: $ => choice('x', 'y'),
+
+    cpu_index_reg: $ => seq('cpu', '::', $.index_register),
+
+    _index_operand_reg: $ => choice($.register_ref, $.identifier),
 
     register_ref: $ => seq('cpu', '::', $.identifier),
 
-    label_ref: $ => seq("'", $.identifier),
+    // A label reference is the open form `'name` or the closed form
+    // `'name'`, which the lexer produces for the SM83 operands. The closing
+    // apostrophe is an immediate token, so the open form never reaches
+    // across whitespace (the next line's label definition keeps its quote).
+    label_ref: $ => seq("'", $.identifier, optional(token.immediate("'"))),
 
+    // A selector chains a base identifier through `::` module accesses and
+    // `.` field accesses, matching the compiler's selector continuation, so
+    // both `a::b` and `a.b` parse with a bare identifier base. The compiler
+    // also accepts `+primary`/`-primary` offset continuations on selectors;
+    // those spans already parse as additive expressions, so both readings
+    // cover the same operand text.
     selector: $ => prec(10, seq(
-      $.path,
+      $._selector_start,
       repeat1(choice(
         seq('::', $.identifier),
         seq('.', $.identifier),
-        seq(choice('+', '-'), $._expr),
       )),
     )),
+
+    _selector_start: $ => $.identifier,
 
     path: $ => prec.left(seq(
       $.identifier,
@@ -457,11 +549,23 @@ module.exports = grammar({
       'if',
       '(',
       optional($.branch_hint),
-      $.condition,
+      $.if_condition,
       ')',
       choice($.block, $._fn_stmt),
       optional($.else_block),
     )),
+
+    // Or-chain `if` conditions; each clause may open with a block. The plain
+    // `condition` shape stays for while and do-while, matching the compiler.
+    if_condition: $ => seq(
+      $.condition_clause,
+      repeat(seq('or', $.condition_clause)),
+    ),
+
+    condition_clause: $ => seq(
+      optional($.block),
+      $.condition,
+    ),
 
     else_block: $ => seq(
       'else',
@@ -495,7 +599,7 @@ module.exports = grammar({
     switch_stmt: $ => seq(
       'switch',
       '(',
-      $.register_ref,
+      choice($.register_ref, $.identifier),
       ')',
       '{',
       repeat($.switch_case),
@@ -592,25 +696,61 @@ module.exports = grammar({
       $.fn_call,
       $.macro_call,
       $.include_macro_call,
+      $.array_literal,
+      $.struct_literal,
       seq('(', $._expr, ')'),
       $.identifier,
     ),
 
+    // Compile-time macro statements in fn bodies: an optional semicolon,
+    // matching the compiler's optional_semicolon.
+    macro_stmt: $ => seq($.macro_call, optional(';')),
+
+    // The macro name and the `!` are a single token. The bare names (a `len`
+    // parameter or argument, for example) stay ordinary identifiers: the
+    // compiler reads them as words, and keyword extraction would otherwise
+    // shadow the word token in expression and argument positions.
     macro_call: $ => seq(
-      field('macro', choice(...COMPILE_MACROS)),
-      '!',
+      field('macro', $.macro_name),
       '(',
       $._expr,
       ')',
     ),
 
+    macro_name: $ => token(choice(...COMPILE_MACROS.map((name) => name + '!'))),
+
     include_macro_call: $ => seq(
-      field('macro', choice(...INCLUDE_MACROS)),
-      '!',
+      field('macro', $.include_macro_name),
       '(',
       choice($.string, $.path, $.selector),
       ')',
     ),
+
+    include_macro_name: $ => token(choice(...INCLUDE_MACROS.map((name) => name + '!'))),
+
+    // Bracket array literals as expression primaries.
+    array_literal: $ => prec.left(seq(
+      '[',
+      optional(seq(
+        sep1($._expr, ','),
+        optional(','),
+      )),
+      ']',
+    )),
+
+    // Struct literals in expression position: Type { field: expr, ... }. The
+    // compiler binds an identifier followed by a brace to a struct literal in
+    // every expression position, so this rule takes precedence over the
+    // plain identifier reads.
+    struct_literal: $ => prec.left(5, seq(
+      field('type_name', $.identifier),
+      '{',
+      optional(seq(
+        sep1(seq(field('field', $.identifier), ':', $._expr), ','),
+        optional(','),
+      )),
+      '}',
+    )),
 
     // --- Literals -----------------------------------------------------------
 

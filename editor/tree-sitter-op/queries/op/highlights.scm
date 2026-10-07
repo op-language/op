@@ -85,6 +85,10 @@
 
 (opcode) @keyword
 
+; The or-chain separator in `if` conditions is a plain `or` token next to the
+; condition clauses; as an assembly opcode it is covered by the capture above.
+"or" @keyword
+
 ; --- Register references ---------------------------------------------------
 
 (register_ref) @variable.builtin
