@@ -466,8 +466,9 @@ module.exports = grammar({
     // Operands are separated by commas; each operand may carry a trailing
     // comma. The shapes that bind `, index_reg` into the memory operand take
     // precedence over list separation, matching the compiler, where only
-    // x, y, cpu::x, and cpu::y continue a memory operand after a comma.
-    assembly_stmt: $ => seq($.opcode, repeat(seq($._operand, optional(',')))),
+    // x, y, cpu::x, and cpu::y continue a memory operand after a comma. The
+    // trailing semicolon is tolerated, as in the compiler's asm statement.
+    assembly_stmt: $ => seq($.opcode, repeat(seq($._operand, optional(','))), optional(';')),
 
     opcode: $ => choice(...OPCODES),
 
@@ -515,7 +516,11 @@ module.exports = grammar({
 
     register_ref: $ => seq('cpu', '::', $.identifier),
 
-    label_ref: $ => seq("'", $.identifier),
+    // A label reference is the open form `'name` or the closed form
+    // `'name'`, which the lexer produces for the SM83 operands. The closing
+    // apostrophe is an immediate token, so the open form never reaches
+    // across whitespace (the next line's label definition keeps its quote).
+    label_ref: $ => seq("'", $.identifier, optional(token.immediate("'"))),
 
     // A selector chains a base identifier through `::` module accesses and
     // `.` field accesses, matching the compiler's selector continuation, so

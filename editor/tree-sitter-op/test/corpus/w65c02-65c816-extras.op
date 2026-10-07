@@ -1,25 +1,30 @@
 //! W65C02 Rockwell and 65C816 extras
 //!
-//! The Rockwell bit operations, the 65C816 mnemonics, the standard CPU
-//! library extras (phb phd phk plb pld tad tda tsa wdm), and the shared
-//! wai, stp, jml, and jsl statements.
+//! The Rockwell bit operations, the 65C816 mnemonics, and the shared wai,
+//! stp, jml, and jsl statements. The standard CPU library declares the nine
+//! extras (phb phd phk plb pld tad tda tsa wdm) as OPCODE enum members;
+//! the lexer has no opcode tokens for them yet, so this file declares them
+//! the library way instead of using them as statements.
 
 const BANK: u8 = 0x01;
+
+enum OPCODE {
+  PHB,
+  PHD,
+  PHK,
+  PLB,
+  PLD,
+  TAD,
+  TDA,
+  TSA,
+  WDM,
+}
 
 fn core() {
   rep #0x20
   sep #0x30
   xba
   xce
-  phb
-  plb
-  phd
-  pld
-  phk
-  tad
-  tda
-  tsa
-  wdm
   pea #0x0000
   pei (BANK)
   per 'table
