@@ -859,7 +859,7 @@ A source without a `#[crt(...)]` attribute produces a PRG image (see
 `$FFFA`-`$FFFF` vector area belongs to the system ROM, and the linker
 reports an error when a vector address falls outside every declared ROM
 section. A cartridge program may declare `nmi` and `irq` handlers when it
-declares a ROM section that contains `$FFF8`-`$FFFF`.
+declares a ROM section that contains `$FFFA`-`$FFFF`.
 
 ## Control flow
 
@@ -1685,7 +1685,7 @@ nop
 #### Interrupts
 
 The W65C02S uses the 6502-family vector layout. The lib defines the names
-`reset` ($FFFC), `nmi` ($FFFA), and `irq` ($FFF8) for `#[interrupt(...)]`.
+`reset` ($FFFC), `nmi` ($FFFA), and `irq` ($FFFE) for `#[interrupt(...)]`.
 
 The vectors live in the bank-0 system ROM, not in cartridge ROM. A PRG
 program must not declare interrupt vectors (see the Commander X16 cartridge

@@ -514,6 +514,203 @@ fn full_pipeline_link_resolved() {
     }
 }
 
+const BRANCH_LOOP_NES_SRC: &str = r#"
+    #[rom(org = 0xC000, bank = 0, maxsize = 0x4000)] {
+        #[interrupt(reset)]
+        fn main() {
+            lda #0
+            bmi 'loop_done
+            sta 0x20
+            'loop_done:
+            loop {
+                jmp main
+            }
+        }
+
+        #[interrupt(nmi)]
+        fn nmi() {
+            rti
+        }
+
+        #[interrupt(irq)]
+        fn irq() {
+            rti
+        }
+    }
+"#;
+
+/// The 6502 instruction length in bytes for the opcode set the code
+/// generator emits; unknown opcodes sweep as one byte. Kept in test code
+/// because the boundary assertions need the real opcodes of this
+/// source's stream and no production decoder lives in this crate.
+fn inst_len_6502(op: u8) -> usize {
+    match op {
+        // Relative branches plus immediate and zero-page forms.
+        0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0 | 0x05 | 0x06 | 0x24 | 0x25
+        | 0x26 | 0x29 | 0x45 | 0x46 | 0x49 | 0x64 | 0x65 | 0x66 | 0x69 | 0x84 | 0x85 | 0x86
+        | 0x89 | 0x91 | 0xA0 | 0xA2 | 0xA4 | 0xA5 | 0xA6 | 0xC0 | 0xC4 | 0xC5 | 0xC6 | 0xC9
+        | 0xE0 | 0xE4 | 0xE5 | 0xE6 | 0xE9 => 2,
+        // Absolute forms, including JSR and the absolute jumps.
+        0x0D | 0x0E | 0x20 | 0x2D | 0x2E | 0x4C | 0x4D | 0x4E | 0x6C | 0x6D | 0x6E | 0x8D
+        | 0xAD | 0xAC | 0xAE | 0xCD | 0xCE | 0xED | 0xEE | 0x1D | 0x3D | 0x5D | 0x7D | 0x9D
+        | 0xBD | 0xDD | 0xFD => 3,
+        _ => 1,
+    }
+}
+
+#[test]
+fn branch_loop_nes_keeps_stream_book_and_vectors_consistent() {
+    // Parse once, compile at -O0 and -O1, and link both. The label book
+    // and the code stream must agree at every optimizer level: an
+    // optimizer that shrinks the stream while the symbol offsets stay at
+    // their pre-shrink values books every later label past its true bytes
+    // and lands the absolute references mid-instruction.
+    let (ast, parse_diags) = parse_source(
+        "test.op",
+        BRANCH_LOOP_NES_SRC,
+        "rp2A03-nintendo-nes-ntsc",
+        &[],
+    );
+    let parse_errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == op_diagnostics::Severity::Error)
+        .collect();
+    assert!(parse_errors.is_empty(), "parser errors: {:?}", parse_errors);
+
+    let link_at = |level: u8, why: &str| {
+        let (obj, codegen_diags) = compile_source(&ast, level, &[], &[]);
+        let errors: Vec<_> = codegen_diags
+            .iter()
+            .filter(|d| d.severity == op_diagnostics::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "codegen errors at -O{level} {}: {:?}",
+            why,
+            errors
+        );
+        let (linked, link_diags) = link_source(&obj);
+        let errors: Vec<_> = link_diags
+            .iter()
+            .filter(|d| d.severity == op_diagnostics::Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "linker errors at -O{level} {}: {:?}",
+            why,
+            errors
+        );
+        linked
+    };
+    let l0 = link_at(0, "baseline");
+    let l1 = link_at(1, "optimized");
+
+    // The book equals the stream: the optimizer level may change the
+    // stream only together with the symbol offsets it books. This
+    // identity is a canary for the stream/book drift defect: a peephole
+    // that shrank only the stream, or one that shrank the stream while a
+    // surviving relocation or symbol kept an old offset, breaks one of
+    // these asserts. A future optimizer that legitimately shrinks this
+    // source with full book remapping must update these asserts to an
+    // explicit expected-bytes pin instead of removing them.
+    for (s0, s1) in l0.sections.iter().zip(l1.sections.iter()) {
+        assert_eq!(s0.name, s1.name);
+        assert_eq!(
+            s0.data, s1.data,
+            "stream bytes changed between -O0 and -O1 in section {}",
+            s0.name
+        );
+        for (sym0, sym1) in s0.symbols.iter().zip(s1.symbols.iter()) {
+            assert_eq!(sym0.name, sym1.name);
+            assert_eq!(
+                sym0.offset, sym1.offset,
+                "symbol {} booked different offsets at -O0 and -O1",
+                sym0.name
+            );
+        }
+    }
+
+    // The three 6502 vectors sit in the hardware slots and the ROM
+    // bytes write each handler pointer into its own slot.
+    let rom = l1
+        .sections
+        .iter()
+        .find(|s| s.kind == op_ir::SectionKind::Rom)
+        .expect("rom section exists");
+    let vectors: std::collections::HashMap<&str, u32> = l1
+        .interrupt_vectors
+        .iter()
+        .map(|v| (v.name.as_str(), v.address))
+        .collect();
+    assert_eq!(vectors.get("nmi"), Some(&0xFFFA), "nmi slot");
+    assert_eq!(vectors.get("reset"), Some(&0xFFFC), "reset slot");
+    assert_eq!(vectors.get("irq"), Some(&0xFFFE), "irq slot");
+
+    let addr_of = |name: &str| {
+        rom.org
+            + rom
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.offset)
+                .unwrap_or_else(|| panic!("symbol {name} is missing"))
+    };
+    let read16 = |addr: u32| {
+        let off = (addr - rom.org) as usize;
+        rom.data[off] as u32 | ((rom.data[off + 1] as u32) << 8)
+    };
+    assert_eq!(read16(0xFFFA), addr_of("nmi"), "nmi pointer bytes");
+    assert_eq!(read16(0xFFFC), addr_of("main"), "reset pointer bytes");
+    assert_eq!(read16(0xFFFE), addr_of("irq"), "irq pointer bytes");
+
+    // Every code symbol decodes at an instruction boundary of the
+    // optimized stream, and every absolute JSR/JMP target in the sweep
+    // is a boundary too.
+    let end = rom.org + rom.data.len() as u32;
+    let mut boundaries = std::collections::BTreeSet::new();
+    let mut refs: Vec<(u32, u8, u32)> = Vec::new();
+    let mut addr = rom.org;
+    while addr < end {
+        boundaries.insert(addr);
+        let off = (addr - rom.org) as usize;
+        let op = rom.data[off];
+        let target = if matches!(op, 0x20 | 0x4C | 0x6C) && off + 2 < rom.data.len() {
+            Some(rom.data[off + 1] as u32 | ((rom.data[off + 2] as u32) << 8))
+        } else {
+            None
+        };
+        if let Some(t) = target {
+            refs.push((addr, op, t));
+        }
+        addr += inst_len_6502(op) as u32;
+    }
+    for s in &rom.symbols {
+        if matches!(
+            s.kind,
+            op_ir::SymbolKind::Function | op_ir::SymbolKind::Label
+        ) {
+            let a = rom.org + s.offset;
+            assert!(
+                boundaries.contains(&a),
+                "code symbol {} at {:#06x} is not an instruction boundary",
+                s.name,
+                a
+            );
+        }
+    }
+    for (pos, op, target) in refs {
+        if target >= rom.org && target < end {
+            assert!(
+                boundaries.contains(&target),
+                "{} at {:#06x} targets {:#06x}, which is not a boundary",
+                if op == 0x20 { "JSR" } else { "JMP" },
+                pos,
+                target
+            );
+        }
+    }
+}
+
 // === Full pipeline with the std library ====================================
 
 /// Locate the std crate root: the `OP_STD_PATH` environment variable if it

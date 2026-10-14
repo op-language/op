@@ -11,7 +11,7 @@
 //! only on 6502-family targets: its decoder knows 6502 mnemonics only,
 //! and decoding SM83/Z80/68000 bytes as 6502 would corrupt them.
 
-use op_ir::{Relocation, Section, SectionKind, SymbolKind};
+use op_ir::{Relocation, Section, SectionKind, Symbol, SymbolKind};
 
 /// A decoded instruction for the optimizer to work with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,11 +186,23 @@ fn optimize_section(section: &mut Section) {
         }
     }
 
-    // Re-encode the instructions back into section data.
-    let (new_code, new_relocs) = reencode(&current, &code_relocs);
+    // Re-encode the instructions back into section data. `offset_map`
+    // holds the (old, new) start offsets of every surviving instruction.
+    let (new_code, new_relocs, offset_map) = reencode(&current, &code_relocs);
 
     // Reassemble: optimized code + preserved data suffix (if any).
     let code_size_delta = new_code.len() as i64 - code_end as i64;
+
+    // Rewrite the symbol offsets so the section bookkeeping describes the
+    // re-encoded stream instead of the pre-optimization layout.
+    remap_symbols(
+        &mut section.symbols,
+        &offset_map,
+        code_end,
+        code_size_delta,
+        new_code.len(),
+    );
+
     let mut new_data = new_code;
     if has_data_suffix {
         new_data.extend_from_slice(&data_suffix);
@@ -213,6 +225,59 @@ fn optimize_section(section: &mut Section) {
         }
     }
     section.relocations = all_relocs;
+}
+
+/// Return the new offset of the first surviving instruction boundary at or
+/// after `old`, or `fallback` (the end of the re-encoded code) when no
+/// surviving instruction starts at or after it.
+///
+/// `offset_map` holds the (old, new) start offsets of the surviving
+/// instructions. An offset that fell inside a removed instruction maps to
+/// the next surviving boundary; an offset that lies on a surviving boundary
+/// maps to that boundary's new position exactly.
+fn mapped_offset(offset_map: &[(usize, usize)], old: usize, fallback: usize) -> usize {
+    offset_map
+        .iter()
+        .find(|(old_start, _)| *old_start >= old)
+        .map(|(_, new_start)| *new_start)
+        .unwrap_or(fallback)
+}
+
+/// Rewrite `symbols` so their offsets describe the re-encoded section data.
+///
+/// Code-region symbols (`offset < code_end`) follow the surviving
+/// instruction boundaries; data-region symbols shift by the same code size
+/// delta that the data-region relocations use. Function symbol sizes are
+/// recomputed from the old extent so `offset + size` keeps describing the
+/// function's byte range in the new stream.
+fn remap_symbols(
+    symbols: &mut [Symbol],
+    offset_map: &[(usize, usize)],
+    code_end: usize,
+    code_size_delta: i64,
+    new_code_end: usize,
+) {
+    for sym in symbols.iter_mut() {
+        let old = sym.offset as usize;
+        // Code-region positions follow the surviving boundaries;
+        // data-region positions shift by the code size delta like the
+        // data-region relocations in optimize_section.
+        let new = if old < code_end {
+            mapped_offset(offset_map, old, new_code_end) as u32
+        } else {
+            (old as i64 + code_size_delta) as u32
+        };
+        if sym.kind == SymbolKind::Function {
+            let old_end = old + sym.size as usize;
+            let new_end = if old_end < code_end {
+                mapped_offset(offset_map, old_end, new_code_end) as u32
+            } else {
+                (old_end as i64 + code_size_delta) as u32
+            };
+            sym.size = new_end.saturating_sub(new);
+        }
+        sym.offset = new;
+    }
 }
 
 /// Decode raw section data bytes into a list of instructions.
@@ -778,7 +843,18 @@ fn try_branch_to_next(instructions: &[Instruction], i: usize) -> Option<usize> {
     if !is_branch {
         return None;
     }
-    // Check if the branch offset is 0 (branches to the next instruction).
+    // A branch statement that targets a label emits a placeholder zero
+    // operand plus a Branch8 relocation (the codegen LabelRef encoding), so
+    // a branch that carries a relocation is not a literal branch-to-next no
+    // matter what its operand byte holds. Removing a reloc-carrying branch
+    // would shrink the stream while the section's symbols and relocations
+    // still describe the old layout, and the linker would patch the
+    // displacement into whatever instruction later occupies the operand
+    // byte. Only a branch with no relocation can be a true literal
+    // branch-to-next.
+    if branch.reloc_index.is_some() {
+        return None;
+    }
     if branch.operand.len() == 1 && branch.operand[0] == 0 {
         return Some(1); // skip the branch
     }
@@ -835,10 +911,14 @@ fn try_stack_push_pop(instructions: &[Instruction], i: usize) -> Option<usize> {
 }
 
 /// Re-encode the instruction list back into section data and relocations.
+///
+/// Returns the re-encoded bytes, the relocations that still belong to a
+/// surviving instruction (remapped to the new offsets), and the
+/// (old, new) start-offset map of every surviving instruction boundary.
 fn reencode(
     instructions: &[Instruction],
     relocations: &[Relocation],
-) -> (Vec<u8>, Vec<Relocation>) {
+) -> (Vec<u8>, Vec<Relocation>, Vec<(usize, usize)>) {
     let mut data = Vec::new();
     let mut new_relocations = Vec::new();
 
@@ -878,11 +958,12 @@ fn reencode(
                 symbol: reloc.symbol.clone(),
                 addend: reloc.addend,
             });
-        } else {
-            // Keep the relocation as-is if we can't remap it.
-            new_relocations.push(reloc.clone());
         }
+        // A relocation that no surviving instruction owns belonged to a
+        // removed instruction. Keeping it would make the linker patch the
+        // stale offset, writing a displacement into the middle of a live
+        // instruction, so it is dropped here.
     }
 
-    (data, new_relocations)
+    (data, new_relocations, offset_map)
 }

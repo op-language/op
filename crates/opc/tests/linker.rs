@@ -350,6 +350,43 @@ fn link_writes_interrupt_vector_table() {
 }
 
 #[test]
+fn interrupt_vector_slots_match_6502_hardware() {
+    // The 6502-family hardware vector slots: NMI at $FFFA (65530),
+    // reset at $FFFC (65532), and IRQ/BRK at $FFFE (65534). The
+    // recorded slot decides where the linker writes each handler
+    // pointer, so a wrong constant parks a live handler pointer in
+    // pad bytes and leaves the real slot padding.
+    for cpu in [
+        "mos6502",
+        "mos65sc02",
+        "w65c02",
+        "rp2A03",
+        "rp2A07",
+        "vl65NC02",
+    ] {
+        assert_eq!(
+            opc::codegen::interrupt_vector_address(cpu, "nmi"),
+            Some(0xFFFA),
+            "{cpu} nmi slot"
+        );
+        assert_eq!(
+            opc::codegen::interrupt_vector_address(cpu, "reset"),
+            Some(0xFFFC),
+            "{cpu} reset slot"
+        );
+        assert_eq!(
+            opc::codegen::interrupt_vector_address(cpu, "irq"),
+            Some(0xFFFE),
+            "{cpu} irq slot"
+        );
+    }
+    assert_eq!(
+        opc::codegen::interrupt_vector_address("rp2A03", "bogus"),
+        None
+    );
+}
+
+#[test]
 fn link_extends_section_for_vector_table() {
     // ROM at 0xC000, maxsize 0x4000, but only 3 bytes of data. The
     // reset vector at 0xFFFC is beyond the current data length. The
