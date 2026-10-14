@@ -4417,7 +4417,7 @@ pub fn interrupt_vector_address(cpu: &str, interrupt_name: &str) -> Option<u32> 
             match interrupt_name {
                 "reset" => Some(0xFFFC),
                 "nmi" => Some(0xFFFA),
-                "irq" => Some(0xFFF8),
+                "irq" => Some(0xFFFE),
                 _ => None,
             }
         }

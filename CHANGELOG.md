@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distance fits -128..=127, and the absolute jump otherwise. The
   fallback is silent and produces no diagnostic.
 
+### Fixed
+- `opc` optimizer: the branch-to-next peephole skips a branch that
+  carries a relocation. A branch to a label emits a placeholder operand
+  plus a `Branch8` relocation, so the peephole saw a literal zero
+  displacement and shrank the stream while the symbol book kept the old
+  offsets and the remaining relocations kept stale byte positions. The
+  optimizer now drops relocations it cannot remap and remaps section
+  symbols to the new offsets, so `-O0` and `-O1` builds of the same
+  source keep the same stream and book. The strength-reduce peephole
+  applies the same rule and skips an `adc` that carries a relocation.
+- `opc` codegen: the 6502-family `irq` interrupt vector resolves to
+  `$FFFE`, the hardware IRQ/BRK slot, not `$FFF8`.
+
 ## [0.13.0]
 
 ### Added

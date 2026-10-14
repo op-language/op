@@ -1015,6 +1015,223 @@ fn optimizer_relocation_remaps_to_instruction_boundary() {
 }
 
 #[test]
+fn optimizer_keeps_conditional_branch_to_label() {
+    // A conditional branch that targets a label emits a placeholder zero
+    // operand plus a Branch8 relocation. That is not a literal
+    // branch-to-next, so the optimizer must keep the branch, keep its
+    // relocation at the correct offset, and keep the label symbol offset
+    // describing the re-encoded stream.
+    use op_ir::RelocKind;
+    let src = "#[rom(org = 0, bank = 0, maxsize = 0x100)] {
+        fn f() {
+            lda #0
+            bmi 'skip
+            'skip:
+            rts
+        }
+    }";
+    let opt = compile_with_opt(src, 1);
+    let nopt = compile_with_opt(src, 0);
+    let rom = opt
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("ROM section must exist");
+    let rom0 = nopt
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Rom)
+        .expect("ROM section must exist");
+    // The branch must survive: the optimized stream is byte-identical to
+    // the -O0 stream (lda #0, bmi, rts, implicit rts = 6 bytes).
+    assert_eq!(
+        rom.data, rom0.data,
+        "optimizer deleted a reloc-carrying branch"
+    );
+    assert_eq!(rom.data.len(), 6);
+    assert_eq!(
+        &rom.data[2..4],
+        &[0x30, 0x00],
+        "bmi opcode and placeholder operand must survive"
+    );
+    // The Branch8 relocation still points at the bmi operand byte.
+    let reloc = rom
+        .relocations
+        .iter()
+        .find(|r| r.kind == RelocKind::Branch8 && r.symbol == "skip")
+        .expect("branch-to-label relocation must survive optimization");
+    assert_eq!(
+        reloc.offset, 3,
+        "relocation must point at the bmi operand byte"
+    );
+    // The book agrees with the stream: the label sits on the rts opcode.
+    let label = rom
+        .symbols
+        .iter()
+        .find(|s| s.name == "skip")
+        .expect("label symbol must exist");
+    assert_eq!(label.offset, 4);
+    assert_eq!(rom.data[label.offset as usize], 0x60);
+}
+
+#[test]
+fn optimizer_drops_relocation_of_removed_instruction() {
+    // An instruction that a transform removes must take its relocation
+    // with it. Keeping the relocation would leave the linker patching a
+    // stale offset beyond the end of (or inside) the re-encoded stream.
+    //
+    // The strength-reduce transform (lda #0, clc, adc #0 -> lda #0)
+    // removes the clc and the adc. The adc operand byte carries a Lo8
+    // relocation, so the re-encoded stream has no instruction left to own
+    // it and the optimizer must drop it.
+    use op_ir::{RelocKind, Relocation, Section, SectionKind};
+    use opc::optimizer::optimize;
+    let mut sections = vec![Section {
+        name: "rom_bank0".to_string(),
+        kind: SectionKind::Rom,
+        org: 0xC000,
+        bank: 0,
+        maxsize: 0x4000,
+        symbols: Vec::new(),
+        relocations: vec![Relocation {
+            offset: 4, // the adc #0 operand byte
+            kind: RelocKind::Lo8,
+            symbol: "addr".to_string(),
+            addend: 0,
+        }],
+        data: vec![0xA9, 0x00, 0x18, 0x69, 0x00],
+    }];
+    optimize(&mut sections, 1, "mos6502");
+
+    // Only lda #0 survives.
+    assert_eq!(sections[0].data, vec![0xA9, 0x00]);
+    // The removed instruction's relocation is gone: no stale relocation
+    // remains, and every surviving relocation points inside the stream.
+    assert!(sections[0].relocations.is_empty());
+    assert!(sections[0]
+        .relocations
+        .iter()
+        .all(|r| (r.offset as usize) < sections[0].data.len()));
+}
+
+#[test]
+fn optimizer_symbol_offsets_track_removed_instruction() {
+    // After a transform removes an instruction, every section symbol must
+    // move to the true position in the re-encoded stream.
+    //
+    // Three instructions: sta 00, sta 00, lda #1. The redundant-store
+    // transform (sta X then sta X -> sta X) removes only the middle
+    // instruction. The symbols are recorded before the removal (offset 0),
+    // at the removed instruction (offset 2), after the removal (offset 4,
+    // the surviving third instruction), and at the end of the code
+    // (offset 6).
+    use op_ir::{Section, SectionKind, Symbol, SymbolKind};
+    use opc::optimizer::optimize;
+    let mut sections = vec![Section {
+        name: "rom_bank0".to_string(),
+        kind: SectionKind::Rom,
+        org: 0xC000,
+        bank: 0,
+        maxsize: 0x4000,
+        symbols: vec![
+            Symbol {
+                name: "f".to_string(),
+                offset: 0,
+                size: 6,
+                kind: SymbolKind::Function,
+                is_pub: false,
+            },
+            Symbol {
+                name: "head".to_string(),
+                offset: 0,
+                size: 0,
+                kind: SymbolKind::Label,
+                is_pub: false,
+            },
+            Symbol {
+                name: "after_removed".to_string(),
+                offset: 2,
+                size: 0,
+                kind: SymbolKind::Label,
+                is_pub: false,
+            },
+            Symbol {
+                name: "third".to_string(),
+                offset: 4,
+                size: 0,
+                kind: SymbolKind::Label,
+                is_pub: false,
+            },
+            Symbol {
+                name: "code_end".to_string(),
+                offset: 6,
+                size: 0,
+                kind: SymbolKind::Label,
+                is_pub: false,
+            },
+        ],
+        relocations: Vec::new(),
+        data: vec![0x85, 0x00, 0x85, 0x00, 0xA9, 0x01],
+    }];
+    optimize(&mut sections, 1, "mos6502");
+
+    // Only the middle instruction was removed: the stream is now the kept
+    // sta followed by lda #1, 4 bytes.
+    assert_eq!(sections[0].data, vec![0x85, 0x00, 0xA9, 0x01]);
+
+    let sym = |name: &str| {
+        sections[0]
+            .symbols
+            .iter()
+            .find(|s| s.name == name)
+            .expect("symbol must exist")
+    };
+    // Symbol before the removal stays on its surviving instruction.
+    assert_eq!(sym("head").offset, 0);
+    // Symbol at the removed instruction lands on the next surviving
+    // boundary (the third instruction, now at offset 2).
+    assert_eq!(sym("after_removed").offset, 2);
+    // The third instruction's symbol equals its true new position: the
+    // byte at that offset is the surviving lda opcode, the same
+    // instruction the label marked before optimization.
+    assert_eq!(sym("third").offset, 2);
+    assert_eq!(sections[0].data[2], 0xA9);
+    // Symbol at the end of the old stream maps to the new stream end.
+    assert_eq!(sym("code_end").offset, 4);
+    assert_eq!(sym("code_end").offset as usize, sections[0].data.len());
+    // The function symbol still covers the optimized body.
+    let f = sym("f");
+    assert_eq!(f.offset, 0);
+    assert_eq!(f.size, 4);
+}
+
+#[test]
+fn optimizer_removes_literal_branch_to_next() {
+    // A branch with a literal zero displacement and no relocation is a
+    // true branch to the next instruction; the transform must keep
+    // working for it. (A branch-to-label statement instead emits a
+    // placeholder operand plus a relocation and must survive.)
+    use op_ir::{Section, SectionKind};
+    use opc::optimizer::optimize;
+    let mut sections = vec![Section {
+        name: "rom_bank0".to_string(),
+        kind: SectionKind::Rom,
+        org: 0xC000,
+        bank: 0,
+        maxsize: 0x4000,
+        symbols: Vec::new(),
+        relocations: Vec::new(),
+        data: vec![0xD0, 0x00, 0xEA], // bne +0 (literal), nop
+    }];
+    optimize(&mut sections, 1, "mos6502");
+    assert_eq!(
+        sections[0].data,
+        vec![0xEA],
+        "literal branch-to-next must still be removed"
+    );
+}
+
+#[test]
 fn optimizer_changes_rom_but_not_chr() {
     // Build an object with one ROM section and one CHR section. Run the
     // optimizer at level 1. The ROM data must change (the redundant load is
@@ -1175,9 +1392,9 @@ fn vector_address_6502_family() {
     use opc::codegen::interrupt_vector_address;
     assert_eq!(interrupt_vector_address("mos6502", "reset"), Some(0xFFFC));
     assert_eq!(interrupt_vector_address("mos6502", "nmi"), Some(0xFFFA));
-    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("mos6502", "irq"), Some(0xFFFE));
     assert_eq!(interrupt_vector_address("rp2A03", "reset"), Some(0xFFFC));
-    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("vl65NC02", "irq"), Some(0xFFFE));
 }
 
 #[test]
@@ -1457,7 +1674,7 @@ fn rp2a03_interrupt_vector_nmi() {
 #[test]
 fn rp2a03_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("rp2A03", "irq"), Some(0xFFFE));
 }
 
 #[test]
@@ -1475,7 +1692,7 @@ fn rp2a07_interrupt_vector_nmi() {
 #[test]
 fn rp2a07_interrupt_vector_irq() {
     use opc::codegen::interrupt_vector_address;
-    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("rp2A07", "irq"), Some(0xFFFE));
 }
 
 // === W65C02 CPU tests -------------------------------------------------------
@@ -1597,7 +1814,7 @@ fn vector_address_w65c02() {
     use opc::codegen::interrupt_vector_address;
     assert_eq!(interrupt_vector_address("w65c02", "reset"), Some(0xFFFC));
     assert_eq!(interrupt_vector_address("w65c02", "nmi"), Some(0xFFFA));
-    assert_eq!(interrupt_vector_address("w65c02", "irq"), Some(0xFFF8));
+    assert_eq!(interrupt_vector_address("w65c02", "irq"), Some(0xFFFE));
     // The W65C02S has no other vector names.
     assert_eq!(interrupt_vector_address("w65c02", "vblank"), None);
 }
